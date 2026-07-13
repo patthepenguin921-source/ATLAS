@@ -15,8 +15,6 @@ env:
     value: sb_publishable_WZrk1dYqfEaKJfW_TicRcw_D5pLtHrL
     availability: [BUILD, RUNTIME]
 
-  # TODO: fill in after the backend is deployed to Cloud Run (step 2 of the
-  # deployment guide) — e.g. https://atlas-backend-xxxxxxxx-uc.a.run.app
   - variable: NEXT_PUBLIC_API_BASE_URL
-    value: https://REPLACE-WITH-YOUR-CLOUD-RUN-URL
+    value: https://atlas-backend-573667136295.us-east4.run.app
     availability: [BUILD, RUNTIME]

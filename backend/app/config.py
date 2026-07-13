@@ -15,7 +15,6 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_anon_key: str = ""
     supabase_service_role_key: str = ""
-    supabase_jwt_secret: str = ""
     atlas_storage_bucket: str = "atlas-documents"
 
     # ---- Reasoning engine (pluggable provider) ----

@@ -1,7 +1,7 @@
 # Atlas · Backend (Intelligence Layer)
 
-FastAPI service that grounds Claude in the student's real academic memory and
-exposes the multi-agent system.
+FastAPI service that grounds the reasoning engine in the student's real
+academic memory and exposes the multi-agent system.
 
 ## Run locally
 
@@ -15,9 +15,12 @@ uvicorn app.main:app --reload --port 8000
 
 Open http://localhost:8000/docs for the interactive API.
 
-- Works **keyless** for development: without Supabase/Claude keys the app still
+- Works **keyless** for development: without Supabase/LLM keys the app still
   boots (`/health` reports what's configured). Embeddings fall back to a local
   deterministic encoder. Add keys to unlock persistence + reasoning.
+- Reasoning defaults to **Groq's free tier** (`ATLAS_LLM_PROVIDER=groq` +
+  `GROQ_API_KEY`). Set `ATLAS_LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`
+  to use Claude instead.
 - Dev auth shortcut: when `ATLAS_ENV=development` and no `SUPABASE_JWT_SECRET`
   is set, pass `X-Atlas-Dev-User: <uuid>` to act as a user without a real JWT.
 
@@ -34,7 +37,7 @@ app/
   main.py            FastAPI app + router mounting
   config.py          env-driven settings
   core/              supabase client, JWT auth, generic CRUD factory
-  llm/claude.py      grounded reasoning wrapper (Claude)
+  llm/claude.py      grounded reasoning wrapper (pluggable: groq | anthropic)
   embeddings/        pluggable embeddings (voyage | openai | local)
   services/          memory retrieval, ingestion, knowledge model, analytics
   agents/            Planner, Tutor, Analyst, Archivist, Coach (+ base/registry)

@@ -18,7 +18,15 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str = ""
     atlas_storage_bucket: str = "atlas-documents"
 
-    # ---- Anthropic / Claude ----
+    # ---- Reasoning engine (pluggable provider) ----
+    atlas_llm_provider: str = "groq"          # groq (free) | anthropic (paid, higher quality)
+
+    # Groq — free tier, default
+    groq_api_key: str = ""
+    atlas_groq_model: str = "llama-3.3-70b-versatile"
+    atlas_groq_fast_model: str = "llama-3.1-8b-instant"
+
+    # Anthropic / Claude — optional upgrade path
     anthropic_api_key: str = ""
     atlas_claude_model: str = "claude-opus-4-8"
     atlas_claude_fast_model: str = "claude-haiku-4-5-20251001"
@@ -43,8 +51,10 @@ class Settings(BaseSettings):
         return bool(self.supabase_url and self.supabase_service_role_key)
 
     @property
-    def has_claude(self) -> bool:
-        return bool(self.anthropic_api_key)
+    def has_llm(self) -> bool:
+        if self.atlas_llm_provider == "anthropic":
+            return bool(self.anthropic_api_key)
+        return bool(self.groq_api_key)
 
 
 @lru_cache

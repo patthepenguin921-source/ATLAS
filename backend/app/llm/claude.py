@@ -1,6 +1,13 @@
-"""Claude — Atlas's primary reasoning engine.
+"""Reasoning engine — Atlas's grounded LLM layer.
 
-Claude is NOT the memory. It receives relevant facts + semantic context
+Pluggable provider so the reasoning engine does not depend on any single
+vendor:
+
+    groq       — free tier (Llama 3.3 70B / 3.1 8B), the default. $0 forever.
+    anthropic  — Claude, optional upgrade for higher-quality reasoning
+                 (needs ANTHROPIC_API_KEY). Set ATLAS_LLM_PROVIDER=anthropic.
+
+The engine is NOT the memory. It receives relevant facts + semantic context
 retrieved from Atlas's databases and reasons over them. Every agent grounds
 its prompts in the student's actual academic history.
 """
@@ -10,20 +17,21 @@ import json
 import re
 from typing import Any
 
+import httpx
 from anthropic import AsyncAnthropic
 
 from app.config import settings
 
-_client: AsyncAnthropic | None = None
+_anthropic_client: AsyncAnthropic | None = None
 
 
-def _get_client() -> AsyncAnthropic:
-    global _client
-    if not settings.has_claude:
+def _get_anthropic_client() -> AsyncAnthropic:
+    global _anthropic_client
+    if not settings.anthropic_api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured.")
-    if _client is None:
-        _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
+    if _anthropic_client is None:
+        _anthropic_client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    return _anthropic_client
 
 
 async def complete(
@@ -35,8 +43,23 @@ async def complete(
     temperature: float = 0.4,
     fast: bool = False,
 ) -> str:
-    """Return Claude's text response for a grounded conversation."""
-    client = _get_client()
+    """Return the reasoning engine's text response for a grounded conversation."""
+    if settings.atlas_llm_provider == "anthropic":
+        return await _complete_anthropic(
+            system=system, messages=messages, model=model,
+            max_tokens=max_tokens, temperature=temperature, fast=fast,
+        )
+    return await _complete_groq(
+        system=system, messages=messages, model=model,
+        max_tokens=max_tokens, temperature=temperature, fast=fast,
+    )
+
+
+async def _complete_anthropic(
+    *, system: str, messages: list[dict[str, Any]], model: str | None,
+    max_tokens: int, temperature: float, fast: bool,
+) -> str:
+    client = _get_anthropic_client()
     chosen = model or (settings.atlas_claude_fast_model if fast else settings.atlas_claude_model)
     resp = await client.messages.create(
         model=chosen,
@@ -48,6 +71,28 @@ async def complete(
     return "".join(block.text for block in resp.content if block.type == "text").strip()
 
 
+async def _complete_groq(
+    *, system: str, messages: list[dict[str, Any]], model: str | None,
+    max_tokens: int, temperature: float, fast: bool,
+) -> str:
+    if not settings.groq_api_key:
+        raise RuntimeError("GROQ_API_KEY is not configured.")
+    chosen = model or (settings.atlas_groq_fast_model if fast else settings.atlas_groq_model)
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+            json={
+                "model": chosen,
+                "messages": [{"role": "system", "content": system}, *messages],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+
+
 async def complete_json(
     *,
     system: str,
@@ -57,7 +102,7 @@ async def complete_json(
     temperature: float = 0.2,
     fast: bool = False,
 ) -> Any:
-    """Ask Claude for structured JSON and parse it robustly."""
+    """Ask the reasoning engine for structured JSON and parse it robustly."""
     system_json = (
         system
         + "\n\nRespond with a single valid JSON value and nothing else. "

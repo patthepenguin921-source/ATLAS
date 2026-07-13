@@ -86,7 +86,7 @@ async def upload_document(
 
     # 4) enrich metadata + knowledge-graph links (best-effort, needs Claude)
     enrichment = None
-    if enrich and settings.has_claude and text.strip():
+    if enrich and settings.has_llm and text.strip():
         try:
             enrichment = await Archivist().enrich(user.id, doc_id, text)
         except Exception as e:
@@ -105,7 +105,7 @@ async def ingest_text(body: IngestTextRequest, user: CurrentUser = Depends(get_c
     })
     report = await ingestion.ingest_document(doc_id, user.id, body.text)
     enrichment = None
-    if body.enrich and settings.has_claude and body.text.strip():
+    if body.enrich and settings.has_llm and body.text.strip():
         try:
             enrichment = await Archivist().enrich(user.id, doc_id, body.text)
         except Exception as e:

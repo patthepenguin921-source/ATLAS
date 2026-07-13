@@ -45,7 +45,8 @@ async def health():
         "version": __version__,
         "env": settings.atlas_env,
         "supabase_configured": settings.has_supabase,
-        "claude_configured": settings.has_claude,
+        "llm_configured": settings.has_llm,
+        "llm_provider": settings.atlas_llm_provider,
         "embeddings_provider": settings.embeddings_provider,
     }
 

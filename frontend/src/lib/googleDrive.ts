@@ -46,6 +46,9 @@ async function getAccessToken(): Promise<string> {
     const client = window.google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
       scope: "https://www.googleapis.com/auth/drive.readonly",
+      // Always show the account chooser so a student can pick which Google
+      // account to import from (personal vs. school, etc.) on every import.
+      prompt: "select_account",
       callback: (resp: any) => {
         if (resp.error) reject(new Error(resp.error));
         else resolve(resp.access_token);

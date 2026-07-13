@@ -39,7 +39,11 @@ class Settings(BaseSettings):
 
     # ---- Server ----
     atlas_env: str = "development"
-    atlas_cors_origins: str = "http://localhost:3000"
+    # Default to allowing any origin: Atlas authenticates with Bearer tokens
+    # (not cookies), so CORS isn't a security boundary here, and a permissive
+    # default means cross-origin document uploads work without extra config.
+    # Override with a comma-separated allow-list to lock this down.
+    atlas_cors_origins: str = "*"
 
     @property
     def cors_origins(self) -> list[str]:

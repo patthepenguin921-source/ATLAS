@@ -63,6 +63,32 @@ def convert_image_to_pdf(content: bytes, filename: str = "") -> tuple[bytes, str
     return pdf_bytes, f"{base}.pdf"
 
 
+def ocr_image(content: bytes) -> str:
+    """Best-effort OCR of a photo/scan so its text becomes searchable.
+
+    Uses Tesseract via pytesseract. Degrades gracefully to an empty string if
+    the OCR engine isn't installed or the image can't be read, so uploads never
+    fail on account of OCR.
+    """
+    import io
+
+    try:
+        import pytesseract
+        from PIL import Image
+
+        try:  # HEIC support for iPhone photos
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+        except Exception:
+            pass
+
+        img = Image.open(io.BytesIO(content))
+        return (pytesseract.image_to_string(img) or "").strip()
+    except Exception:
+        return ""
+
+
 # --------------------------------------------------------------------------
 # Text extraction
 # --------------------------------------------------------------------------

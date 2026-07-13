@@ -29,9 +29,12 @@ async def _store_and_ingest(
     if not content:
         raise HTTPException(400, "Empty file")
 
-    # iPhone photos & scans come in as images — normalize them to PDF so every
-    # document is a uniform, viewable file.
+    # iPhone photos & scans come in as images — OCR the text (so it's
+    # searchable), then normalize them to PDF so every document is a uniform,
+    # viewable file.
+    ocr_text = ""
     if ingestion.is_image(content_type, filename):
+        ocr_text = ingestion.ocr_image(content)
         try:
             content, filename = ingestion.convert_image_to_pdf(content, filename)
             content_type = "application/pdf"
@@ -60,8 +63,11 @@ async def _store_and_ingest(
         "storage_path": storage_path,
     })
 
-    # 3) extract + ingest (chunk + embed)
+    # 3) extract + ingest (chunk + embed). A converted photo has no PDF text
+    # layer, so fall back to the OCR'd text for images.
     text = ingestion.extract_text(content, content_type or "", filename or "")
+    if not text.strip() and ocr_text.strip():
+        text = ocr_text
     report = await ingestion.ingest_document(doc_id, user_id, text)
 
     # 4) enrich metadata + knowledge-graph links (best-effort, needs an LLM)

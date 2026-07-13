@@ -7,30 +7,72 @@
 }
 
 body {
-  @apply bg-atlas-bg text-atlas-text antialiased;
+  @apply bg-atlas-bg text-atlas-text antialiased font-sans;
+  font-feature-settings: "ss01", "cv01";
+}
+
+h1, h2, h3 {
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+  @apply tracking-tight;
+}
+
+/* Subtle textured backdrop so the ink background doesn't read as flat black. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(60rem 60rem at 85% -10%, rgba(182, 243, 107, 0.05), transparent 60%),
+    radial-gradient(50rem 50rem at -10% 110%, rgba(125, 211, 192, 0.04), transparent 60%);
 }
 
 @layer components {
   .card {
-    @apply bg-atlas-panel border border-atlas-border rounded-xl p-4;
+    @apply bg-atlas-panel border border-atlas-border rounded-2xl p-4 shadow-soft;
   }
   .card-hover {
-    @apply transition-colors hover:border-atlas-accent/60;
+    @apply transition-all duration-150 hover:border-atlas-accent/50 hover:shadow-glow;
   }
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2
-           text-sm font-medium transition-colors disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2
+           text-sm font-medium transition-all duration-150 disabled:opacity-50
+           disabled:cursor-not-allowed;
   }
   .btn-primary {
-    @apply btn bg-atlas-accent text-white hover:bg-indigo-500;
+    @apply btn bg-atlas-accent text-atlas-bg font-semibold
+           hover:brightness-110 hover:shadow-glow active:brightness-95;
   }
   .btn-ghost {
-    @apply btn bg-atlas-panel2 text-atlas-text hover:bg-atlas-border;
+    @apply btn bg-atlas-panel2 text-atlas-text border border-atlas-border
+           hover:border-atlas-accent/40 hover:text-atlas-accent;
   }
   .input {
-    @apply w-full rounded-lg bg-atlas-panel2 border border-atlas-border px-3 py-2
-           text-sm outline-none focus:border-atlas-accent placeholder:text-atlas-muted;
+    @apply w-full rounded-xl bg-atlas-panel2 border border-atlas-border px-3 py-2
+           text-sm outline-none transition-colors placeholder:text-atlas-muted
+           focus:border-atlas-accent/70 focus:ring-2 focus:ring-atlas-accent/15;
   }
   .label { @apply text-xs font-medium text-atlas-muted mb-1 block; }
-  .pill { @apply text-xs px-2 py-0.5 rounded-full border border-atlas-border; }
+  .pill {
+    @apply text-xs px-2.5 py-0.5 rounded-full border border-atlas-border
+           bg-atlas-panel2/60;
+  }
+  .skeleton {
+    @apply relative overflow-hidden rounded-lg bg-atlas-panel2;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0 -translate-x-full;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.05),
+      transparent
+    );
+    animation: shimmer 1.4s infinite;
+  }
 }
+
+/* Keep app content above the fixed backdrop layer. */
+#__next, main, aside { position: relative; z-index: 1; }

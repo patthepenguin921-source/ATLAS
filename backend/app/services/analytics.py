@@ -88,9 +88,25 @@ async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str
         difficulty = float(a.get("difficulty") or 3)
         heavy = {"test", "exam", "project", "essay"}.intersection({a["category"]})
         risk = (weight * difficulty * (2.0 if heavy else 1.0)) / days_left
-        scored.append({**a, "risk_score": round(risk, 2), "days_left": round(days_left, 1)})
+        scored.append({
+            **a,
+            "risk_score": round(risk, 2),
+            "risk_level": _risk_level(risk),
+            "days_left": round(days_left, 1),
+        })
     scored.sort(key=lambda x: x["risk_score"], reverse=True)
     return scored[:limit]
+
+
+def _risk_level(score: float) -> str:
+    """Bucket a raw risk score into a human label (low/medium/high/extreme)."""
+    if score >= 120:
+        return "extreme"
+    if score >= 60:
+        return "high"
+    if score >= 25:
+        return "medium"
+    return "low"
 
 
 async def snapshot(user_id: str) -> dict[str, Any]:

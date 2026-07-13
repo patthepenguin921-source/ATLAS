@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Stat, Section, Empty, Loading, Badge, gradeTone } from "@/components/ui";
-import { apiGet, apiPatch } from "@/lib/api";
+import { apiGet, apiPatch, apiPost } from "@/lib/api";
 
 type CourseLevel = "regular" | "honors" | "ap" | "dual_enrollment" | "ib";
 
@@ -25,12 +25,10 @@ const LEVEL_BADGE: Record<CourseLevel, string> = {
   ib: "IB",
 };
 
-const LEVEL_WEIGHT: Record<CourseLevel, number> = {
-  regular: 5.0,
-  honors: 5.5,
-  ap: 6.0,
-  dual_enrollment: 6.0,
-  ib: 6.0,
+const SEMESTER_LABEL: Record<string, string> = {
+  full_year: "Full year",
+  s1: "Semester 1",
+  s2: "Semester 2",
 };
 
 const assignmentStatusTone = (s: string) =>
@@ -68,10 +66,14 @@ export default function CourseDetailPage() {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<EditForm | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [semesters, setSemesters] = useState<any[]>([]);
+  const [splitting, setSplitting] = useState(false);
+  const [newTeacher, setNewTeacher] = useState("");
+  const [newTerm, setNewTerm] = useState("");
 
   async function load() {
     try {
-      const [c, t, tm, a, g, e, d, an, mi, ss] = await Promise.all([
+      const [c, t, tm, a, g, e, d, an, mi, ss, sem] = await Promise.all([
         apiGet(`/courses/${id}`),
         apiGet("/teachers"),
         apiGet("/terms"),
@@ -82,10 +84,12 @@ export default function CourseDetailPage() {
         apiGet(`/announcements?course_id=${id}`),
         apiGet(`/mistakes?course_id=${id}`),
         apiGet(`/study-sessions?course_id=${id}`),
+        apiGet(`/courses/${id}/semesters`).catch(() => []),
       ]);
       setCourse(c);
       setTeachers(t ?? []);
       setTerms(tm ?? []);
+      setSemesters(sem ?? []);
       setAssignments(a ?? []);
       setGrades(g ?? []);
       setEvents(e ?? []);
@@ -130,6 +134,38 @@ export default function CourseDetailPage() {
     await load();
   }
 
+  async function addTeacher() {
+    const name = newTeacher.trim();
+    if (!name || !form) return;
+    const created = await apiPost("/teachers", { name });
+    setTeachers((prev) => [...prev, created]);
+    setForm({ ...form, teacher_id: created.id });
+    setNewTeacher("");
+  }
+
+  async function addTerm() {
+    const name = newTerm.trim();
+    if (!name || !form) return;
+    const created = await apiPost("/terms", { name });
+    setTerms((prev) => [...prev, created]);
+    setForm({ ...form, term_id: created.id });
+    setNewTerm("");
+  }
+
+  async function splitSemesters() {
+    setSplitting(true);
+    try {
+      // S1 keeps the current level as an HN prep lab (5.5); S2 becomes AP (6.0).
+      await apiPost(`/courses/${id}/split-semesters`, {
+        s1_has_hn_prep_lab: true,
+        s2_level: "ap",
+      });
+      await load();
+    } finally {
+      setSplitting(false);
+    }
+  }
+
   if (error) {
     return (
       <AppShell title="Course" subtitle="Something went wrong">
@@ -146,9 +182,10 @@ export default function CourseDetailPage() {
   }
 
   const level = (course.course_level ?? "regular") as CourseLevel;
-  const weight = course.has_hn_prep_lab ? 5.5 : LEVEL_WEIGHT[level];
   const teacherName = teachers.find((t) => t.id === course.teacher_id)?.name;
   const termName = terms.find((t) => t.id === course.term_id)?.name;
+  const currentSemester = (course.semester ?? "full_year") as string;
+  const isSplit = semesters.length > 1;
 
   return (
     <AppShell
@@ -163,10 +200,39 @@ export default function CourseDetailPage() {
         </>
       }
     >
-      <div className="flex flex-wrap gap-2 mb-6">
+      <div className="flex flex-wrap items-center gap-2 mb-6">
         {level !== "regular" && <Badge tone="accent">{LEVEL_BADGE[level]}</Badge>}
+        {currentSemester !== "full_year" && (
+          <Badge tone="accent">{SEMESTER_LABEL[currentSemester]}</Badge>
+        )}
         {course.has_hn_prep_lab && <Badge tone="warn">HN Prep Lab</Badge>}
         {course.has_ap_prep_lab && <Badge tone="warn">AP Prep Lab</Badge>}
+
+        {isSplit ? (
+          <div className="flex items-center gap-1.5 ml-auto">
+            <span className="text-xs text-atlas-muted">Semesters:</span>
+            {semesters.map((s) => (
+              <Link
+                key={s.id}
+                href={`/courses/${s.id}`}
+                className={`pill hover:border-atlas-accent/50 ${
+                  s.id === id ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"
+                }`}
+              >
+                {SEMESTER_LABEL[s.semester] ?? s.semester} · {LEVEL_BADGE[s.course_level as CourseLevel] ?? s.course_level}
+              </Link>
+            ))}
+          </div>
+        ) : (
+          <button
+            className="btn-ghost ml-auto text-xs py-1.5"
+            onClick={splitSemesters}
+            disabled={splitting}
+            title="Split this class into two linked semester courses (e.g. HN 5.5 → AP 6.0)"
+          >
+            {splitting ? "Splitting…" : "Split into semesters"}
+          </button>
+        )}
       </div>
 
       {editing && form && (
@@ -219,6 +285,13 @@ export default function CourseDetailPage() {
               <option value="">—</option>
               {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
+            <div className="flex gap-1.5 mt-1.5">
+              <input className="input !py-1 text-xs" placeholder="Add a new teacher…"
+                value={newTeacher} onChange={(e) => setNewTeacher(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTeacher(); } }} />
+              <button type="button" className="btn-ghost text-xs py-1 shrink-0"
+                onClick={addTeacher} disabled={!newTeacher.trim()}>Add</button>
+            </div>
           </div>
           <div>
             <label className="label">Term</label>
@@ -227,6 +300,13 @@ export default function CourseDetailPage() {
               <option value="">—</option>
               {terms.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
+            <div className="flex gap-1.5 mt-1.5">
+              <input className="input !py-1 text-xs" placeholder="Add a new term…"
+                value={newTerm} onChange={(e) => setNewTerm(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTerm(); } }} />
+              <button type="button" className="btn-ghost text-xs py-1 shrink-0"
+                onClick={addTerm} disabled={!newTerm.trim()}>Add</button>
+            </div>
           </div>
 
           <div className="md:col-span-2 flex flex-wrap items-center gap-4">
@@ -246,13 +326,12 @@ export default function CourseDetailPage() {
         </form>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8">
         <Stat
           label="Current grade"
           value={course.current_grade != null ? `${course.current_grade}% ${course.current_letter ?? ""}` : "—"}
           tone={gradeTone(course.current_grade)}
         />
-        <Stat label="Weighted scale" value={`${weight.toFixed(1)} max`} />
         <Stat label="Credit hours" value={course.credit_hours ?? "—"} />
         <Stat
           label="Teacher"

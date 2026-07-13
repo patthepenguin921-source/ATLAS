@@ -34,8 +34,11 @@ interface Course {
   has_ap_prep_lab: boolean;
   current_grade?: number | null;
   current_letter?: string | null;
+  semester?: string;
   sort_order: number;
 }
+
+const SEMESTER_SHORT: Record<string, string> = { s1: "S1", s2: "S2" };
 
 const emptyForm = {
   name: "",
@@ -192,6 +195,9 @@ export default function CoursesPage() {
                 <div className="text-xs text-atlas-muted">{c.code || c.subject || "—"}</div>
               </div>
               <div className="flex flex-col items-end gap-1">
+                {c.semester && c.semester !== "full_year" && (
+                  <Badge tone="accent">{SEMESTER_SHORT[c.semester] ?? c.semester}</Badge>
+                )}
                 {c.course_level !== "regular" && (
                   <Badge tone="accent">{LEVEL_BADGE[c.course_level]}</Badge>
                 )}

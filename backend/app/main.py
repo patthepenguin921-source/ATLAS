@@ -30,10 +30,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# When ATLAS_CORS_ORIGINS is "*" we can't also send credentials (browsers
+# reject Access-Control-Allow-Origin: * with credentials), so fall back to a
+# regex that echoes any origin. Otherwise use the explicit allow-list. This is
+# what lets cross-origin multipart uploads (Documents) succeed against a
+# separately-hosted API.
+_cors_origins = settings.cors_origins
+_allow_all = "*" in _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    allow_origins=[] if _allow_all else _cors_origins,
+    allow_origin_regex=".*" if _allow_all else None,
+    allow_credentials=not _allow_all,
     allow_methods=["*"],
     allow_headers=["*"],
 )

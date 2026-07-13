@@ -1,18 +1,24 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Stat, Section, Empty, Loading, Badge } from "@/components/ui";
+import { Stat, Section, Empty, Loading, Badge, RiskBadge } from "@/components/ui";
 import { apiGet, apiPost } from "@/lib/api";
 
 export default function AnalyticsPage() {
+  const router = useRouter();
   const [snap, setSnap] = useState<any>(null);
+  const [courses, setCourses] = useState<any[]>([]);
   const [analysis, setAnalysis] = useState<any>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     apiGet("/analytics/snapshot").then(setSnap).catch(() => setSnap({ error: true }));
+    apiGet("/courses").then(setCourses).catch(() => setCourses([]));
   }, []);
+
+  const courseName = (id: string) => courses.find((c) => c.id === id)?.name ?? "Course";
 
   async function runAnalyst() {
     setBusy(true);
@@ -68,12 +74,19 @@ export default function AnalyticsPage() {
             {snap.grade_trends?.length ? (
               <div className="space-y-2">
                 {snap.grade_trends.map((t: any) => (
-                  <div key={t.course_id} className="card flex items-center justify-between">
-                    <span className="text-sm">{t.first}% → {t.latest}% ({t.samples} grades)</span>
+                  <button
+                    key={t.course_id}
+                    onClick={() => router.push(`/courses/${t.course_id}`)}
+                    className="card card-hover w-full text-left flex items-center justify-between"
+                  >
+                    <span className="text-sm">
+                      <span className="font-medium">{courseName(t.course_id)}</span>
+                      <span className="text-atlas-muted"> · {t.first}% → {t.latest}% ({t.samples} grades)</span>
+                    </span>
                     <Badge tone={t.direction === "up" ? "good" : t.direction === "down" ? "bad" : "default"}>
                       {t.direction} {t.delta > 0 ? `+${t.delta}` : t.delta}
                     </Badge>
-                  </div>
+                  </button>
                 ))}
               </div>
             ) : <Empty>Not enough graded work yet to show trends.</Empty>}
@@ -83,10 +96,18 @@ export default function AnalyticsPage() {
             {snap.at_risk?.length ? (
               <div className="space-y-2">
                 {snap.at_risk.map((a: any) => (
-                  <div key={a.id} className="card flex items-center justify-between">
-                    <span className="text-sm">{a.title} · {a.days_left}d left</span>
-                    <Badge tone="bad">risk {a.risk_score}</Badge>
-                  </div>
+                  <button
+                    key={a.id}
+                    onClick={() => router.push(`/assignments`)}
+                    className="card card-hover w-full text-left flex items-center justify-between gap-3"
+                    title="View in Assignments"
+                  >
+                    <span className="text-sm min-w-0">
+                      <span className="font-medium truncate">{a.title}</span>
+                      <span className="text-atlas-muted"> · {courseName(a.course_id)} · {a.days_left}d left</span>
+                    </span>
+                    <RiskBadge level={a.risk_level} />
+                  </button>
                 ))}
               </div>
             ) : <Empty>No high-risk items right now.</Empty>}

@@ -1,6 +1,8 @@
 """Agent endpoints — grounded chat + specialized agent actions."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends
 
 from app.agents import get_agent
@@ -21,11 +23,21 @@ async def _persist_turn(user_id: str, conv_id: str | None, agent: str, user_msg:
             {"user_id": user_id, "agent": agent, "title": user_msg[:60]},
         )
         conv_id = conv[0]["id"]
+    # PostgREST rejects a bulk insert whose objects don't share the exact same
+    # set of keys (PGRST102 "All object keys must match"), so both rows must
+    # carry context_used even though only the assistant turn has real data.
     await supabase.insert("messages", [
-        {"user_id": user_id, "conversation_id": conv_id, "role": "user", "content": user_msg},
+        {"user_id": user_id, "conversation_id": conv_id, "role": "user",
+         "content": user_msg, "context_used": {}},
         {"user_id": user_id, "conversation_id": conv_id, "role": "assistant",
          "content": reply, "context_used": context_used},
     ])
+    # bump the conversation so recent chats sort to the top of the sidebar
+    await supabase.update(
+        "conversations",
+        {"updated_at": datetime.now(timezone.utc).isoformat()},
+        filters={"id": eq(conv_id)},
+    )
     return conv_id
 
 

@@ -18,12 +18,19 @@ class Archivist(Agent):
         "nothing is ever lost or has to be searched for twice."
     )
 
-    async def enrich(self, user_id: str, document_id: str, text: str) -> dict[str, Any]:
-        """Summarize a document, extract keywords + concepts, and link concepts."""
+    async def enrich(
+        self, user_id: str, document_id: str, text: str, *, rename_untitled: bool = False
+    ) -> dict[str, Any]:
+        """Summarize a document, extract keywords + concepts, and link concepts.
+
+        When ``rename_untitled`` is set, a generated title replaces the stored
+        one (used when the uploader relied on a filename-derived placeholder).
+        """
         excerpt = text[:12000]
         prompt = f"""\
 Analyze this document and return JSON:
 {{
+  "title": "a concise, human 3-8 word title describing what this document is (e.g. 'AP Bio Ch.4 Photosynthesis Notes', 'Algebra II Unit 3 Test Review')",
   "summary": "3-5 sentence summary",
   "keywords": ["..."],
   "doc_type": "pdf|powerpoint|notes|announcement|study_guide|essay|practice_problems|rubric|personal_note|email|image|other",
@@ -38,14 +45,18 @@ DOCUMENT:
             system=self.persona, prompt=prompt, max_tokens=1500, fast=True
         )
 
+        update: dict[str, Any] = {
+            "summary": data.get("summary"),
+            "keywords": data.get("keywords", []),
+            "doc_type": data.get("doc_type", "other"),
+        }
+        title = (data.get("title") or "").strip()
+        # Only override the stored title when the uploader didn't give a real
+        # one (a filename-derived placeholder gets replaced by the AI title).
+        if title and rename_untitled:
+            update["title"] = title
         await supabase.update(
-            "documents",
-            {
-                "summary": data.get("summary"),
-                "keywords": data.get("keywords", []),
-                "doc_type": data.get("doc_type", "other"),
-            },
-            filters={"id": eq(document_id)},
+            "documents", update, filters={"id": eq(document_id)}
         )
 
         linked = []
@@ -58,8 +69,8 @@ DOCUMENT:
                     upsert=True,
                 )
                 linked.append(concept["name"])
-        return {"summary": data.get("summary"), "keywords": data.get("keywords", []),
-                "concepts_linked": linked}
+        return {"title": update.get("title"), "summary": data.get("summary"),
+                "keywords": data.get("keywords", []), "concepts_linked": linked}
 
     async def _upsert_concept(self, user_id: str, concept: dict[str, Any]) -> str | None:
         name = (concept.get("name") or "").strip()

@@ -15,6 +15,79 @@ from app.embeddings.embedder import embed_texts
 CHUNK_CHARS = 1400
 CHUNK_OVERLAP = 200
 
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".webp", ".gif", ".bmp", ".tiff")
+
+
+def is_image(mime_type: str, filename: str = "") -> bool:
+    mt = (mime_type or "").lower()
+    name = (filename or "").lower()
+    return mt.startswith("image/") or name.endswith(IMAGE_EXTS)
+
+
+def convert_image_to_pdf(content: bytes, filename: str = "") -> tuple[bytes, str]:
+    """Convert an uploaded photo (png/jpg/heic/…) into a single-page PDF.
+
+    Students photograph handouts and worksheets; we normalize every image into
+    a PDF so it lives alongside the rest of their documents. HEIC (iPhone
+    photos) needs pillow-heif's opener registered before Pillow can read it.
+    Returns (pdf_bytes, pdf_filename).
+    """
+    import io
+
+    from PIL import Image
+
+    try:  # register HEIF/HEIC support if available
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+    except Exception:
+        pass
+
+    img = Image.open(io.BytesIO(content))
+    # img2pdf can't embed alpha/paletted images, so flatten onto white RGB.
+    if img.mode in ("RGBA", "LA", "P"):
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        img = img.convert("RGBA")
+        background.paste(img, mask=img.split()[-1])
+        img = background
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+
+    import img2pdf
+
+    pdf_bytes = img2pdf.convert(buf.getvalue())
+    base = (filename or "photo").rsplit(".", 1)[0] or "photo"
+    return pdf_bytes, f"{base}.pdf"
+
+
+def ocr_image(content: bytes) -> str:
+    """Best-effort OCR of a photo/scan so its text becomes searchable.
+
+    Uses Tesseract via pytesseract. Degrades gracefully to an empty string if
+    the OCR engine isn't installed or the image can't be read, so uploads never
+    fail on account of OCR.
+    """
+    import io
+
+    try:
+        import pytesseract
+        from PIL import Image
+
+        try:  # HEIC support for iPhone photos
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+        except Exception:
+            pass
+
+        img = Image.open(io.BytesIO(content))
+        return (pytesseract.image_to_string(img) or "").strip()
+    except Exception:
+        return ""
+
 
 # --------------------------------------------------------------------------
 # Text extraction

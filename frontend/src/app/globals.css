@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-atlas-bg text-atlas-text antialiased;
+}
+
+@layer components {
+  .card {
+    @apply bg-atlas-panel border border-atlas-border rounded-xl p-4;
+  }
+  .card-hover {
+    @apply transition-colors hover:border-atlas-accent/60;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2
+           text-sm font-medium transition-colors disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-atlas-accent text-white hover:bg-indigo-500;
+  }
+  .btn-ghost {
+    @apply btn bg-atlas-panel2 text-atlas-text hover:bg-atlas-border;
+  }
+  .input {
+    @apply w-full rounded-lg bg-atlas-panel2 border border-atlas-border px-3 py-2
+           text-sm outline-none focus:border-atlas-accent placeholder:text-atlas-muted;
+  }
+  .label { @apply text-xs font-medium text-atlas-muted mb-1 block; }
+  .pill { @apply text-xs px-2 py-0.5 rounded-full border border-atlas-border; }
+}

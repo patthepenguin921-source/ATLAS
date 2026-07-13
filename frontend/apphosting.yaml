@@ -1,0 +1,22 @@
+# Firebase App Hosting config — https://firebase.google.com/docs/app-hosting/configure
+# Auto-deploys this Next.js app on every push, same as the Vercel setup.
+#
+# Fill in the two TODOs below once you know them (see deployment guide).
+runConfig:
+  minInstances: 0
+  maxInstances: 1
+
+env:
+  - variable: NEXT_PUBLIC_SUPABASE_URL
+    value: https://pncinlapbrkipfewdhat.supabase.co
+    availability: [BUILD, RUNTIME]
+
+  - variable: NEXT_PUBLIC_SUPABASE_ANON_KEY
+    value: sb_publishable_WZrk1dYqfEaKJfW_TicRcw_D5pLtHrL
+    availability: [BUILD, RUNTIME]
+
+  # TODO: fill in after the backend is deployed to Cloud Run (step 2 of the
+  # deployment guide) — e.g. https://atlas-backend-xxxxxxxx-uc.a.run.app
+  - variable: NEXT_PUBLIC_API_BASE_URL
+    value: https://REPLACE-WITH-YOUR-CLOUD-RUN-URL
+    availability: [BUILD, RUNTIME]

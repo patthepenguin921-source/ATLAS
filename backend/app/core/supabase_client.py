@@ -121,6 +121,23 @@ class SupabaseClient:
         r = await client.post(f"{self._rest}/rpc/{fn}", headers=self._headers(), json=payload)
         return self._parse(r)
 
+    # ---- auth ----
+    async def get_user(self, access_token: str) -> dict:
+        """Verify a Supabase-issued access token by asking Supabase Auth directly.
+
+        This avoids reimplementing JWT verification locally (which breaks the
+        moment a project uses asymmetric JWT signing keys instead of the
+        legacy shared secret) — Supabase always knows how to validate its
+        own tokens.
+        """
+        client = self._require()
+        key = settings.supabase_anon_key or self._key
+        r = await client.get(
+            f"{self._base}/auth/v1/user",
+            headers={"apikey": key, "Authorization": f"Bearer {access_token}"},
+        )
+        return self._parse(r)
+
     # ---- storage ----
     async def upload(self, bucket: str, path: str, content: bytes, content_type: str) -> None:
         client = self._require()

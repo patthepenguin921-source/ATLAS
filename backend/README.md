@@ -21,8 +21,13 @@ Open http://localhost:8000/docs for the interactive API.
 - Reasoning defaults to **Groq's free tier** (`ATLAS_LLM_PROVIDER=groq` +
   `GROQ_API_KEY`). Set `ATLAS_LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`
   to use Claude instead.
-- Dev auth shortcut: when `ATLAS_ENV=development` and no `SUPABASE_JWT_SECRET`
-  is set, pass `X-Atlas-Dev-User: <uuid>` to act as a user without a real JWT.
+- Dev auth shortcut: when `ATLAS_ENV=development` and Supabase isn't
+  configured, pass `X-Atlas-Dev-User: <uuid>` to act as a user without a real
+  token.
+- Auth tokens are verified by calling Supabase's own `/auth/v1/user` endpoint
+  rather than decoding the JWT locally — this works regardless of whether the
+  project uses a legacy JWT secret or the newer asymmetric signing keys, so
+  there's nothing extra to configure.
 
 ## Tests
 

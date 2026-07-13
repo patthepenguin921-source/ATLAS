@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Empty, Loading, Badge, gradeTone } from "@/components/ui";
 import { apiGet, apiPatch, apiPost } from "@/lib/api";
@@ -46,10 +47,12 @@ const emptyForm = {
 };
 
 export default function CoursesPage() {
+  const router = useRouter();
   const [courses, setCourses] = useState<Course[] | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [open, setOpen] = useState(false);
   const dragIndex = useRef<number | null>(null);
+  const didDragRef = useRef(false);
   const [overIndex, setOverIndex] = useState<number | null>(null);
 
   async function load() {
@@ -69,6 +72,7 @@ export default function CoursesPage() {
 
   function onDragStart(i: number) {
     dragIndex.current = i;
+    didDragRef.current = true;
   }
 
   function onDragOver(e: React.DragEvent, i: number) {
@@ -80,6 +84,11 @@ export default function CoursesPage() {
     const from = dragIndex.current;
     dragIndex.current = null;
     setOverIndex(null);
+    // Clear the drag flag after this tick so a trailing click (if the browser
+    // fires one) is still suppressed, but future plain clicks navigate again.
+    setTimeout(() => {
+      didDragRef.current = false;
+    }, 0);
     if (from === null || from === i || !courses) return;
 
     const reordered = [...courses];
@@ -93,6 +102,14 @@ export default function CoursesPage() {
       )
     );
     load();
+  }
+
+  function onCardClick(id: string) {
+    if (didDragRef.current) {
+      didDragRef.current = false;
+      return;
+    }
+    router.push(`/courses/${id}`);
   }
 
   return (
@@ -154,7 +171,7 @@ export default function CoursesPage() {
       {!courses && <Loading />}
       {courses && !courses.length && <Empty>No courses yet. Add your first one.</Empty>}
       {courses && courses.length > 0 && (
-        <p className="text-xs text-atlas-muted mb-3">Drag a card to reorder your courses.</p>
+        <p className="text-xs text-atlas-muted mb-3">Click a card to open it · drag to reorder.</p>
       )}
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
         {courses?.map((c, i) => (
@@ -164,6 +181,7 @@ export default function CoursesPage() {
             onDragStart={() => onDragStart(i)}
             onDragOver={(e) => onDragOver(e, i)}
             onDrop={() => onDrop(i)}
+            onClick={() => onCardClick(c.id)}
             className={`card card-hover cursor-grab active:cursor-grabbing ${
               overIndex === i ? "ring-2 ring-atlas-accent2" : ""
             }`}

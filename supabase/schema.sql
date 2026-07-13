@@ -940,3 +940,20 @@ returns numeric language sql stable as $$
     and c.current_grade is not null;
 $$;
 
+-- >>>>>>>>>> 0009_course_semesters.sql <<<<<<<<<<
+-- Course semesters & linked semester courses: a class can be split into two
+-- linked rows (e.g. HN Prep Lab S1 @ 5.5, AP S2 @ 6.0) tracked independently.
+
+alter table public.courses
+  add column if not exists semester         text not null default 'full_year',
+  add column if not exists linked_course_id uuid references public.courses(id) on delete set null;
+
+do $$ begin
+  alter table public.courses
+    add constraint courses_semester_check
+    check (semester in ('full_year', 's1', 's2'));
+exception when duplicate_object then null; end $$;
+
+create index if not exists idx_courses_linked
+  on public.courses(user_id, linked_course_id);
+

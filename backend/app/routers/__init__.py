@@ -21,8 +21,8 @@ _CRUD = [
                                "external_id", "external_source", "metadata"},
                      default_order="sort_order.asc,created_at.desc"),
     make_crud_router(table="assignments", prefix="/assignments", tag="assignments",
-                     writable={"course_id", "term_id", "title", "description", "category",
-                               "status", "assigned_date", "due_date", "submitted_at",
+                     writable={"course_id", "term_id", "title", "description", "notes",
+                               "category", "status", "assigned_date", "due_date", "submitted_at",
                                "points_possible", "weight", "difficulty", "estimated_minutes",
                                "actual_minutes", "learning_objectives", "tags", "metadata"},
                      default_order="due_date.asc.nullslast"),
@@ -48,6 +48,9 @@ _CRUD = [
     make_crud_router(table="reminders", prefix="/reminders", tag="reminders",
                      writable={"assignment_id", "title", "body", "remind_at", "sent"},
                      default_order="remind_at.asc"),
+    make_crud_router(table="chat_projects", prefix="/chat-projects", tag="chat_projects",
+                     writable={"name", "color"},
+                     default_order="created_at.asc"),
 ]
 
 api_router = APIRouter()

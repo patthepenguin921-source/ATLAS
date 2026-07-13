@@ -37,7 +37,7 @@ export function Sidebar() {
     <aside className="w-60 shrink-0 border-r border-atlas-border bg-atlas-panel/60 backdrop-blur flex flex-col">
       <div className="px-5 py-6">
         <div className="text-xl font-display font-semibold tracking-tight flex items-center gap-2">
-          <span className="grid place-items-center w-7 h-7 rounded-lg bg-atlas-accent text-atlas-bg text-sm font-bold">
+          <span className="grid place-items-center w-7 h-7 rounded-lg bg-atlas-accent text-white text-sm font-bold">
             A
           </span>
           Atlas

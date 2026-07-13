@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.agents import get_agent
 from app.agents.registry import Analyst, Coach, Planner, Tutor
@@ -90,11 +90,50 @@ async def weekly_review(body: ReviewRequest, user: CurrentUser = Depends(get_cur
 
 
 @router.get("/conversations")
-async def conversations(user: CurrentUser = Depends(get_current_user)):
+async def conversations(
+    archived: bool | None = None,
+    project_id: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
+):
+    filters: dict[str, str] = {"user_id": eq(user.id)}
+    if archived is not None:
+        filters["archived"] = f"eq.{str(archived).lower()}"
+    if project_id:
+        filters["project_id"] = eq(project_id)
     return await supabase.select(
-        "conversations", filters={"user_id": eq(user.id)},
-        order="updated_at.desc", limit=50,
+        "conversations",
+        columns="id,title,agent,project_id,tags,archived,created_at,updated_at",
+        filters=filters, order="updated_at.desc", limit=200,
     )
+
+
+# Whitelisted fields a client may change on one of its conversations.
+_CONV_WRITABLE = {"title", "project_id", "tags", "archived"}
+
+
+@router.patch("/conversations/{conversation_id}")
+async def update_conversation(
+    conversation_id: str, body: dict, user: CurrentUser = Depends(get_current_user)
+):
+    payload = {k: v for k, v in body.items() if k in _CONV_WRITABLE}
+    if not payload:
+        raise HTTPException(400, "No writable fields provided")
+    updated = await supabase.update(
+        "conversations", payload,
+        filters={"user_id": eq(user.id), "id": eq(conversation_id)},
+    )
+    if not updated:
+        raise HTTPException(404, "Not found")
+    return updated[0]
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(conversation_id: str, user: CurrentUser = Depends(get_current_user)):
+    # messages cascade via the conversation_id foreign key.
+    await supabase.delete(
+        "conversations", filters={"user_id": eq(user.id), "id": eq(conversation_id)}
+    )
+    return None
 
 
 @router.get("/conversations/{conversation_id}/messages")

@@ -168,7 +168,7 @@ export function Badge({
     good: "text-atlas-good border-atlas-good/40",
     warn: "text-atlas-warn border-atlas-warn/40",
     bad: "text-atlas-bad border-atlas-bad/40",
-    accent: "text-atlas-accent2 border-atlas-accent2/40",
+    accent: "text-atlas-accent border-atlas-accent/40",
   }[tone];
   return <span className={`pill ${c}`}>{children}</span>;
 }

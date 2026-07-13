@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Stat, Section, Empty, Loading, Badge, gradeTone } from "@/components/ui";
-import { apiGet, apiPatch, apiPost } from "@/lib/api";
+import { apiGet, apiPatch, apiPost, apiDelete } from "@/lib/api";
 
 type CourseLevel = "regular" | "honors" | "ap" | "dual_enrollment" | "ib";
 
@@ -50,7 +50,9 @@ interface EditForm {
 
 export default function CourseDetailPage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const id = params?.id as string;
+  const [deleteStep, setDeleteStep] = useState(0);
 
   const [course, setCourse] = useState<any>(null);
   const [teachers, setTeachers] = useState<any[]>([]);
@@ -150,6 +152,11 @@ export default function CourseDetailPage() {
     setTerms((prev) => [...prev, created]);
     setForm({ ...form, term_id: created.id });
     setNewTerm("");
+  }
+
+  async function deleteCourse() {
+    await apiDelete(`/courses/${id}`);
+    router.push("/courses");
   }
 
   async function splitSemesters() {
@@ -323,6 +330,37 @@ export default function CourseDetailPage() {
           </div>
 
           <button className="btn-primary md:col-span-4">Save changes</button>
+
+          {/* Danger zone — deleting a course needs two explicit confirmations. */}
+          <div className="md:col-span-4 mt-2 pt-4 border-t border-atlas-border">
+            <div className="text-xs uppercase text-atlas-muted mb-2">Danger zone</div>
+            {deleteStep === 0 && (
+              <button type="button" className="btn-ghost text-atlas-bad hover:!border-atlas-bad/50"
+                onClick={() => setDeleteStep(1)}>
+                Delete course
+              </button>
+            )}
+            {deleteStep === 1 && (
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-sm text-atlas-muted">
+                  Delete <span className="text-atlas-text font-medium">{course.name}</span> and all its data?
+                </span>
+                <button type="button" className="btn-ghost" onClick={() => setDeleteStep(0)}>Cancel</button>
+                <button type="button" className="btn-ghost text-atlas-bad hover:!border-atlas-bad/50"
+                  onClick={() => setDeleteStep(2)}>Yes, continue</button>
+              </div>
+            )}
+            {deleteStep === 2 && (
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-sm text-atlas-bad font-medium">
+                  This can't be undone. Confirm permanent delete?
+                </span>
+                <button type="button" className="btn-ghost" onClick={() => setDeleteStep(0)}>Cancel</button>
+                <button type="button" className="btn-primary !bg-atlas-bad hover:!brightness-110"
+                  onClick={deleteCourse}>Delete permanently</button>
+              </div>
+            )}
+          </div>
         </form>
       )}
 

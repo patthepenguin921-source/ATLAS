@@ -1,14 +1,56 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { Empty, Loading, Badge, gradeTone } from "@/components/ui";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiPatch, apiPost } from "@/lib/api";
+
+type CourseLevel = "regular" | "honors" | "ap" | "dual_enrollment" | "ib";
+
+const LEVEL_OPTIONS: { value: CourseLevel; label: string }[] = [
+  { value: "regular", label: "Regular" },
+  { value: "honors", label: "Honors" },
+  { value: "ap", label: "AP" },
+  { value: "dual_enrollment", label: "Dual Enrollment" },
+  { value: "ib", label: "IB" },
+];
+
+const LEVEL_BADGE: Record<CourseLevel, string> = {
+  regular: "Regular",
+  honors: "Honors",
+  ap: "AP",
+  dual_enrollment: "Dual Enrollment",
+  ib: "IB",
+};
+
+interface Course {
+  id: string;
+  name: string;
+  code?: string | null;
+  subject?: string | null;
+  course_level: CourseLevel;
+  has_hn_prep_lab: boolean;
+  has_ap_prep_lab: boolean;
+  current_grade?: number | null;
+  current_letter?: string | null;
+  sort_order: number;
+}
+
+const emptyForm = {
+  name: "",
+  code: "",
+  subject: "",
+  course_level: "regular" as CourseLevel,
+  has_hn_prep_lab: false,
+  has_ap_prep_lab: false,
+};
 
 export default function CoursesPage() {
-  const [courses, setCourses] = useState<any[] | null>(null);
-  const [form, setForm] = useState({ name: "", code: "", subject: "", is_ap: false });
+  const [courses, setCourses] = useState<Course[] | null>(null);
+  const [form, setForm] = useState(emptyForm);
   const [open, setOpen] = useState(false);
+  const dragIndex = useRef<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
 
   async function load() {
     setCourses(await apiGet("/courses"));
@@ -19,9 +61,37 @@ export default function CoursesPage() {
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
-    await apiPost("/courses", form);
-    setForm({ name: "", code: "", subject: "", is_ap: false });
+    await apiPost("/courses", { ...form, sort_order: courses?.length ?? 0 });
+    setForm(emptyForm);
     setOpen(false);
+    load();
+  }
+
+  function onDragStart(i: number) {
+    dragIndex.current = i;
+  }
+
+  function onDragOver(e: React.DragEvent, i: number) {
+    e.preventDefault();
+    setOverIndex(i);
+  }
+
+  async function onDrop(i: number) {
+    const from = dragIndex.current;
+    dragIndex.current = null;
+    setOverIndex(null);
+    if (from === null || from === i || !courses) return;
+
+    const reordered = [...courses];
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(i, 0, moved);
+    setCourses(reordered);
+
+    await Promise.all(
+      reordered.map((c, idx) =>
+        idx === c.sort_order ? null : apiPatch(`/courses/${c.id}`, { sort_order: idx })
+      )
+    );
     load();
   }
 
@@ -53,26 +123,63 @@ export default function CoursesPage() {
             <input className="input" value={form.subject}
               onChange={(e) => setForm({ ...form, subject: e.target.value })} placeholder="Science" />
           </div>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={form.is_ap}
-              onChange={(e) => setForm({ ...form, is_ap: e.target.checked })} />
-            AP course
-          </label>
+
+          <div>
+            <label className="label">Course level</label>
+            <select className="input" value={form.course_level}
+              onChange={(e) => setForm({ ...form, course_level: e.target.value as CourseLevel })}>
+              {LEVEL_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="md:col-span-3 flex flex-wrap items-center gap-4">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={form.has_hn_prep_lab}
+                onChange={(e) => setForm({ ...form, has_hn_prep_lab: e.target.checked })} />
+              HN Prep Lab (year-long, 5.5 weighted)
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={form.has_ap_prep_lab}
+                onChange={(e) => setForm({ ...form, has_ap_prep_lab: e.target.checked })} />
+              AP Prep Lab (year-long, 6.0 weighted)
+            </label>
+          </div>
+
           <button className="btn-primary md:col-span-4">Save course</button>
         </form>
       )}
 
       {!courses && <Loading />}
       {courses && !courses.length && <Empty>No courses yet. Add your first one.</Empty>}
+      {courses && courses.length > 0 && (
+        <p className="text-xs text-atlas-muted mb-3">Drag a card to reorder your courses.</p>
+      )}
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {courses?.map((c) => (
-          <div key={c.id} className="card card-hover">
+        {courses?.map((c, i) => (
+          <div
+            key={c.id}
+            draggable
+            onDragStart={() => onDragStart(i)}
+            onDragOver={(e) => onDragOver(e, i)}
+            onDrop={() => onDrop(i)}
+            className={`card card-hover cursor-grab active:cursor-grabbing ${
+              overIndex === i ? "ring-2 ring-atlas-accent2" : ""
+            }`}
+          >
             <div className="flex items-start justify-between">
               <div>
                 <div className="font-medium">{c.name}</div>
                 <div className="text-xs text-atlas-muted">{c.code || c.subject || "—"}</div>
               </div>
-              {c.is_ap && <Badge tone="accent">AP</Badge>}
+              <div className="flex flex-col items-end gap-1">
+                {c.course_level !== "regular" && (
+                  <Badge tone="accent">{LEVEL_BADGE[c.course_level]}</Badge>
+                )}
+                {c.has_hn_prep_lab && <Badge tone="warn">HN Prep Lab</Badge>}
+                {c.has_ap_prep_lab && <Badge tone="warn">AP Prep Lab</Badge>}
+              </div>
             </div>
             <div className="mt-4 flex items-center justify-between">
               <span className="text-xs text-atlas-muted">Current grade</span>

@@ -44,6 +44,8 @@ async def get_current_user(
     try:
         user = await supabase.get_user(token)
     except SupabaseError as e:
+        if e.status == 503:  # Supabase itself isn't configured/reachable — not the caller's fault
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e.detail))
         detail = e.detail if isinstance(e.detail, str) else e.detail.get("msg", str(e.detail))
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid token: {detail}")
 

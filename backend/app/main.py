@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.config import settings
-from app.core.supabase_client import supabase
+from app.core.supabase_client import SupabaseError, supabase
 from app.routers import api_router
 from app.routers import integrations, profile
 
@@ -36,6 +37,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(SupabaseError)
+async def supabase_error_handler(request: Request, exc: SupabaseError):
+    # Surface upstream Supabase failures as structured JSON with the real
+    # status instead of an unhandled 500 traceback. Upstream 4xx on our data
+    # calls means we sent a bad query, so report it as a 502 bad gateway
+    # rather than blaming the client; 503 (not configured) passes through.
+    status_code = exc.status if exc.status in (429, 503) else 502
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": {"source": "supabase", "status": exc.status, "error": exc.detail}},
+    )
 
 
 @app.get("/health", tags=["system"])

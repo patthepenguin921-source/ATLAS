@@ -1,0 +1,35 @@
+{
+  "name": "Atlas · LMS Sync (Schoology)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 4 }] }
+      },
+      "id": "trigger",
+      "name": "Every 4 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ATLAS_API }}/api/v1/integrations/schoology/sync",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "request",
+      "name": "Sync Schoology",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 300],
+      "credentials": { "httpHeaderAuth": { "id": "atlas-backend", "name": "Atlas Backend" } }
+    }
+  ],
+  "connections": {
+    "Every 4 hours": { "main": [[{ "node": "Sync Schoology", "type": "main", "index": 0 }]] }
+  },
+  "settings": {},
+  "active": false
+}

@@ -1,0 +1,38 @@
+{
+  "name": "Atlas · Weekly Review",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 18 * * 0" }] }
+      },
+      "id": "trigger",
+      "name": "Sundays 18:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ATLAS_API }}/api/v1/agents/coach/weekly-review",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {}
+      },
+      "id": "request",
+      "name": "Generate review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 300],
+      "credentials": { "httpHeaderAuth": { "id": "atlas-backend", "name": "Atlas Backend" } }
+    }
+  ],
+  "connections": {
+    "Sundays 18:00": { "main": [[{ "node": "Generate review", "type": "main", "index": 0 }]] }
+  },
+  "settings": {},
+  "active": false
+}

@@ -1,0 +1,38 @@
+{
+  "name": "Atlas · Daily Plan",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 6 * * *" }] }
+      },
+      "id": "trigger",
+      "name": "Every day 06:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ATLAS_API }}/api/v1/agents/planner/daily-plan",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"available_minutes\": 180\n}",
+        "options": {}
+      },
+      "id": "request",
+      "name": "Generate plan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 300],
+      "credentials": { "httpHeaderAuth": { "id": "atlas-backend", "name": "Atlas Backend" } }
+    }
+  ],
+  "connections": {
+    "Every day 06:00": { "main": [[{ "node": "Generate plan", "type": "main", "index": 0 }]] }
+  },
+  "settings": {},
+  "active": false
+}

@@ -1,0 +1,35 @@
+{
+  "name": "Atlas · Refresh Retention",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 3 * * *" }] }
+      },
+      "id": "trigger",
+      "name": "Every day 03:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ATLAS_API }}/api/v1/knowledge/refresh-retention",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "request",
+      "name": "Decay retention",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 300],
+      "credentials": { "httpHeaderAuth": { "id": "atlas-backend", "name": "Atlas Backend" } }
+    }
+  ],
+  "connections": {
+    "Every day 03:00": { "main": [[{ "node": "Decay retention", "type": "main", "index": 0 }]] }
+  },
+  "settings": {},
+  "active": false
+}

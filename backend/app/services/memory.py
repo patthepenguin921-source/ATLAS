@@ -65,7 +65,8 @@ async def overdue_or_missing(user_id: str, *, limit: int = 25) -> list[dict]:
 async def courses_overview(user_id: str) -> list[dict]:
     return await supabase.select(
         "courses",
-        columns="id,name,code,subject,is_ap,is_honors,current_grade,current_letter,teacher_id",
+        columns="id,name,code,subject,course_level,has_hn_prep_lab,has_ap_prep_lab,"
+                 "current_grade,current_letter,teacher_id",
         filters={"user_id": eq(user_id)},
         order="name.asc",
     ) or []
@@ -152,9 +153,16 @@ def render_context(ctx: dict[str, Any]) -> str:
 
     if ctx.get("courses"):
         lines.append("\n## Courses")
+        level_labels = {
+            "ap": " AP", "dual_enrollment": " Dual Enrollment", "ib": " IB", "honors": " Honors",
+        }
         for c in ctx["courses"]:
             grade = f"{c['current_grade']}% ({c['current_letter']})" if c.get("current_grade") else "no grade yet"
-            flags = " AP" if c.get("is_ap") else (" Honors" if c.get("is_honors") else "")
+            flags = level_labels.get(c.get("course_level"), "")
+            if c.get("has_hn_prep_lab"):
+                flags += " +HN Prep Lab"
+            if c.get("has_ap_prep_lab"):
+                flags += " +AP Prep Lab"
             lines.append(f"- {c['name']}{flags}: {grade}")
 
     if ctx.get("upcoming"):

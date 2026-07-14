@@ -61,6 +61,14 @@ class IngestTextRequest(BaseModel):
     enrich: bool = True
 
 
+class DocumentPatchRequest(BaseModel):
+    """Used by the bulk-upload review screen to correct an auto-detected course."""
+
+    course_id: Optional[str] = None
+    title: Optional[str] = None
+    needs_review: Optional[bool] = None
+
+
 # ---- Courses ----
 class SplitSemestersRequest(BaseModel):
     """Split a course into two linked semester rows (S1 / S2)."""

@@ -3,11 +3,20 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Empty, Badge, SkeletonList } from "@/components/ui";
-import { apiGet, apiUpload, apiPost, apiDelete, API_BASE } from "@/lib/api";
+import { Empty, Badge, Modal, SkeletonList } from "@/components/ui";
+import { apiGet, apiUpload, apiPost, apiPatch, apiDelete, API_BASE } from "@/lib/api";
 import { pickFromDrive, driveConfigured } from "@/lib/googleDrive";
 
 const ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
+
+type BulkResult = {
+  filename: string;
+  id?: string;
+  course_id?: string | null;
+  needs_review?: boolean;
+  course_confidence?: number | null;
+  error?: string;
+};
 
 export default function DocumentsPage() {
   const router = useRouter();
@@ -19,6 +28,10 @@ export default function DocumentsPage() {
   const [driveBusy, setDriveBusy] = useState(false);
   const [backendDown, setBackendDown] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const bulkFileRef = useRef<HTMLInputElement>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [review, setReview] = useState<BulkResult[] | null>(null);
+  const [reviewChoice, setReviewChoice] = useState<Record<string, string>>({});
 
   async function load() {
     const [d, c] = await Promise.all([apiGet("/documents"), apiGet("/courses")]);
@@ -103,6 +116,47 @@ export default function DocumentsPage() {
     }
   }
 
+  async function bulkUpload(e: React.FormEvent) {
+    e.preventDefault();
+    const files = bulkFileRef.current?.files;
+    if (!files || !files.length) return;
+    setBulkBusy(true);
+    setStatus(null);
+    try {
+      const form = new FormData();
+      Array.from(files).forEach((f) => form.append("files", f));
+      const res = await apiUpload("/documents/bulk-upload", form);
+      const results: BulkResult[] = res.results ?? [];
+      const flagged = results.filter((r) => r.needs_review && r.id);
+      const failed = results.filter((r) => r.error);
+      const filed = results.length - flagged.length - failed.length;
+      setStatus({
+        ok: failed.length === 0,
+        text: `${filed} filed automatically${flagged.length ? `, ${flagged.length} need a quick check` : ""}${
+          failed.length ? `, ${failed.length} failed` : ""
+        }.`,
+      });
+      if (bulkFileRef.current) bulkFileRef.current.value = "";
+      if (flagged.length) {
+        setReview(flagged);
+        setReviewChoice(Object.fromEntries(flagged.map((r) => [r.id!, r.course_id ?? ""])));
+      }
+      load();
+    } catch (err: any) {
+      setStatus({ ok: false, text: friendlyError(err) });
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function confirmReview(id: string) {
+    const chosen = reviewChoice[id];
+    if (!chosen) return;
+    await apiPatch(`/documents/${id}`, { course_id: chosen });
+    setReview((r) => (r ? r.filter((x) => x.id !== id) : r));
+    load();
+  }
+
   const courseName = (id: string) => courses.find((c) => c.id === id)?.name ?? "—";
   const driveReady = driveConfigured();
 
@@ -163,6 +217,22 @@ export default function DocumentsPage() {
         )}
       </form>
 
+      <form onSubmit={bulkUpload} className="card mb-6">
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="label">Dump multiple files</label>
+            <input ref={bulkFileRef} type="file" className="text-sm" multiple required accept={ACCEPT} />
+          </div>
+          <button className="btn-ghost" disabled={bulkBusy}>
+            {bulkBusy ? "Filing…" : "Upload & auto-file"}
+          </button>
+        </div>
+        <p className="text-xs text-atlas-muted mt-2">
+          No class needed — Atlas reads each file and matches it to one of your existing classes.
+          Anything it's not confident about gets flagged for a quick check.
+        </p>
+      </form>
+
       {!docs && <SkeletonList rows={3} />}
       {docs && !docs.length && <Empty>No documents yet. Upload your first file.</Empty>}
       <div className="space-y-2">
@@ -187,6 +257,7 @@ export default function DocumentsPage() {
               </div>
               <div className="flex flex-col items-end gap-2 shrink-0">
                 <Badge tone={d.ingested ? "good" : "warn"}>{d.ingested ? "indexed" : "pending"}</Badge>
+                {d.needs_review && <Badge tone="warn">check class</Badge>}
                 <button
                   className="text-xs text-atlas-bad hover:underline"
                   onClick={async (e) => {
@@ -202,6 +273,38 @@ export default function DocumentsPage() {
           </div>
         ))}
       </div>
+
+      <Modal
+        open={!!review?.length}
+        onClose={() => setReview(null)}
+        title="Double-check these classes"
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-atlas-muted">
+            Atlas wasn't confident which class these belong to. Pick the right one for each.
+          </p>
+          {review?.map((r) => (
+            <div key={r.id} className="flex items-center gap-2">
+              <span className="text-sm truncate flex-1" title={r.filename}>{r.filename}</span>
+              <select
+                className="input !w-40"
+                value={reviewChoice[r.id!] ?? ""}
+                onChange={(e) => setReviewChoice((c) => ({ ...c, [r.id!]: e.target.value }))}
+              >
+                <option value="">Select a class…</option>
+                {courses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <button
+                className="btn-ghost text-xs"
+                disabled={!reviewChoice[r.id!]}
+                onClick={() => confirmReview(r.id!)}
+              >
+                Confirm
+              </button>
+            </div>
+          ))}
+        </div>
+      </Modal>
     </AppShell>
   );
 }

@@ -72,6 +72,45 @@ DOCUMENT:
         return {"title": update.get("title"), "summary": data.get("summary"),
                 "keywords": data.get("keywords", []), "concepts_linked": linked}
 
+    async def classify_course(self, text: str, courses: list[dict[str, Any]]) -> dict[str, Any]:
+        """Guess which of the student's existing courses a document belongs to.
+
+        Always returns a course_id (best guess), even at low confidence — the
+        caller marks low-confidence guesses for the student to review rather
+        than leaving the document unfiled.
+        """
+        if not courses:
+            return {"course_id": None, "confidence": 0.0}
+        excerpt = text[:6000]
+        options = [{"id": c["id"], "name": c.get("name"), "subject": c.get("subject")}
+                   for c in courses]
+        prompt = f"""\
+A student dropped a file without saying which class it belongs to. Given the
+document excerpt and the student's list of classes, pick the single best
+matching class and how confident you are.
+
+Return JSON: {{"course_id": "<id from the list>", "confidence": 0.0-1.0}}
+
+CLASSES:
+{options}
+
+DOCUMENT EXCERPT:
+{excerpt}"""
+        data = await claude.complete_json(
+            system=self.persona, prompt=prompt, max_tokens=200, fast=True
+        )
+        valid_ids = {c["id"] for c in courses}
+        course_id = data.get("course_id")
+        if course_id not in valid_ids:
+            course_id = courses[0]["id"]
+            confidence = 0.0
+        else:
+            try:
+                confidence = float(data.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                confidence = 0.0
+        return {"course_id": course_id, "confidence": max(0.0, min(1.0, confidence))}
+
     async def _upsert_concept(self, user_id: str, concept: dict[str, Any]) -> str | None:
         name = (concept.get("name") or "").strip()
         if not name:

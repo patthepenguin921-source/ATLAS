@@ -8,6 +8,7 @@ from app.core.supabase_client import _strip_null_bytes
 from app.embeddings.embedder import DIM, embed_text
 from app.llm.claude import _extract_json
 from app.main import app
+from app.routers.documents import _safe_storage_name
 from app.services.ingestion import _sanitize_text, chunk_text
 from app.services.knowledge_model import _retention
 
@@ -69,3 +70,12 @@ def test_strip_null_bytes_payload():
     assert _strip_null_bytes(payload) == {
         "title": "ab", "chunks": ["x", {"content": "yz"}], "n": None,
     }
+
+
+def test_safe_storage_name_strips_unsupported_unicode():
+    # Supabase Storage keys only accept an S3-safe, mostly-ASCII charset —
+    # em dashes, curly quotes, etc. used to make the upload silently fail.
+    assert _safe_storage_name("Overview – Vercel.pdf") == "Overview _ Vercel.pdf"
+    assert _safe_storage_name("SE States (6).pdf") == "SE States (6).pdf"
+    assert _safe_storage_name("a/b.pdf") == "a_b.pdf"
+    assert _safe_storage_name("") == "document"

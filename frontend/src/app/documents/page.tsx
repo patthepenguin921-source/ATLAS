@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Empty, Badge, SkeletonList } from "@/components/ui";
 import { apiGet, apiUpload, apiPost, apiDelete, API_BASE } from "@/lib/api";
@@ -9,6 +10,7 @@ import { pickFromDrive, driveConfigured } from "@/lib/googleDrive";
 const ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
 
 export default function DocumentsPage() {
+  const router = useRouter();
   const [docs, setDocs] = useState<any[] | null>(null);
   const [courses, setCourses] = useState<any[]>([]);
   const [courseId, setCourseId] = useState("");
@@ -165,7 +167,11 @@ export default function DocumentsPage() {
       {docs && !docs.length && <Empty>No documents yet. Upload your first file.</Empty>}
       <div className="space-y-2">
         {docs?.map((d) => (
-          <div key={d.id} className="card card-hover">
+          <div
+            key={d.id}
+            className="card card-hover cursor-pointer"
+            onClick={() => router.push(`/documents/${d.id}`)}
+          >
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
                 <div className="font-medium">{d.title}</div>
@@ -181,8 +187,14 @@ export default function DocumentsPage() {
               </div>
               <div className="flex flex-col items-end gap-2 shrink-0">
                 <Badge tone={d.ingested ? "good" : "warn"}>{d.ingested ? "indexed" : "pending"}</Badge>
-                <button className="text-xs text-atlas-bad hover:underline"
-                  onClick={async () => { await apiDelete(`/documents/${d.id}`); load(); }}>
+                <button
+                  className="text-xs text-atlas-bad hover:underline"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    await apiDelete(`/documents/${d.id}`);
+                    load();
+                  }}
+                >
                   delete
                 </button>
               </div>

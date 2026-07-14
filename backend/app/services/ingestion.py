@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 from typing import Any
 
-from app.core.supabase_client import eq, supabase
+from app.core.supabase_client import _INVALID_TEXT_RE, eq, supabase
 from app.embeddings.embedder import embed_texts
 
 CHUNK_CHARS = 1400
@@ -92,18 +92,23 @@ def ocr_image(content: bytes) -> str:
 # --------------------------------------------------------------------------
 # Text extraction
 # --------------------------------------------------------------------------
+def _sanitize_text(text: str) -> str:
+    """Strip NUL bytes and lone surrogates that Postgres `text` columns reject."""
+    return _INVALID_TEXT_RE.sub("", text)
+
+
 def extract_text(content: bytes, mime_type: str, filename: str = "") -> str:
     name = (filename or "").lower()
     mt = (mime_type or "").lower()
     try:
         if "pdf" in mt or name.endswith(".pdf"):
-            return _extract_pdf(content)
+            return _sanitize_text(_extract_pdf(content))
         if "presentation" in mt or name.endswith((".pptx", ".ppt")):
-            return _extract_pptx(content)
+            return _sanitize_text(_extract_pptx(content))
     except Exception:
         pass  # fall through to plain-text decode
     try:
-        return content.decode("utf-8", errors="ignore")
+        return _sanitize_text(content.decode("utf-8", errors="ignore"))
     except Exception:
         return ""
 
@@ -156,6 +161,8 @@ def chunk_text(text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP)
 # --------------------------------------------------------------------------
 async def ingest_document(document_id: str, user_id: str, text: str) -> dict[str, Any]:
     """Chunk + embed + persist. Returns a small ingestion report."""
+    text = _sanitize_text(text)
+
     # clear any prior chunks (re-ingest safe)
     await supabase.delete("document_chunks", filters={"document_id": eq(document_id)})
 

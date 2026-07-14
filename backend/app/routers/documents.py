@@ -64,11 +64,23 @@ async def _store_and_ingest(
     })
 
     # 3) extract + ingest (chunk + embed). A converted photo has no PDF text
-    # layer, so fall back to the OCR'd text for images.
-    text = ingestion.extract_text(content, content_type or "", filename or "")
-    if not text.strip() and ocr_text.strip():
-        text = ocr_text
-    report = await ingestion.ingest_document(doc_id, user_id, text)
+    # layer, so fall back to the OCR'd text for images. The original is
+    # already saved and the document record already exists at this point, so
+    # a parsing/indexing failure here shouldn't fail the whole upload — mark
+    # the document unindexed instead and let the user still see/download it.
+    text = ""
+    try:
+        text = ingestion.extract_text(content, content_type or "", filename or "")
+        if not text.strip() and ocr_text.strip():
+            text = ocr_text
+        report = await ingestion.ingest_document(doc_id, user_id, text)
+    except Exception as e:
+        await supabase.update(
+            "documents",
+            {"ingested": False, "ingest_error": str(e)[:500]},
+            filters={"id": eq(doc_id)},
+        )
+        report = {"chunks": 0}
 
     # 4) enrich metadata + knowledge-graph links (best-effort, needs an LLM)
     enrichment = None

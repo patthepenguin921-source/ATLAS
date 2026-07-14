@@ -7,11 +7,36 @@ key (bypasses RLS) and always scopes queries to the authenticated user.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
 
 from app.config import settings
+
+# NUL bytes and lone (unpaired) UTF-16 surrogate codepoints. Both are valid
+# in a Python str (badly-decoded PDF/OCR text and CMap-less font extraction
+# routinely produce them) but Postgres `text` columns reject either with an
+# "unsupported Unicode escape sequence" / "invalid byte sequence" error.
+_INVALID_TEXT_RE = re.compile(r"[\x00\ud800-\udfff]")
+
+
+def _strip_null_bytes(value: Any) -> Any:
+    """Recursively drop chars Postgres `text` columns reject from a payload.
+
+    Extracted document content (PDF/OCR text, etc.) is the usual source, and
+    can also leak into LLM-derived fields (titles, summaries) that echo it
+    back. PostgREST returns a 400 for the whole request if any string in the
+    payload contains one, so we sanitize at the transport boundary rather
+    than trying to catch every producer.
+    """
+    if isinstance(value, str):
+        return _INVALID_TEXT_RE.sub("", value) if _INVALID_TEXT_RE.search(value) else value
+    if isinstance(value, dict):
+        return {k: _strip_null_bytes(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_null_bytes(v) for v in value]
+    return value
 
 
 class SupabaseError(RuntimeError):
@@ -93,7 +118,7 @@ class SupabaseClient:
         r = await client.post(
             f"{self._rest}/{table}",
             headers=self._headers({"Prefer": prefer}),
-            json=rows,
+            json=_strip_null_bytes(rows),
         )
         return self._parse(r)
 
@@ -103,7 +128,7 @@ class SupabaseClient:
             f"{self._rest}/{table}",
             params=filters,
             headers=self._headers({"Prefer": "return=representation"}),
-            json=patch,
+            json=_strip_null_bytes(patch),
         )
         return self._parse(r)
 
@@ -118,7 +143,9 @@ class SupabaseClient:
 
     async def rpc(self, fn: str, payload: dict[str, Any]) -> Any:
         client = self._require()
-        r = await client.post(f"{self._rest}/rpc/{fn}", headers=self._headers(), json=payload)
+        r = await client.post(
+            f"{self._rest}/rpc/{fn}", headers=self._headers(), json=_strip_null_bytes(payload)
+        )
         return self._parse(r)
 
     # ---- auth ----

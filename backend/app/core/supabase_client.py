@@ -14,6 +14,24 @@ import httpx
 from app.config import settings
 
 
+def _strip_null_bytes(value: Any) -> Any:
+    """Recursively drop NUL bytes from strings in a JSON-able payload.
+
+    Postgres `text` columns reject embedded NULs (error 22P05), which shows
+    up whenever extracted document content (PDF/OCR text, etc.) contains
+    one. PostgREST returns a 400 for the whole request in that case, so we
+    sanitize at the transport boundary rather than trying to catch every
+    producer.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "") if "\x00" in value else value
+    if isinstance(value, dict):
+        return {k: _strip_null_bytes(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_null_bytes(v) for v in value]
+    return value
+
+
 class SupabaseError(RuntimeError):
     def __init__(self, status: int, detail: Any):
         super().__init__(f"Supabase error {status}: {detail}")
@@ -93,7 +111,7 @@ class SupabaseClient:
         r = await client.post(
             f"{self._rest}/{table}",
             headers=self._headers({"Prefer": prefer}),
-            json=rows,
+            json=_strip_null_bytes(rows),
         )
         return self._parse(r)
 
@@ -103,7 +121,7 @@ class SupabaseClient:
             f"{self._rest}/{table}",
             params=filters,
             headers=self._headers({"Prefer": "return=representation"}),
-            json=patch,
+            json=_strip_null_bytes(patch),
         )
         return self._parse(r)
 
@@ -118,7 +136,9 @@ class SupabaseClient:
 
     async def rpc(self, fn: str, payload: dict[str, Any]) -> Any:
         client = self._require()
-        r = await client.post(f"{self._rest}/rpc/{fn}", headers=self._headers(), json=payload)
+        r = await client.post(
+            f"{self._rest}/rpc/{fn}", headers=self._headers(), json=_strip_null_bytes(payload)
+        )
         return self._parse(r)
 
     # ---- auth ----

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { Empty, Badge, SkeletonList } from "@/components/ui";
-import { apiGet, apiUpload, apiPost, apiDelete } from "@/lib/api";
+import { apiGet, apiUpload, apiPost, apiDelete, API_BASE } from "@/lib/api";
 import { pickFromDrive, driveConfigured } from "@/lib/googleDrive";
 
 const ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
@@ -15,6 +15,7 @@ export default function DocumentsPage() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
   const [driveBusy, setDriveBusy] = useState(false);
+  const [backendDown, setBackendDown] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function load() {
@@ -24,6 +25,11 @@ export default function DocumentsPage() {
   }
   useEffect(() => {
     load();
+    // Ping the backend so we can warn clearly if uploads will fail because the
+    // API is unreachable (the usual cause of "Couldn't reach the server").
+    fetch(`${API_BASE}/health`)
+      .then((r) => setBackendDown(!r.ok))
+      .catch(() => setBackendDown(true));
   }, []);
 
   function requireCourse(): boolean {
@@ -100,6 +106,17 @@ export default function DocumentsPage() {
 
   return (
     <AppShell title="Documents" subtitle="Upload once — searchable forever">
+      {backendDown && (
+        <div className="card border-atlas-bad/40 text-sm mb-6">
+          <div className="font-medium text-atlas-bad">Can't reach the Atlas backend</div>
+          <div className="text-atlas-muted mt-1">
+            Uploads and Drive imports will fail until the API is reachable. Configured API URL:{" "}
+            <code className="text-atlas-text break-all">{API_BASE}</code>. If this is your deployed
+            backend, make sure it's running, redeployed with the latest code, allows your site's
+            origin (CORS), and permits unauthenticated requests.
+          </div>
+        </div>
+      )}
       <form onSubmit={upload} className="card mb-6">
         <div className="flex flex-wrap items-end gap-3">
           <div>

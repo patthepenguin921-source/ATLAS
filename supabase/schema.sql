@@ -957,3 +957,32 @@ exception when duplicate_object then null; end $$;
 create index if not exists idx_courses_linked
   on public.courses(user_id, linked_course_id);
 
+-- >>>>>>>>>> 0010_chat_projects_and_notes.sql <<<<<<<<<<
+-- Chat projects/folders, conversation tags + archive, and assignment notes.
+
+create table if not exists public.chat_projects (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  name        text not null,
+  color       text,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+
+create index if not exists idx_chat_projects_user on public.chat_projects(user_id);
+
+alter table public.conversations
+  add column if not exists project_id uuid references public.chat_projects(id) on delete set null,
+  add column if not exists tags       text[] not null default '{}',
+  add column if not exists archived   boolean not null default false;
+
+create index if not exists idx_conversations_project on public.conversations(user_id, project_id);
+
+alter table public.assignments
+  add column if not exists notes text;
+
+alter table public.chat_projects enable row level security;
+drop policy if exists chat_projects_owner on public.chat_projects;
+create policy chat_projects_owner on public.chat_projects
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+

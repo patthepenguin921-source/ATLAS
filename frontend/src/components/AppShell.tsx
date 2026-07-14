@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "./AuthProvider";
 import { Sidebar } from "./Sidebar";
+import { FloatingChat } from "./FloatingChat";
 
 export function AppShell({
   title,
@@ -44,6 +45,7 @@ export function AppShell({
         </header>
         <div className="p-8 max-w-6xl">{children}</div>
       </main>
+      <FloatingChat />
     </div>
   );
 }

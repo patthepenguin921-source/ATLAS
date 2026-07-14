@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Stat, Section, Empty, Loading, gradeTone, Badge } from "@/components/ui";
+import { Stat, Section, Empty, Loading, gradeTone, Badge, RiskBadge } from "@/components/ui";
 import { apiGet, apiPost } from "@/lib/api";
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [planning, setPlanning] = useState(false);
@@ -103,7 +105,9 @@ export default function DashboardPage() {
               {data.priorities_today?.length ? (
                 <div className="space-y-2">
                   {data.priorities_today.map((a: any) => (
-                    <div key={a.id} className="card card-hover flex items-center justify-between">
+                    <button key={a.id}
+                      onClick={() => router.push("/assignments")}
+                      className="card card-hover w-full text-left flex items-center justify-between">
                       <div>
                         <div className="text-sm font-medium">{a.title}</div>
                         <div className="text-xs text-atlas-muted">
@@ -113,7 +117,7 @@ export default function DashboardPage() {
                       <Badge tone="accent">
                         {a.due_date ? new Date(a.due_date).toLocaleDateString() : "—"}
                       </Badge>
-                    </div>
+                    </button>
                   ))}
                 </div>
               ) : (
@@ -125,15 +129,17 @@ export default function DashboardPage() {
               {data.at_risk?.length ? (
                 <div className="space-y-2">
                   {data.at_risk.map((a: any) => (
-                    <div key={a.id} className="card flex items-center justify-between">
-                      <div>
-                        <div className="text-sm font-medium">{a.title}</div>
+                    <button key={a.id}
+                      onClick={() => router.push("/assignments")}
+                      className="card card-hover w-full text-left flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium truncate">{a.title}</div>
                         <div className="text-xs text-atlas-muted">
                           {courseName(a.course_id)} · {a.days_left}d left
                         </div>
                       </div>
-                      <Badge tone="bad">risk {a.risk_score}</Badge>
-                    </div>
+                      <RiskBadge level={a.risk_level} />
+                    </button>
                   ))}
                 </div>
               ) : (

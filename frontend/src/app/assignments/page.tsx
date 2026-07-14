@@ -16,8 +16,13 @@ export default function AssignmentsPage() {
   const [courses, setCourses] = useState<any[]>([]);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<any | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [detail, setDetail] = useState<{ description: string; notes: string }>({
+    description: "", notes: "",
+  });
   const [form, setForm] = useState<any>({
     title: "", course_id: "", category: "homework", due_date: "", estimated_minutes: 30,
+    description: "", notes: "",
   });
 
   async function load() {
@@ -35,8 +40,26 @@ export default function AssignmentsPage() {
     if (body.due_date) body.due_date = new Date(body.due_date).toISOString();
     if (!body.course_id) delete body.course_id;
     await apiPost("/assignments", body);
-    setForm({ title: "", course_id: "", category: "homework", due_date: "", estimated_minutes: 30 });
+    setForm({ title: "", course_id: "", category: "homework", due_date: "", estimated_minutes: 30,
+      description: "", notes: "" });
     setOpen(false);
+    load();
+  }
+
+  function openDetail(a: any) {
+    setSelected(a);
+    setEditing(false);
+    setDetail({ description: a.description ?? "", notes: a.notes ?? "" });
+  }
+
+  async function saveDetail() {
+    if (!selected) return;
+    await apiPatch(`/assignments/${selected.id}`, {
+      description: detail.description,
+      notes: detail.notes,
+    });
+    setSelected((s: any) => (s ? { ...s, ...detail } : s));
+    setEditing(false);
     load();
   }
 
@@ -90,6 +113,18 @@ export default function AssignmentsPage() {
             <input className="input" type="datetime-local" value={form.due_date}
               onChange={(e) => setForm({ ...form, due_date: e.target.value })} />
           </div>
+          <div className="md:col-span-5">
+            <label className="label">Details & instructions</label>
+            <textarea className="input min-h-[70px]" value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+              placeholder="Instructions, rubric, what's expected…" />
+          </div>
+          <div className="md:col-span-5">
+            <label className="label">Notes</label>
+            <textarea className="input min-h-[50px]" value={form.notes}
+              onChange={(e) => setForm({ ...form, notes: e.target.value })}
+              placeholder="Your own notes for this assignment…" />
+          </div>
           <button className="btn-primary md:col-span-5">Save assignment</button>
         </form>
       )}
@@ -101,7 +136,7 @@ export default function AssignmentsPage() {
           <div
             key={a.id}
             className="card card-hover flex items-center justify-between gap-4 cursor-pointer"
-            onClick={() => setSelected(a)}
+            onClick={() => openDetail(a)}
           >
             <div className="min-w-0">
               <div className="font-medium truncate flex items-center gap-2">
@@ -139,18 +174,28 @@ export default function AssignmentsPage() {
           selected && (
             <>
               <button
-                className="btn-ghost text-atlas-bad hover:!border-atlas-bad/50"
+                className="btn-ghost text-atlas-bad hover:!border-atlas-bad/50 mr-auto"
                 onClick={() => remove(selected.id)}
               >
                 Delete
               </button>
-              <button
-                className="btn-primary"
-                onClick={() => setStatus(selected.id, "graded")}
-                disabled={selected.status === "graded"}
-              >
-                {selected.status === "graded" ? "Completed" : "Mark complete"}
-              </button>
+              {editing ? (
+                <>
+                  <button className="btn-ghost" onClick={() => setEditing(false)}>Cancel</button>
+                  <button className="btn-primary" onClick={saveDetail}>Save</button>
+                </>
+              ) : (
+                <>
+                  <button className="btn-ghost" onClick={() => setEditing(true)}>Edit</button>
+                  <button
+                    className="btn-primary"
+                    onClick={() => setStatus(selected.id, "graded")}
+                    disabled={selected.status === "graded"}
+                  >
+                    {selected.status === "graded" ? "Completed" : "Mark complete"}
+                  </button>
+                </>
+              )}
             </>
           )
         }
@@ -167,14 +212,43 @@ export default function AssignmentsPage() {
                 Due {new Date(selected.due_date).toLocaleString()}
               </div>
             )}
-            <div>
-              <div className="text-xs uppercase text-atlas-muted mb-1">Details & instructions</div>
-              {selected.description ? (
-                <p className="whitespace-pre-wrap">{selected.description}</p>
-              ) : (
-                <p className="text-atlas-muted italic">No additional details for this assignment.</p>
-              )}
-            </div>
+
+            {editing ? (
+              <>
+                <div>
+                  <div className="label">Details & instructions</div>
+                  <textarea className="input min-h-[90px]" value={detail.description}
+                    onChange={(e) => setDetail({ ...detail, description: e.target.value })}
+                    placeholder="Instructions, rubric, what's expected…" />
+                </div>
+                <div>
+                  <div className="label">Notes</div>
+                  <textarea className="input min-h-[70px]" value={detail.notes}
+                    onChange={(e) => setDetail({ ...detail, notes: e.target.value })}
+                    placeholder="Your own notes…" />
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <div className="text-xs uppercase text-atlas-muted mb-1">Details & instructions</div>
+                  {selected.description ? (
+                    <p className="whitespace-pre-wrap">{selected.description}</p>
+                  ) : (
+                    <p className="text-atlas-muted italic">No details yet — tap Edit to add instructions.</p>
+                  )}
+                </div>
+                <div>
+                  <div className="text-xs uppercase text-atlas-muted mb-1">Notes</div>
+                  {selected.notes ? (
+                    <p className="whitespace-pre-wrap">{selected.notes}</p>
+                  ) : (
+                    <p className="text-atlas-muted italic">No notes yet.</p>
+                  )}
+                </div>
+              </>
+            )}
+
             <div className="flex flex-wrap gap-4 text-xs text-atlas-muted pt-1">
               {selected.points_possible != null && <span>Points: {selected.points_possible}</span>}
               {selected.estimated_minutes != null && <span>Est. {selected.estimated_minutes} min</span>}

@@ -6,19 +6,18 @@ const config: Config = {
     extend: {
       colors: {
         atlas: {
-          // "Ink + electric lime" — near-black desaturated ink, lime accent,
-          // cool teal-grey secondary.
-          bg: "#0c0e0d",
-          panel: "#141715",
-          panel2: "#1b1f1c",
-          border: "#2a302b",
-          text: "#e8ebe6",
-          muted: "#8b948a",
-          accent: "#b6f36b",   // electric lime
-          accent2: "#7dd3c0",  // cool teal-grey
-          good: "#86e39a",
-          warn: "#e9c46a",
-          bad: "#f4776b",
+          // "Cool slate" — neutral dark slate, soft indigo-blue accent.
+          bg: "#16181d",
+          panel: "#1d2027",
+          panel2: "#252932",
+          border: "#333846",
+          text: "#e7e9ee",
+          muted: "#9096a3",
+          accent: "#6a8bff",   // soft indigo-blue
+          accent2: "#7dd3fc",  // sky
+          good: "#4ade80",
+          warn: "#fbbf24",
+          bad: "#f87171",
         },
       },
       fontFamily: {
@@ -27,7 +26,7 @@ const config: Config = {
       },
       boxShadow: {
         soft: "0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5)",
-        glow: "0 0 0 1px rgba(182,243,107,0.25), 0 8px 30px -10px rgba(182,243,107,0.15)",
+        glow: "0 0 0 1px rgba(106,139,255,0.30), 0 8px 30px -10px rgba(106,139,255,0.20)",
       },
       keyframes: {
         shimmer: {

@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 from typing import Any
 
-from app.core.supabase_client import eq, supabase
+from app.core.supabase_client import _INVALID_TEXT_RE, eq, supabase
 from app.embeddings.embedder import embed_texts
 
 CHUNK_CHARS = 1400
@@ -93,8 +93,8 @@ def ocr_image(content: bytes) -> str:
 # Text extraction
 # --------------------------------------------------------------------------
 def _sanitize_text(text: str) -> str:
-    """Strip NUL bytes and other chars Postgres `text` columns reject."""
-    return text.replace("\x00", "")
+    """Strip NUL bytes and lone surrogates that Postgres `text` columns reject."""
+    return _INVALID_TEXT_RE.sub("", text)
 
 
 def extract_text(content: bytes, mime_type: str, filename: str = "") -> str:

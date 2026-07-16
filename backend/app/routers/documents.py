@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.agents.archivist import Archivist
 from app.config import settings
+from app.core.r2_client import r2
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.schemas import DocumentPatchRequest, DriveImportRequest, IngestTextRequest
@@ -69,10 +70,7 @@ async def _store_and_ingest(
 
     # 1) store the original file (best-effort; text ingest still works without it)
     try:
-        await supabase.upload(
-            settings.atlas_storage_bucket, storage_path, content,
-            content_type or "application/octet-stream",
-        )
+        await r2.upload(storage_path, content, content_type or "application/octet-stream")
     except Exception:
         storage_path = None
 
@@ -174,9 +172,7 @@ async def get_document(document_id: str, user: CurrentUser = Depends(get_current
     doc = rows[0]
     if doc.get("storage_path"):
         try:
-            doc["download_url"] = await supabase.signed_url(
-                settings.atlas_storage_bucket, doc["storage_path"]
-            )
+            doc["download_url"] = r2.signed_url(doc["storage_path"])
         except Exception:
             doc["download_url"] = None
     return doc
@@ -325,5 +321,10 @@ async def delete_document(document_id: str, user: CurrentUser = Depends(get_curr
         "documents", columns="storage_path",
         filters={"user_id": eq(user.id), "id": eq(document_id)}, limit=1,
     )
+    # Remove the file before the row so a storage failure leaves the document
+    # (and its file) intact for retry instead of orphaning the file forever.
+    storage_path = rows[0].get("storage_path") if rows else None
+    if storage_path:
+        await r2.remove(storage_path)
     await supabase.delete("documents", filters={"user_id": eq(user.id), "id": eq(document_id)})
     return None

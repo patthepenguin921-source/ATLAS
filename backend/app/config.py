@@ -11,11 +11,16 @@ class Settings(BaseSettings):
         env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore"
     )
 
-    # ---- Supabase ----
+    # ---- Supabase (Postgres + auth) ----
     supabase_url: str = ""
     supabase_anon_key: str = ""
     supabase_service_role_key: str = ""
+
+    # ---- Storage (Cloudflare R2 — S3-compatible) ----
     atlas_storage_bucket: str = "atlas-documents"
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
 
     # ---- Reasoning engine (pluggable provider) ----
     atlas_llm_provider: str = "groq"          # groq (free) | anthropic (paid, higher quality)
@@ -52,6 +57,10 @@ class Settings(BaseSettings):
     @property
     def has_supabase(self) -> bool:
         return bool(self.supabase_url and self.supabase_service_role_key)
+
+    @property
+    def has_r2(self) -> bool:
+        return bool(self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key)
 
     @property
     def has_llm(self) -> bool:

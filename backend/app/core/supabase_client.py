@@ -1,9 +1,11 @@
-"""Async Supabase data-access layer (PostgREST + Storage + RPC over httpx).
+"""Async Supabase data-access layer (PostgREST + Auth + RPC over httpx).
 
 We talk to PostgREST directly rather than pulling in the full Supabase SDK:
 it keeps dependencies light, the calls fully async, and gives us precise
 control over headers and error handling. The backend uses the *service role*
 key (bypasses RLS) and always scopes queries to the authenticated user.
+
+File storage lives in Cloudflare R2, not here — see `r2_client.py`.
 """
 from __future__ import annotations
 
@@ -51,7 +53,6 @@ class SupabaseClient:
         self._base = settings.supabase_url.rstrip("/")
         self._key = settings.supabase_service_role_key
         self._rest = f"{self._base}/rest/v1"
-        self._storage = f"{self._base}/storage/v1"
         self._client: httpx.AsyncClient | None = None
 
     # ---- lifecycle ----
@@ -164,42 +165,6 @@ class SupabaseClient:
             headers={"apikey": key, "Authorization": f"Bearer {access_token}"},
         )
         return self._parse(r)
-
-    # ---- storage ----
-    async def upload(self, bucket: str, path: str, content: bytes, content_type: str) -> None:
-        client = self._require()
-        r = await client.post(
-            f"{self._storage}/object/{bucket}/{path}",
-            headers={
-                "apikey": self._key,
-                "Authorization": f"Bearer {self._key}",
-                "Content-Type": content_type,
-                "x-upsert": "true",
-            },
-            content=content,
-        )
-        if r.status_code >= 300:
-            raise SupabaseError(r.status_code, r.text)
-
-    async def download(self, bucket: str, path: str) -> bytes:
-        client = self._require()
-        r = await client.get(
-            f"{self._storage}/object/{bucket}/{path}",
-            headers={"apikey": self._key, "Authorization": f"Bearer {self._key}"},
-        )
-        if r.status_code >= 300:
-            raise SupabaseError(r.status_code, r.text)
-        return r.content
-
-    async def signed_url(self, bucket: str, path: str, expires_in: int = 3600) -> str:
-        client = self._require()
-        r = await client.post(
-            f"{self._storage}/object/sign/{bucket}/{path}",
-            headers=self._headers(),
-            json={"expiresIn": expires_in},
-        )
-        data = self._parse(r)
-        return f"{self._base}/storage/v1{data['signedURL']}"
 
     # ---- helpers ----
     @staticmethod

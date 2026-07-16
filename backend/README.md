@@ -41,7 +41,7 @@ pytest -q            # runs without any external services
 app/
   main.py            FastAPI app + router mounting
   config.py          env-driven settings
-  core/              supabase client, JWT auth, generic CRUD factory
+  core/              supabase client, R2 storage client, JWT auth, generic CRUD factory
   llm/claude.py      grounded reasoning wrapper (pluggable: groq | anthropic)
   embeddings/        pluggable embeddings (voyage | openai | local)
   services/          memory retrieval, ingestion, knowledge model, analytics

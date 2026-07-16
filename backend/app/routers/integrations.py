@@ -12,9 +12,17 @@ from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.integrations import PROVIDERS, run_sync
 from app.integrations.powerschool import encrypt_credentials
+from app.integrations.powerschool_client import PowerSchoolClient
 from app.schemas import GenericBody, PowerSchoolConnectRequest
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+
+def _normalize_base_url(raw: str) -> str:
+    base_url = raw.strip().rstrip("/")
+    if not base_url.startswith("http"):
+        base_url = f"https://{base_url}"
+    return base_url
 
 
 @router.get("/providers")
@@ -58,15 +66,28 @@ async def disconnect_integration(provider: str, user: CurrentUser = Depends(get_
     return None
 
 
+@router.get("/powerschool/probe")
+async def probe_powerschool(base_url: str, user: CurrentUser = Depends(get_current_user)):
+    """Fetch the PowerSchool login page and report what was found — no
+    credentials sent — so a bad URL or an unsupported login flow (e.g. a
+    district that requires SSO instead of a username/password form) can be
+    diagnosed without server log access."""
+    client = PowerSchoolClient(_normalize_base_url(base_url), "", "")
+    try:
+        return await client.probe_login_page()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Could not reach that portal URL: {e}") from e
+    finally:
+        await client.aclose()
+
+
 @router.post("/powerschool/connect", status_code=201)
 async def connect_powerschool(
     body: PowerSchoolConnectRequest, user: CurrentUser = Depends(get_current_user)
 ):
     """Save the portal URL + login and immediately run a first sync, so the
     caller finds out right away if the credentials/URL don't work."""
-    base_url = body.base_url.strip().rstrip("/")
-    if not base_url.startswith("http"):
-        base_url = f"https://{base_url}"
+    base_url = _normalize_base_url(body.base_url)
     row = {
         "user_id": user.id,
         "provider": "powerschool",

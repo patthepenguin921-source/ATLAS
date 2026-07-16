@@ -144,6 +144,30 @@ class PowerSchoolClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def probe_login_page(self) -> dict:
+        """Fetch the login page and report what we found, without sending
+        credentials — used to diagnose 'could not find the login form'
+        without needing server log access."""
+        r = await self._client.get("/guardian/home.html")
+        soup = BeautifulSoup(r.text, "html.parser")
+        forms = [
+            {
+                "id": f.get("id"),
+                "action": f.get("action"),
+                "input_names": [i.get("name") for i in f.find_all("input") if i.get("name")],
+            }
+            for f in soup.find_all("form")
+        ]
+        return {
+            "requested_url": f"{self._base}/guardian/home.html",
+            "final_url": str(r.url),
+            "status_code": r.status_code,
+            "page_title": soup.title.get_text(strip=True) if soup.title else None,
+            "has_login_form": any("contextData" in (f["input_names"] or []) for f in forms),
+            "forms": forms,
+            "html_snippet": r.text[:4000],
+        }
+
     async def login(self) -> None:
         r = await self._client.get("/guardian/home.html")
         soup = BeautifulSoup(r.text, "html.parser")

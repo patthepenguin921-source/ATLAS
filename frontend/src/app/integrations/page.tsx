@@ -23,6 +23,16 @@ interface SyncResult {
   detail?: string;
 }
 
+interface ProbeResult {
+  requested_url: string;
+  final_url: string;
+  status_code: number;
+  page_title: string | null;
+  has_login_form: boolean;
+  forms: { id: string | null; action: string | null; input_names: string[] }[];
+  html_snippet: string;
+}
+
 const STATUS_TONE: Record<string, "good" | "warn" | "bad" | "default"> = {
   success: "good",
   running: "warn",
@@ -38,6 +48,10 @@ export default function IntegrationsPage() {
   const [lastResult, setLastResult] = useState<SyncResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ base_url: "", username: "", password: "" });
+  const [probing, setProbing] = useState(false);
+  const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
+  const [probeError, setProbeError] = useState<string | null>(null);
+  const [showSnippet, setShowSnippet] = useState(false);
 
   async function load() {
     setIntegrations(await apiGet<Integration[]>("/integrations"));
@@ -48,6 +62,31 @@ export default function IntegrationsPage() {
 
   const powerschool = integrations?.find((i) => i.provider === "powerschool");
 
+  function closeConnectModal() {
+    setConnectOpen(false);
+    setProbeResult(null);
+    setProbeError(null);
+    setShowSnippet(false);
+  }
+
+  async function testUrl() {
+    if (!form.base_url.trim()) return;
+    setProbing(true);
+    setProbeError(null);
+    setProbeResult(null);
+    setShowSnippet(false);
+    try {
+      const result = await apiGet<ProbeResult>(
+        `/integrations/powerschool/probe?base_url=${encodeURIComponent(form.base_url)}`
+      );
+      setProbeResult(result);
+    } catch (err: any) {
+      setProbeError(err.message ?? "Could not reach that URL.");
+    } finally {
+      setProbing(false);
+    }
+  }
+
   async function connect(e: React.FormEvent) {
     e.preventDefault();
     setConnecting(true);
@@ -56,7 +95,7 @@ export default function IntegrationsPage() {
     try {
       const result = await apiPost<SyncResult>("/integrations/powerschool/connect", form);
       setLastResult(result);
-      setConnectOpen(false);
+      closeConnectModal();
       setForm({ base_url: "", username: "", password: "" });
       await load();
     } catch (err: any) {
@@ -165,11 +204,11 @@ export default function IntegrationsPage() {
 
       <Modal
         open={connectOpen}
-        onClose={() => setConnectOpen(false)}
+        onClose={closeConnectModal}
         title="Connect PowerSchool"
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setConnectOpen(false)}>Cancel</button>
+            <button className="btn-ghost" onClick={closeConnectModal}>Cancel</button>
             <button className="btn-primary" form="ps-connect-form" disabled={connecting}>
               {connecting ? "Connecting…" : "Connect"}
             </button>
@@ -184,14 +223,69 @@ export default function IntegrationsPage() {
           {error && <div className="text-sm text-atlas-bad">{error}</div>}
           <div>
             <label className="label">Portal URL</label>
-            <input
-              className="input"
-              required
-              placeholder="https://yourdistrict.powerschool.com"
-              value={form.base_url}
-              onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-            />
+            <div className="flex gap-2">
+              <input
+                className="input"
+                required
+                placeholder="https://yourdistrict.powerschool.com"
+                value={form.base_url}
+                onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+              />
+              <button
+                type="button"
+                className="btn-ghost shrink-0"
+                disabled={probing || !form.base_url.trim()}
+                onClick={testUrl}
+              >
+                {probing ? "Testing…" : "Test URL"}
+              </button>
+            </div>
           </div>
+
+          {probeError && <div className="text-sm text-atlas-bad">{probeError}</div>}
+          {probeResult && (
+            <div className="card text-xs space-y-1.5 bg-atlas-panel2">
+              <div>
+                <span className="text-atlas-muted">Fetched: </span>
+                {probeResult.final_url} ({probeResult.status_code})
+              </div>
+              {probeResult.page_title && (
+                <div>
+                  <span className="text-atlas-muted">Page title: </span>
+                  {probeResult.page_title}
+                </div>
+              )}
+              <div>
+                {probeResult.has_login_form ? (
+                  <span className="text-atlas-good">✓ Found a username/password login form</span>
+                ) : (
+                  <span className="text-atlas-bad">
+                    ✗ No username/password login form found — this district may require SSO
+                    (Google/Microsoft/Clever), which this integration can't use.
+                  </span>
+                )}
+              </div>
+              {probeResult.forms.length > 0 && (
+                <div>
+                  <span className="text-atlas-muted">Forms found: </span>
+                  {probeResult.forms.map((f, i) => f.id || `#${i}`).join(", ")}
+                </div>
+              )}
+              <button
+                type="button"
+                className="text-atlas-accent underline"
+                onClick={() => setShowSnippet((v) => !v)}
+              >
+                {showSnippet ? "Hide" : "Show"} raw HTML snippet
+              </button>
+              {showSnippet && (
+                <pre className="whitespace-pre-wrap break-all bg-atlas-bg p-2 rounded max-h-64 overflow-auto">
+                  {probeResult.html_snippet}
+                </pre>
+              )}
+            </div>
+          )}
+
           <div>
             <label className="label">Username</label>
             <input

@@ -117,6 +117,42 @@ def test_login_success_and_scrape():
     asyncio.run(run())
 
 
+def test_probe_login_page_reports_form_found():
+    async def run():
+        transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))
+        client = PowerSchoolClient("https://fake.powerschool.com", "", "", transport=transport)
+        try:
+            result = await client.probe_login_page()
+            assert result["has_login_form"] is True
+            assert result["status_code"] == 200
+            assert any("contextData" in f["input_names"] for f in result["forms"])
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_probe_login_page_reports_sso_redirect():
+    """Simulates a district that requires SSO — no username/password form,
+    so `has_login_form` should come back False instead of raising."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><head><title>Sign in with Google</title></head><body>"
+                                          "<a href='https://accounts.google.com/...'>Sign in with Google</a>"
+                                          "</body></html>")
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient("https://fake.powerschool.com", "", "", transport=transport)
+        try:
+            result = await client.probe_login_page()
+            assert result["has_login_form"] is False
+            assert result["page_title"] == "Sign in with Google"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_login_wrong_password_raises():
     async def run():
         transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))

@@ -9,6 +9,11 @@
       "root": "backend",
       "framework": "fastapi",
       "entrypoint": "app.main:app",
+      "functions": {
+        "app/main.py": {
+          "maxDuration": 60
+        }
+      },
       "routes": [
         {
           "src": "/api/backend/(.*)",

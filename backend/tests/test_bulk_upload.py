@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 
 from app.agents.archivist import Archivist
 from app.config import settings
+from app.core.r2_client import r2
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import supabase
 from app.main import app
@@ -46,12 +47,6 @@ class FakeSupabase:
             if str(row.get(k)) != str(want):
                 return False
         return True
-
-    async def upload(self, bucket, path, content, content_type):
-        return None
-
-    async def signed_url(self, bucket, path, expires_in=3600):
-        return f"https://fake/{bucket}/{path}"
 
     async def select(self, table, *, columns="*", filters=None, order=None, limit=None, single=False):
         rows = [r for r in self.tables.setdefault(table, []) if self._matches(r, filters)]
@@ -83,11 +78,30 @@ class FakeSupabase:
         return removed
 
 
+class FakeR2:
+    """Minimal in-memory stand-in for the R2 object store."""
+
+    def __init__(self):
+        self.objects: dict[str, bytes] = {}
+
+    async def upload(self, key, content, content_type):
+        self.objects[key] = content
+
+    def signed_url(self, key, expires_in=3600):
+        return f"https://fake-r2/{key}"
+
+    async def remove(self, key):
+        self.objects.pop(key, None)
+
+
 @pytest.fixture
 def fake_db(monkeypatch):
     fake = FakeSupabase()
-    for name in ("upload", "signed_url", "select", "insert", "update", "delete"):
+    for name in ("select", "insert", "update", "delete"):
         monkeypatch.setattr(supabase, name, getattr(fake, name))
+    fake_storage = FakeR2()
+    for name in ("upload", "signed_url", "remove"):
+        monkeypatch.setattr(r2, name, getattr(fake_storage, name))
     app.dependency_overrides[get_current_user] = lambda: CurrentUser(id=USER_ID, email="u@test")
     yield fake
     app.dependency_overrides.pop(get_current_user, None)

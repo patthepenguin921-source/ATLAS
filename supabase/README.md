@@ -55,8 +55,12 @@ Plus RPC functions: `match_document_chunks`, `match_concepts`,
 - The **browser** uses the anon/publishable key and is fully constrained by RLS.
 - The **backend** uses the service-role key (bypasses RLS) and always scopes
   queries to the authenticated user it resolved from the JWT.
-- Storage bucket `atlas-documents` is **private**; objects are namespaced by
-  `‹userId›/…` and policies restrict access to the owning user.
+
+Uploaded document *files* no longer live here — they're stored in Cloudflare
+R2 (see `app/core/r2_client.py`); only the `documents` table (with a
+`storage_path` pointer) lives in Postgres. `migrations/0007_storage.sql`
+provisions a Supabase Storage bucket + RLS policies from when files lived
+here; it's harmless to leave applied but is no longer used by the app.
 
 ## Embedding dimension
 

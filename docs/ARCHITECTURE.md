@@ -29,14 +29,18 @@ rather than a single large model. This document explains how the pieces fit.
         │  · structured facts    │        │ (reasoning)    │
         │  · pgvector embeddings │        └────────────────┘
         │  · RLS per user        │
-        │ Supabase Storage       │        Embeddings: Voyage / OpenAI / local
-        │  · original files      │
-        └────────────────────────┘
+        └───────┬────────────────┘        Embeddings: Voyage / OpenAI / local
+                │
+        ┌───────▼────────────────┐
+        │ Cloudflare R2           │
+        │  · original files       │
+        │  · S3-compatible API    │
+        └──────────────────────────┘
 ```
 
 ## Layers
 
-### 1. Memory layer (Supabase Postgres + Storage)
+### 1. Memory layer (Supabase Postgres + Cloudflare R2)
 The **permanent factual memory**. Every structured entity — courses, teachers,
 assignments, grades, quizzes, calendar, study sessions, learning objectives,
 progress metrics, daily plans, weekly summaries — is a table, owned per-user and
@@ -49,7 +53,10 @@ assignments linked to it." The vision named Qdrant; we chose pgvector to keep
 Phase 1 to a single datastore, isolated behind `app/embeddings/` + the
 `match_document_chunks` RPC so a later swap is localized.
 
-Original files are stored in Supabase Storage and linked from `documents`.
+Original files are stored in Cloudflare R2 (S3-compatible object storage —
+`app/core/r2_client.py`) and linked from `documents` via `storage_path`. R2's
+free tier is 10x Supabase Storage's and has no egress fees; deleting a
+`documents` row also removes the underlying R2 object.
 
 ### 2. Intelligence layer (Claude)
 Claude is the **reasoning engine, not the memory**. The flow for any grounded
@@ -89,13 +96,18 @@ surface it for review beforehand. Grades feed the model automatically
 
 ## Security model
 - **RLS everywhere** — a user can only touch rows where `user_id = auth.uid()`.
-- **Browser** uses the anon key → fully constrained by RLS.
+- **Browser** uses the anon key → fully constrained by RLS; it never talks to
+  storage directly.
 - **Backend** uses the service-role key (bypasses RLS) and always scopes queries
-  to the user id it resolved from the verified JWT.
-- **Storage** bucket is private; objects namespaced by `‹userId›/…`.
+  to the user id it resolved from the verified JWT. The same user-id scoping
+  (not RLS) is what protects R2 objects, since the backend is the only caller.
+- **Storage** bucket is private; objects namespaced by `‹userId›/…`, accessed
+  via short-lived signed URLs.
 - **Secrets** live only in environment variables, never in the repo.
 
 ## Path to AWS
-Interfaces are thin on purpose: Storage (Supabase Storage → S3), Auth (Supabase
-Auth → Cognito), vectors (pgvector → managed vector DB), and the LLM/embedding
-providers are all swappable without touching business logic.
+Interfaces are thin on purpose: Storage already moved off Supabase to
+Cloudflare R2, which speaks the S3 API directly (`app/core/r2_client.py`), so a
+later hop to AWS S3 itself is a config change, not a rewrite. Auth (Supabase
+Auth → Cognito) and vectors (pgvector → managed vector DB) remain similarly
+swappable without touching business logic.

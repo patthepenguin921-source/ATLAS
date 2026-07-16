@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.config import settings
+from app.core.r2_client import R2Error, r2
 from app.core.supabase_client import SupabaseError, supabase
 from app.routers import api_router
 from app.routers import integrations, profile
@@ -17,10 +18,12 @@ from app.routers import integrations, profile
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await supabase.start()
+    await r2.start()
     try:
         yield
     finally:
         await supabase.stop()
+        await r2.stop()
 
 
 app = FastAPI(
@@ -60,6 +63,15 @@ async def supabase_error_handler(request: Request, exc: SupabaseError):
     )
 
 
+@app.exception_handler(R2Error)
+async def r2_error_handler(request: Request, exc: R2Error):
+    status_code = exc.status if exc.status in (429, 503) else 502
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": {"source": "r2", "status": exc.status, "error": exc.detail}},
+    )
+
+
 @app.get("/health", tags=["system"])
 async def health():
     return {
@@ -67,6 +79,7 @@ async def health():
         "version": __version__,
         "env": settings.atlas_env,
         "supabase_configured": settings.has_supabase,
+        "r2_configured": settings.has_r2,
         "llm_configured": settings.has_llm,
         "llm_provider": settings.atlas_llm_provider,
         "embeddings_provider": settings.embeddings_provider,

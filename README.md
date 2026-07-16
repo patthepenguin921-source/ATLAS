@@ -39,7 +39,7 @@ Atlas is a **collection of specialized systems**, not one monolithic AI:
   assignments, grades, calendar, study sessions, the knowledge graph, the
   student knowledge model). `pgvector` stores semantic embeddings in the *same*
   database, so a single query can join facts and meaning. Original files live in
-  Supabase Storage.
+  Cloudflare R2 (S3-compatible object storage — 10 GB free, no egress fees).
 - **Intelligence layer** — Claude is the reasoning engine. It is *not* the
   memory: every response is grounded in the student's real academic history,
   retrieved from the databases first.
@@ -61,7 +61,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full picture and
    ```bash
    cd backend && python -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt
-   cp ../.env.example ../.env      # fill in Supabase + Anthropic keys
+   cp ../.env.example ../.env      # fill in Supabase + R2 + Anthropic keys
    uvicorn app.main:app --reload   # http://localhost:8000/docs
    ```
 3. **Frontend**
@@ -74,15 +74,17 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full picture and
 Or bring up the backend with Docker: `docker compose up backend`.
 
 > **Runs keyless for development.** Without keys the backend still boots and the
-> embeddings fall back to a local encoder. Add your Supabase + Anthropic keys to
-> unlock persistence and reasoning.
+> embeddings fall back to a local encoder. Add your Supabase, R2, and Anthropic
+> keys to unlock persistence, file storage, and reasoning.
 
 ## Configuration
 
 All configuration is via environment variables — see [`.env.example`](.env.example).
 Secrets never live in the repo. The backend uses the Supabase **service-role**
-key (server-side only); the browser uses the **anon/publishable** key and is
-fully constrained by Row Level Security.
+key (server-side only) for Postgres/auth, and R2 API credentials (also
+server-side only) for document storage; the browser uses the Supabase
+**anon/publishable** key for auth and is fully constrained by Row Level
+Security — it never talks to storage directly.
 
 ## Design decisions worth knowing
 
@@ -92,9 +94,11 @@ fully constrained by Row Level Security.
 - **Embeddings are pluggable.** Anthropic doesn't provide embeddings, so Atlas
   supports Voyage (recommended) or OpenAI, with a keyless local fallback for
   dev/CI.
-- **Migrate-to-AWS-ready.** Storage/auth/vectors sit behind thin interfaces so
-  services can move to S3 / Cognito / a managed vector DB without an
-  architectural rewrite.
+- **Storage on Cloudflare R2, not Supabase Storage.** Same S3-compatible shape
+  the architecture was already designed around (`app/core/r2_client.py`), just
+  with 10x the free storage and no egress fees. Auth/vectors still sit behind
+  thin interfaces so they can move (e.g. to Cognito / a managed vector DB)
+  without an architectural rewrite.
 
 ## Status
 

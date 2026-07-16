@@ -111,13 +111,25 @@ class SupabaseClient:
         r = await client.get(f"{self._rest}/{table}", params=params, headers=headers)
         return self._parse(r)
 
-    async def insert(self, table: str, rows: dict | list[dict], *, upsert: bool = False) -> Any:
+    async def insert(
+        self, table: str, rows: dict | list[dict], *,
+        upsert: bool = False, on_conflict: str | None = None,
+    ) -> Any:
         client = self._require()
         prefer = "return=representation"
         if upsert:
             prefer += ",resolution=merge-duplicates"
+        params: dict[str, str] = {}
+        # PostgREST's merge-duplicates resolves against the table's primary
+        # key unless told otherwise — for tables where we upsert on a
+        # different unique constraint (e.g. integrations' (user_id,
+        # provider)) without ever supplying that PK ourselves, omitting this
+        # means every "upsert" is just a plain insert that 409s on retry.
+        if upsert and on_conflict:
+            params["on_conflict"] = on_conflict
         r = await client.post(
             f"{self._rest}/{table}",
+            params=params,
             headers=self._headers({"Prefer": prefer}),
             json=_strip_null_bytes(rows),
         )

@@ -49,7 +49,7 @@ async def create_integration(body: GenericBody, user: CurrentUser = Depends(get_
         "config": data.get("config", {}),
         "enabled": data.get("enabled", True),
     }
-    created = await supabase.insert("integrations", row, upsert=True)
+    created = await supabase.insert("integrations", row, upsert=True, on_conflict="user_id,provider")
     return created[0] if created else row
 
 
@@ -96,7 +96,7 @@ async def connect_powerschool(
         "secret_ref": encrypt_credentials(body.username, body.password),
         "enabled": True,
     }
-    await supabase.insert("integrations", row, upsert=True)
+    await supabase.insert("integrations", row, upsert=True, on_conflict="user_id,provider")
     return await run_sync("powerschool", user.id)
 
 
@@ -116,5 +116,5 @@ async def connect_powerschool_session(
         "secret_ref": encrypt_session_cookie(body.cookie),
         "enabled": True,
     }
-    await supabase.insert("integrations", row, upsert=True)
+    await supabase.insert("integrations", row, upsert=True, on_conflict="user_id,provider")
     return await run_sync("powerschool", user.id)

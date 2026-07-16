@@ -58,5 +58,5 @@ Return JSON with this exact shape:
             "motivational_note": plan.get("motivational_note"),
             "generated_by": "planner",
         }
-        saved = await supabase.insert("daily_plans", row, upsert=True)
+        saved = await supabase.insert("daily_plans", row, upsert=True, on_conflict="user_id,plan_date")
         return saved[0] if saved else row

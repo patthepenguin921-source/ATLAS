@@ -49,7 +49,7 @@ async def create_edge(
     created = await supabase.insert("concept_edges", {
         "user_id": user.id, "from_concept": from_concept,
         "to_concept": to_concept, "edge_type": edge_type,
-    }, upsert=True)
+    }, upsert=True, on_conflict="from_concept,to_concept,edge_type")
     return created[0] if created else None
 
 

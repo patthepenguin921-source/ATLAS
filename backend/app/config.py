@@ -44,6 +44,10 @@ class Settings(BaseSettings):
 
     # ---- Server ----
     atlas_env: str = "development"
+    # Encrypts at-rest integration credentials (e.g. PowerSchool portal login)
+    # stored in `integrations.secret_ref`. Generate with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    atlas_secret_key: str = ""
     # Default to allowing any origin: Atlas authenticates with Bearer tokens
     # (not cookies), so CORS isn't a security boundary here, and a permissive
     # default means cross-origin document uploads work without extra config.

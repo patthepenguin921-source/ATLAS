@@ -20,6 +20,22 @@ from app.integrations.powerschool_client import (
     map_status,
 )
 
+# A district using PowerSchool's newer CAS-based login (no contextData field
+# at all — credentialType/pcasServerUrl/serviceTicket instead, submitted via
+# a doPCASLogin() JS handler this client doesn't implement).
+CAS_LOGIN_PAGE = """
+<html><head><title>Parent Sign In</title></head><body>
+<form action="/guardian/home.html" method="post" name="LoginForm" id="LoginForm" onsubmit="doPCASLogin(this);">
+  <input type="hidden" name="dbpw" value="" />
+  <input type="hidden" name="returnUrl" value=""/>
+  <input type="hidden" name="serviceName" value="PS Parent Portal"/>
+  <input type="hidden" name="serviceTicket" value=""/>
+  <input type="hidden" name="pcasServerUrl" value="/"/>
+  <input type="hidden" name="credentialType" value="User Id and Password Credential"/>
+</form>
+</body></html>
+"""
+
 LOGIN_PAGE = """
 <html><body>
 <form id="LoginForm" action="/guardian/home.html" method="post">
@@ -259,6 +275,45 @@ def test_login_wrong_password_raises():
         )
         try:
             with pytest.raises(PowerSchoolAuthError):
+                await client.login()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_probe_detects_cas_login_form():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/public/home.html":
+            return httpx.Response(200, text=CAS_LOGIN_PAGE)
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient("https://fake.powerschool.com", transport=transport)
+        try:
+            result = await client.probe_login_page()
+            assert result["has_login_form"] is True
+            assert result["login_type"] == "cas"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_login_raises_clear_error_for_cas_form():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/public/home.html":
+            return httpx.Response(200, text=CAS_LOGIN_PAGE)
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", "parentuser", "parent-pw", transport=transport
+        )
+        try:
+            with pytest.raises(PowerSchoolAuthError, match="CAS"):
                 await client.login()
         finally:
             await client.aclose()

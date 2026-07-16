@@ -68,6 +68,35 @@ def _hash_password(password: str, context_data: str) -> str:
     return hmac.new(context_data.encode(), b64_no_pad.encode(), hashlib.md5).hexdigest()
 
 
+# PowerSchool has (at least) two login form shapes in the wild:
+#  - "legacy": has a `contextData` field — this is the MD5/HMAC dbpw
+#    handshake `login()` implements below.
+#  - "cas": has `credentialType`/`pcasServerUrl`/`serviceTicket` fields and
+#    an onsubmit="doPCASLogin(...)" handler — a newer ticket-based flow this
+#    client does NOT implement (undocumented, and the login pages that use
+#    it have shown signs of active bot-mitigation scripting, which would
+#    likely block a non-browser client regardless).
+_LEGACY_FORM_MARKER = "contextData"
+_CAS_FORM_MARKERS = {"credentialType", "pcasServerUrl", "serviceTicket"}
+_LOGIN_FORM_MARKERS = {_LEGACY_FORM_MARKER, *_CAS_FORM_MARKERS}
+
+
+def _classify_login_form(form: Tag) -> str | None:
+    input_names = {inp.get("name") for inp in form.find_all("input") if inp.get("name")}
+    if _LEGACY_FORM_MARKER in input_names:
+        return "legacy"
+    if input_names & _CAS_FORM_MARKERS:
+        return "cas"
+    return None
+
+
+def _is_login_form(form: Tag) -> bool:
+    if form.get("id") == "LoginForm":
+        return True
+    input_names = {inp.get("name") for inp in form.find_all("input") if inp.get("name")}
+    return bool(input_names & _LOGIN_FORM_MARKERS)
+
+
 _GRADE_RE = re.compile(r"\b([A-F][+-]?)(?![A-Za-z])")
 _PERCENT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 _SCORE_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*(?:/|out of)\s*(\d+(?:\.\d+)?)", re.I)
@@ -159,16 +188,15 @@ class PowerSchoolClient:
 
     async def _fetch_login_page(self) -> tuple[httpx.Response, BeautifulSoup, Tag | None]:
         """Try each known login path and return the first that has a login
-        form (an input named contextData). If none do, returns the last
-        response/soup fetched (for diagnostics) with form=None."""
+        form — recognizing both the legacy contextData-based form and the
+        newer CAS-style one, even though only the former can be automated.
+        If none do, returns the last response/soup fetched (for diagnostics)
+        with form=None."""
         response = soup = None
         for path in _LOGIN_PATHS:
             response = await self._client.get(path)
             soup = BeautifulSoup(response.text, "html.parser")
-            form = next(
-                (f for f in soup.find_all("form") if f.find("input", attrs={"name": "contextData"})),
-                None,
-            )
+            form = next((f for f in soup.find_all("form") if _is_login_form(f)), None)
             if form is not None:
                 return response, soup, form
         return response, soup, None
@@ -192,6 +220,7 @@ class PowerSchoolClient:
             "status_code": r.status_code,
             "page_title": soup.title.get_text(strip=True) if soup.title else None,
             "has_login_form": form is not None,
+            "login_type": _classify_login_form(form) if form is not None else None,
             "forms": forms,
             "html_snippet": r.text[:4000],
         }
@@ -201,10 +230,11 @@ class PowerSchoolClient:
         valid, instead of doing a username/password login."""
         r = await self._client.get("/guardian/home.html")
         soup = BeautifulSoup(r.text, "html.parser")
-        if soup.find("input", attrs={"name": "contextData"}):
+        form = next((f for f in soup.find_all("form") if _is_login_form(f)), None)
+        if form is not None:
             raise PowerSchoolAuthError(
                 "Your PowerSchool session looks expired — log into PowerSchool in your "
-                "browser again (via Google/SSO) and paste a fresh session cookie."
+                "browser again and paste a fresh session cookie."
             )
 
     async def login(self) -> None:
@@ -213,6 +243,15 @@ class PowerSchoolClient:
             raise PowerSchoolAuthError(
                 "Could not find the PowerSchool login form — check the portal URL "
                 "(it should look like https://<district>.powerschool.com)."
+            )
+        login_type = _classify_login_form(form)
+        if login_type == "cas":
+            raise PowerSchoolAuthError(
+                "This district's PowerSchool login uses a newer ticket-based (CAS) flow "
+                "this integration doesn't support — and its login page shows signs of "
+                "anti-bot protection, so automating it isn't realistic. Use Session cookie "
+                "mode instead: it bypasses login entirely by reusing an already-"
+                "authenticated browser session."
             )
         fields = {
             inp.get("name"): inp.get("value", "")

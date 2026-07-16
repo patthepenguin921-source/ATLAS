@@ -30,6 +30,7 @@ interface ProbeResult {
   status_code: number;
   page_title: string | null;
   has_login_form: boolean;
+  login_type: "legacy" | "cas" | null;
   forms: { id: string | null; action: string | null; input_names: string[] }[];
   html_snippet: string;
 }
@@ -151,7 +152,7 @@ export default function IntegrationsPage() {
                 <div className="font-medium flex items-center gap-2">
                   PowerSchool
                   {powerschool && <Badge tone={STATUS_TONE[powerschool.status]}>{powerschool.status}</Badge>}
-                  {powerschool?.config?.auth_mode === "cookie" && <Badge>Google / SSO</Badge>}
+                  {powerschool?.config?.auth_mode === "cookie" && <Badge>Session cookie</Badge>}
                 </div>
                 <div className="text-sm text-atlas-muted mt-1">
                   {powerschool
@@ -242,7 +243,7 @@ export default function IntegrationsPage() {
               className={`flex-1 py-1.5 rounded-md ${mode === "cookie" ? "bg-atlas-panel shadow-soft" : "text-atlas-muted"}`}
               onClick={() => setMode("cookie")}
             >
-              Google / SSO
+              Session cookie
             </button>
           </div>
 
@@ -282,14 +283,26 @@ export default function IntegrationsPage() {
                 </div>
               )}
               <div>
-                {probeResult.has_login_form ? (
-                  <span className="text-atlas-good">✓ Found a username/password login form</span>
-                ) : (
-                  <span className="text-atlas-bad">
-                    ✗ No username/password login form found — this district likely requires SSO.{" "}
+                {probeResult.login_type === "legacy" ? (
+                  <span className="text-atlas-good">✓ Found a login form Atlas can automate</span>
+                ) : probeResult.login_type === "cas" ? (
+                  <span className="text-atlas-warn">
+                    ⚠ Found a login form, but this district uses a newer ticket-based (CAS) login
+                    flow this integration can't automate — and the page shows signs of anti-bot
+                    protection.{" "}
                     {mode !== "cookie" && (
                       <button type="button" className="underline" onClick={() => setMode("cookie")}>
-                        Switch to Google / SSO mode
+                        Switch to Session cookie mode
+                      </button>
+                    )}
+                  </span>
+                ) : (
+                  <span className="text-atlas-bad">
+                    ✗ No login form found — check the portal URL, or this district may require SSO.
+                    {" "}
+                    {mode !== "cookie" && (
+                      <button type="button" className="underline" onClick={() => setMode("cookie")}>
+                        Switch to Session cookie mode
                       </button>
                     )}
                   </span>
@@ -346,8 +359,8 @@ export default function IntegrationsPage() {
             <>
               <div className="text-sm text-atlas-muted space-y-1">
                 <p>
-                  Your school uses Google (or another SSO) to log into PowerSchool, so there's no
-                  password form for Atlas to use directly. Instead:
+                  Some districts use SSO (Google/Microsoft/Clever) or a newer login flow Atlas
+                  can't automate directly. Instead, reuse a session from your own browser:
                 </p>
                 <ol className="list-decimal list-inside space-y-0.5">
                   <li>Log into PowerSchool in this browser, as you normally do.</li>

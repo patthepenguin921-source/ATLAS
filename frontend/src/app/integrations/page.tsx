@@ -288,8 +288,10 @@ export default function IntegrationsPage() {
                 ) : probeResult.login_type === "cas" ? (
                   <span className="text-atlas-warn">
                     ⚠ Found a login form, but this district uses a newer ticket-based (CAS) login
-                    flow this integration can't automate — and the page shows signs of anti-bot
-                    protection.{" "}
+                    flow. Username &amp; password mode will automatically fall back to real-browser
+                    automation for this — it may take longer to sync and isn't guaranteed to work
+                    if the login page also has anti-bot protection. If it doesn't, Session cookie
+                    mode is the reliable fallback.{" "}
                     {mode !== "cookie" && (
                       <button type="button" className="underline" onClick={() => setMode("cookie")}>
                         Switch to Session cookie mode

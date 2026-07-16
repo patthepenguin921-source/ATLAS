@@ -11,7 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.integrations import PROVIDERS, run_sync
-from app.schemas import GenericBody
+from app.integrations.powerschool import encrypt_credentials
+from app.schemas import GenericBody, PowerSchoolConnectRequest
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -49,3 +50,30 @@ async def sync_provider(provider: str, user: CurrentUser = Depends(get_current_u
     if provider not in PROVIDERS:
         raise HTTPException(400, f"Unknown provider. Known: {list(PROVIDERS)}")
     return await run_sync(provider, user.id)
+
+
+@router.delete("/{provider}", status_code=204)
+async def disconnect_integration(provider: str, user: CurrentUser = Depends(get_current_user)):
+    await supabase.delete("integrations", filters={"user_id": eq(user.id), "provider": eq(provider)})
+    return None
+
+
+@router.post("/powerschool/connect", status_code=201)
+async def connect_powerschool(
+    body: PowerSchoolConnectRequest, user: CurrentUser = Depends(get_current_user)
+):
+    """Save the portal URL + login and immediately run a first sync, so the
+    caller finds out right away if the credentials/URL don't work."""
+    base_url = body.base_url.strip().rstrip("/")
+    if not base_url.startswith("http"):
+        base_url = f"https://{base_url}"
+    row = {
+        "user_id": user.id,
+        "provider": "powerschool",
+        "display_name": body.display_name or "PowerSchool",
+        "config": {"base_url": base_url},
+        "secret_ref": encrypt_credentials(body.username, body.password),
+        "enabled": True,
+    }
+    await supabase.insert("integrations", row, upsert=True)
+    return await run_sync("powerschool", user.id)

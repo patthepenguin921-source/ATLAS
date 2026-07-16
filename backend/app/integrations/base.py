@@ -45,3 +45,18 @@ class IntegrationProvider:
             return existing[0]["id"]
         created = await supabase.insert("assignments", payload)
         return created[0]["id"]
+
+    async def upsert_grade(
+        self, user_id: str, assignment_id: str, course_id: str | None, fields: dict[str, Any]
+    ) -> str:
+        """An assignment has one authoritative grade, so this keys on assignment_id."""
+        existing = await supabase.select(
+            "grades", columns="id",
+            filters={"user_id": eq(user_id), "assignment_id": eq(assignment_id)}, limit=1,
+        )
+        payload = {**fields, "user_id": user_id, "assignment_id": assignment_id, "course_id": course_id}
+        if existing:
+            await supabase.update("grades", payload, filters={"id": eq(existing[0]["id"])})
+            return existing[0]["id"]
+        created = await supabase.insert("grades", payload)
+        return created[0]["id"]

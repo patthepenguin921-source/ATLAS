@@ -27,6 +27,7 @@ const NAV = [
   { href: "/search", label: "Ask Atlas", d: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM21 21l-4.3-4.3" },
   { href: "/knowledge", label: "Knowledge", d: "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5L12 3Z" },
   { href: "/analytics", label: "Analytics", d: "M4 20V4M4 20h16M8 16v-4M12 16V8M16 16v-6" },
+  { href: "/integrations", label: "Integrations", d: "M8 12h8M8 12a4 4 0 1 1 0-8h1M8 12a4 4 0 1 0 0 8h1M16 12a4 4 0 1 0 0-8h-1M16 12a4 4 0 1 1 0 8h-1" },
 ];
 
 export function Sidebar() {

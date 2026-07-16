@@ -89,6 +89,14 @@ class DriveImportRequest(BaseModel):
     enrich: bool = True
 
 
+# ---- Integrations ----
+class PowerSchoolConnectRequest(BaseModel):
+    base_url: str          # e.g. https://<district>.powerschool.com
+    username: str
+    password: str
+    display_name: Optional[str] = None
+
+
 # ---- Generic ----
 class GenericBody(BaseModel):
     """Free-form body for CRUD create/update; fields validated per-table."""

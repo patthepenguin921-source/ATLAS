@@ -36,6 +36,14 @@ interface ProbeResult {
   html_snippet: string;
 }
 
+interface DebugScrapeResult {
+  final_url: string;
+  status_code: number;
+  ccid_row_count: number;
+  header_row_html: string | null;
+  sample_row_html: string[];
+}
+
 const STATUS_TONE: Record<string, "good" | "warn" | "bad" | "default"> = {
   success: "good",
   running: "warn",
@@ -56,6 +64,9 @@ export default function IntegrationsPage() {
   const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [showSnippet, setShowSnippet] = useState(false);
+  const [debugging, setDebugging] = useState(false);
+  const [debugResult, setDebugResult] = useState<DebugScrapeResult | null>(null);
+  const [debugError, setDebugError] = useState<string | null>(null);
 
   async function load() {
     setIntegrations(await apiGet<Integration[]>("/integrations"));
@@ -134,6 +145,20 @@ export default function IntegrationsPage() {
     }
   }
 
+  async function debugScrape() {
+    setDebugging(true);
+    setDebugError(null);
+    setDebugResult(null);
+    try {
+      const result = await apiGet<DebugScrapeResult>("/integrations/powerschool/debug-scrape");
+      setDebugResult(result);
+    } catch (err: any) {
+      setDebugError(err.message ?? "Could not fetch the grades page.");
+    } finally {
+      setDebugging(false);
+    }
+  }
+
   async function disconnect(provider: string) {
     if (!confirm("Disconnect PowerSchool? This removes your saved login; imported grades stay.")) return;
     await apiDelete(`/integrations/${provider}`);
@@ -176,6 +201,9 @@ export default function IntegrationsPage() {
                     >
                       {syncingProvider === "powerschool" ? "Syncing…" : "Sync now"}
                     </button>
+                    <button className="btn-ghost" disabled={debugging} onClick={debugScrape}>
+                      {debugging ? "Fetching…" : "Debug scrape"}
+                    </button>
                     <button className="btn-ghost" onClick={() => disconnect("powerschool")}>
                       Disconnect
                     </button>
@@ -207,6 +235,39 @@ export default function IntegrationsPage() {
               ) : (
                 <div className="text-atlas-bad">{lastResult.detail ?? "Sync did not complete."}</div>
               )}
+            </div>
+          )}
+
+          {debugError && (
+            <div className="card mt-4 text-sm text-atlas-bad">{debugError}</div>
+          )}
+          {debugResult && (
+            <div className="card mt-4 text-xs space-y-1.5">
+              <div className="font-medium text-sm mb-1">Raw grades-page scrape</div>
+              <div>
+                <span className="text-atlas-muted">Fetched: </span>
+                {debugResult.final_url} ({debugResult.status_code})
+              </div>
+              <div>
+                <span className="text-atlas-muted">Course rows found: </span>
+                {debugResult.ccid_row_count}
+              </div>
+              {debugResult.header_row_html && (
+                <div>
+                  <div className="text-atlas-muted">Header row:</div>
+                  <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto">
+                    {debugResult.header_row_html}
+                  </pre>
+                </div>
+              )}
+              {debugResult.sample_row_html.map((html, i) => (
+                <div key={i}>
+                  <div className="text-atlas-muted">Sample course row {i + 1}:</div>
+                  <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto">
+                    {html}
+                  </pre>
+                </div>
+              ))}
             </div>
           )}
 

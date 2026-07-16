@@ -123,6 +123,11 @@ _HEADER_KEYWORDS = {
     "percentage": ("%", "percent"),
 }
 
+# Between school years/terms, PowerSchool lists each requested course with
+# one of these placeholders instead of an assigned section/teacher — not a
+# real class yet, so `fetch_classes` skips rows named this.
+_PLACEHOLDER_COURSE_NAMES = {"not available", "unavailable", "n/a", "tba"}
+
 
 def _parse_grade(text: str) -> tuple[str | None, float | None]:
     letter = m.group(1) if (m := _GRADE_RE.search(text)) else None
@@ -288,6 +293,26 @@ class PowerSchoolClient:
         if soup.find("input", attrs={"name": "contextData"}):
             raise PowerSchoolAuthError("PowerSchool login failed — check your username and password.")
 
+    async def debug_home_page(self) -> dict:
+        """Diagnostic twin of `probe_login_page` for the *authenticated*
+        grades page: reports the raw HTML of each course row instead of
+        parsed fields, so a district's actual column layout can be
+        inspected (e.g. attendance columns before the course name, shifting
+        `fetch_classes`'s fixed cell indices) without needing the student's/
+        parent's own browser dev tools."""
+        r = await self._client.get("/guardian/home.html")
+        soup = BeautifulSoup(r.text, "html.parser")
+        rows = soup.select('tr[id^="ccid_"]')
+        table = rows[0].find_parent("table") if rows else None
+        header_row = table.find("tr") if table is not None else None
+        return {
+            "final_url": str(r.url),
+            "status_code": r.status_code,
+            "ccid_row_count": len(rows),
+            "header_row_html": str(header_row)[:2000] if header_row is not None else None,
+            "sample_row_html": [str(row)[:3000] for row in rows[:3]],
+        }
+
     async def fetch_classes(self) -> list[PSClass]:
         r = await self._client.get("/guardian/home.html")
         soup = BeautifulSoup(r.text, "html.parser")
@@ -296,6 +321,15 @@ class PowerSchoolClient:
             ccid = row["id"].split("_", 1)[1]
             cells = row.find_all("td")
             if len(cells) < 2:
+                continue
+
+            name = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+            if not name or name.strip().lower() in _PLACEHOLDER_COURSE_NAMES:
+                # Between school years/terms (e.g. over the summer, before a
+                # new schedule is built) PowerSchool lists each requested
+                # course with a "Not Available" placeholder instead of a real
+                # section/teacher — not a class the student is actually
+                # taking yet, so don't import it as one.
                 continue
 
             grade_letter = grade_percent = None
@@ -317,7 +351,7 @@ class PowerSchoolClient:
             classes.append(PSClass(
                 ccid=ccid,
                 period=cells[0].get_text(strip=True),
-                name=cells[1].get_text(strip=True) if len(cells) > 1 else "",
+                name=name,
                 teacher=teacher,
                 grade_letter=grade_letter,
                 grade_percent=grade_percent,

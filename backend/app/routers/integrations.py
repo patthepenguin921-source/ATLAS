@@ -100,6 +100,19 @@ async def connect_powerschool(
     return await run_sync("powerschool", user.id)
 
 
+@router.get("/powerschool/debug-scrape")
+async def debug_scrape_powerschool(user: CurrentUser = Depends(get_current_user)):
+    """Fetches the already-connected account's authenticated grades page and
+    reports its raw table structure — a self-serve way to see why scraping
+    got the wrong data for a district (e.g. extra attendance columns) without
+    needing browser dev tools access."""
+    provider = PROVIDERS["powerschool"]
+    try:
+        return await provider.debug_scrape(user.id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e)) from e
+
+
 @router.post("/powerschool/connect-session", status_code=201)
 async def connect_powerschool_session(
     body: PowerSchoolConnectSessionRequest, user: CurrentUser = Depends(get_current_user)

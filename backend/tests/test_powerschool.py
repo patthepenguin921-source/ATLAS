@@ -59,6 +59,20 @@ HOME_PAGE_AUTHENTICATED = """
 </body></html>
 """
 
+HOME_PAGE_BETWEEN_TERMS = """
+<html><body>
+<table>
+<tr id="ccid_555">
+  <td>1</td>
+  <td><a title="Ms. Rivera">Algebra II</a></td>
+  <td><a href="/guardian/scores.html?frn=555">A- (91%)</a></td>
+</tr>
+<tr id="ccid_601"><td>2</td><td>Not Available</td><td></td></tr>
+<tr id="ccid_602"><td>3</td><td>Not Available</td><td></td></tr>
+</table>
+</body></html>
+"""
+
 ASSIGNMENTS_PAGE = """
 <html><body>
 <table id="assignmentsTable">
@@ -194,6 +208,70 @@ def test_login_success_and_scrape():
             assert hw.name == "Worksheet 4B"
             assert hw.is_missing is True
             assert map_status(hw) == "missing"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_fetch_classes_skips_not_available_placeholders():
+    """Between school years/terms, PowerSchool lists requested-but-unscheduled
+    courses as "Not Available" instead of a real section — these aren't
+    classes the student is actually taking and shouldn't be imported."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/guardian/home.html" and request.method == "GET":
+            return httpx.Response(200, text=HOME_PAGE_BETWEEN_TERMS)
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            classes = await client.fetch_classes()
+            assert len(classes) == 1
+            assert classes[0].name == "Algebra II"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_debug_home_page_reports_raw_rows():
+    """Diagnostic used when a district's table layout doesn't match this
+    client's cell-index assumptions — reports the header row and a few
+    sample course rows verbatim so the real structure can be inspected."""
+    WIDE_HOME_PAGE = """
+    <html><body>
+    <table>
+      <tr><th>Exp</th><th>Last Week</th><th>Course</th><th>Grade</th></tr>
+      <tr id="ccid_555">
+        <td>1-3(A-E)</td>
+        <td>Not Available</td>
+        <td><a title="Ms. Rivera">Algebra II</a></td>
+        <td>[i]</td>
+      </tr>
+    </table>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/guardian/home.html" and request.method == "GET":
+            return httpx.Response(200, text=WIDE_HOME_PAGE)
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            result = await client.debug_home_page()
+            assert result["ccid_row_count"] == 1
+            assert "Exp" in result["header_row_html"]
+            assert "ccid_555" in result["sample_row_html"][0]
+            assert "Algebra II" in result["sample_row_html"][0]
         finally:
             await client.aclose()
 

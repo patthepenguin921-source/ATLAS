@@ -134,5 +134,6 @@ DOCUMENT EXCERPT:
                 "embedding": embedding,
             },
             upsert=True,
+            on_conflict="user_id,name",
         )
         return created[0]["id"] if created else None

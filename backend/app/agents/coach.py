@@ -76,5 +76,5 @@ Return JSON:
             "goals": data.get("goals", []),
             "narrative": data.get("narrative"),
         }
-        saved = await supabase.insert("weekly_reviews", row, upsert=True)
+        saved = await supabase.insert("weekly_reviews", row, upsert=True, on_conflict="user_id,week_start")
         return saved[0] if saved else row

@@ -123,6 +123,11 @@ _HEADER_KEYWORDS = {
     "percentage": ("%", "percent"),
 }
 
+# Between school years/terms, PowerSchool lists each requested course with
+# one of these placeholders instead of an assigned section/teacher — not a
+# real class yet, so `fetch_classes` skips rows named this.
+_PLACEHOLDER_COURSE_NAMES = {"not available", "unavailable", "n/a", "tba"}
+
 
 def _parse_grade(text: str) -> tuple[str | None, float | None]:
     letter = m.group(1) if (m := _GRADE_RE.search(text)) else None
@@ -298,6 +303,15 @@ class PowerSchoolClient:
             if len(cells) < 2:
                 continue
 
+            name = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+            if not name or name.strip().lower() in _PLACEHOLDER_COURSE_NAMES:
+                # Between school years/terms (e.g. over the summer, before a
+                # new schedule is built) PowerSchool lists each requested
+                # course with a "Not Available" placeholder instead of a real
+                # section/teacher — not a class the student is actually
+                # taking yet, so don't import it as one.
+                continue
+
             grade_letter = grade_percent = None
             for c in reversed(cells):
                 letter, percent = _parse_grade(c.get_text(strip=True))
@@ -317,7 +331,7 @@ class PowerSchoolClient:
             classes.append(PSClass(
                 ccid=ccid,
                 period=cells[0].get_text(strip=True),
-                name=cells[1].get_text(strip=True) if len(cells) > 1 else "",
+                name=name,
                 teacher=teacher,
                 grade_letter=grade_letter,
                 grade_percent=grade_percent,

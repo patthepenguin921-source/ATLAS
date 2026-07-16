@@ -19,6 +19,11 @@ Every phase produces a usable application. Status reflects what's in this repo.
       `integrations/powerschool_client.py` for the login handshake and its
       caveats (the assignment-detail scraping is best-effort and may need a
       selector tweak for a given district's PowerSchool version).
+      Two auth modes: username/password (districts with PowerSchool's native
+      login form) and a pasted session cookie (districts that gate
+      PowerSchool behind SSO — Google/Microsoft/Clever — where there's no
+      login form to automate at all; the cookie expires and needs periodic
+      re-pasting, so this mode is semi- rather than fully automatic).
 - [~] Schoology / Blackboard providers — orchestration, normalization, and
       persistence contract defined; concrete API clients are clearly-marked
       stubs (require per-district OAuth/credentials).

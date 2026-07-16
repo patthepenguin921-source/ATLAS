@@ -153,6 +153,37 @@ def test_probe_login_page_reports_sso_redirect():
     asyncio.run(run())
 
 
+def test_verify_session_with_valid_cookie():
+    async def run():
+        transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            await client.verify_session()  # should not raise
+            classes = await client.fetch_classes()
+            assert len(classes) == 1
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_verify_session_with_expired_cookie_raises():
+    async def run():
+        transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=stale", transport=transport
+        )
+        try:
+            with pytest.raises(PowerSchoolAuthError):
+                await client.verify_session()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_login_wrong_password_raises():
     async def run():
         transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))

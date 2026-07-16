@@ -129,16 +129,23 @@ def map_status(a: PSAssignment) -> str:
 
 class PowerSchoolClient:
     def __init__(
-        self, base_url: str, username: str, password: str,
-        *, transport: httpx.BaseTransport | None = None,
+        self, base_url: str, username: str = "", password: str = "",
+        *, session_cookie: str | None = None, transport: httpx.BaseTransport | None = None,
     ):
         self._base = base_url.rstrip("/")
         self._user = username
         self._pw = password
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; AtlasAcademicAssistant/1.0)"}
+        if session_cookie:
+            # Districts that gate PowerSchool behind SSO (Google/Microsoft/Clever)
+            # have no username/password form to automate at all — the caller
+            # logs in with their own browser and pastes the resulting session
+            # cookie instead. Set as a raw header rather than httpx's cookie
+            # jar since we don't know the district's exact cookie name(s).
+            headers["Cookie"] = session_cookie
         self._client = httpx.AsyncClient(
             base_url=self._base, follow_redirects=True, timeout=30.0,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AtlasAcademicAssistant/1.0)"},
-            transport=transport,
+            headers=headers, transport=transport,
         )
 
     async def aclose(self) -> None:
@@ -167,6 +174,17 @@ class PowerSchoolClient:
             "forms": forms,
             "html_snippet": r.text[:4000],
         }
+
+    async def verify_session(self) -> None:
+        """For cookie-based auth: confirm the pasted session cookie is still
+        valid, instead of doing a username/password login."""
+        r = await self._client.get("/guardian/home.html")
+        soup = BeautifulSoup(r.text, "html.parser")
+        if soup.find("input", attrs={"name": "contextData"}):
+            raise PowerSchoolAuthError(
+                "Your PowerSchool session looks expired — log into PowerSchool in your "
+                "browser again (via Google/SSO) and paste a fresh session cookie."
+            )
 
     async def login(self) -> None:
         r = await self._client.get("/guardian/home.html")

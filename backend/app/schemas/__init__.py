@@ -97,6 +97,16 @@ class PowerSchoolConnectRequest(BaseModel):
     display_name: Optional[str] = None
 
 
+class PowerSchoolConnectSessionRequest(BaseModel):
+    """For districts using SSO (Google/Microsoft/Clever) — no username/password
+    form exists to automate, so the caller pastes a session cookie from their
+    own already-authenticated browser instead."""
+
+    base_url: str
+    cookie: str
+    display_name: Optional[str] = None
+
+
 # ---- Generic ----
 class GenericBody(BaseModel):
     """Free-form body for CRUD create/update; fields validated per-table."""

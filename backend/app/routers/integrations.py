@@ -11,9 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.integrations import PROVIDERS, run_sync
-from app.integrations.powerschool import encrypt_credentials
+from app.integrations.powerschool import encrypt_credentials, encrypt_session_cookie
 from app.integrations.powerschool_client import PowerSchoolClient
-from app.schemas import GenericBody, PowerSchoolConnectRequest
+from app.schemas import GenericBody, PowerSchoolConnectRequest, PowerSchoolConnectSessionRequest
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -92,8 +92,28 @@ async def connect_powerschool(
         "user_id": user.id,
         "provider": "powerschool",
         "display_name": body.display_name or "PowerSchool",
-        "config": {"base_url": base_url},
+        "config": {"base_url": base_url, "auth_mode": "password"},
         "secret_ref": encrypt_credentials(body.username, body.password),
+        "enabled": True,
+    }
+    await supabase.insert("integrations", row, upsert=True)
+    return await run_sync("powerschool", user.id)
+
+
+@router.post("/powerschool/connect-session", status_code=201)
+async def connect_powerschool_session(
+    body: PowerSchoolConnectSessionRequest, user: CurrentUser = Depends(get_current_user)
+):
+    """For SSO-gated districts (Google/Microsoft/Clever) — no login form
+    exists to automate, so this saves a pasted session cookie instead and
+    runs a first sync immediately."""
+    base_url = _normalize_base_url(body.base_url)
+    row = {
+        "user_id": user.id,
+        "provider": "powerschool",
+        "display_name": body.display_name or "PowerSchool",
+        "config": {"base_url": base_url, "auth_mode": "cookie"},
+        "secret_ref": encrypt_session_cookie(body.cookie),
         "enabled": True,
     }
     await supabase.insert("integrations", row, upsert=True)

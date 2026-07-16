@@ -24,6 +24,10 @@ def encrypt_credentials(username: str, password: str) -> str:
     return encrypt_json({"username": username, "password": password})
 
 
+def encrypt_session_cookie(cookie: str) -> str:
+    return encrypt_json({"cookie": cookie.strip()})
+
+
 class PowerSchoolProvider(IntegrationProvider):
     name = "powerschool"
     status = "beta"
@@ -37,15 +41,23 @@ class PowerSchoolProvider(IntegrationProvider):
                 "PowerSchool isn't connected yet — add your portal URL and login first."
             )
         integration = rows[0]
-        base_url = (integration.get("config") or {}).get("base_url")
+        config = integration.get("config") or {}
+        base_url = config.get("base_url")
+        auth_mode = config.get("auth_mode", "password")
         if not base_url:
             raise RuntimeError("PowerSchool integration is missing its portal URL.")
         creds = decrypt_json(integration["secret_ref"])
 
-        client = PowerSchoolClient(base_url, creds["username"], creds["password"])
+        if auth_mode == "cookie":
+            client = PowerSchoolClient(base_url, session_cookie=creds["cookie"])
+        else:
+            client = PowerSchoolClient(base_url, creds["username"], creds["password"])
         try:
             try:
-                await client.login()
+                if auth_mode == "cookie":
+                    await client.verify_session()
+                else:
+                    await client.login()
             except PowerSchoolAuthError as e:
                 raise RuntimeError(str(e)) from e
 

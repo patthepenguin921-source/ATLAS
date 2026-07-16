@@ -12,6 +12,7 @@ interface Integration {
   last_synced_at?: string | null;
   last_error?: string | null;
   enabled: boolean;
+  config?: { auth_mode?: "password" | "cookie" };
 }
 
 interface SyncResult {
@@ -47,7 +48,8 @@ export default function IntegrationsPage() {
   const [syncingProvider, setSyncingProvider] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<SyncResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState({ base_url: "", username: "", password: "" });
+  const [mode, setMode] = useState<"password" | "cookie">("password");
+  const [form, setForm] = useState({ base_url: "", username: "", password: "", cookie: "" });
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
@@ -93,10 +95,20 @@ export default function IntegrationsPage() {
     setError(null);
     setLastResult(null);
     try {
-      const result = await apiPost<SyncResult>("/integrations/powerschool/connect", form);
+      const result =
+        mode === "cookie"
+          ? await apiPost<SyncResult>("/integrations/powerschool/connect-session", {
+              base_url: form.base_url,
+              cookie: form.cookie,
+            })
+          : await apiPost<SyncResult>("/integrations/powerschool/connect", {
+              base_url: form.base_url,
+              username: form.username,
+              password: form.password,
+            });
       setLastResult(result);
       closeConnectModal();
-      setForm({ base_url: "", username: "", password: "" });
+      setForm({ base_url: "", username: "", password: "", cookie: "" });
       await load();
     } catch (err: any) {
       setError(err.message ?? "Connection failed.");
@@ -139,6 +151,7 @@ export default function IntegrationsPage() {
                 <div className="font-medium flex items-center gap-2">
                   PowerSchool
                   {powerschool && <Badge tone={STATUS_TONE[powerschool.status]}>{powerschool.status}</Badge>}
+                  {powerschool?.config?.auth_mode === "cookie" && <Badge>Google / SSO</Badge>}
                 </div>
                 <div className="text-sm text-atlas-muted mt-1">
                   {powerschool
@@ -216,10 +229,23 @@ export default function IntegrationsPage() {
         }
       >
         <form id="ps-connect-form" onSubmit={connect} className="space-y-3">
-          <p className="text-sm text-atlas-muted">
-            Atlas logs in the same way you do on the PowerSchool website. Your password is stored
-            encrypted and only used to pull your grades.
-          </p>
+          <div className="flex gap-1 p-1 rounded-lg bg-atlas-panel2 text-sm">
+            <button
+              type="button"
+              className={`flex-1 py-1.5 rounded-md ${mode === "password" ? "bg-atlas-panel shadow-soft" : "text-atlas-muted"}`}
+              onClick={() => setMode("password")}
+            >
+              Username &amp; password
+            </button>
+            <button
+              type="button"
+              className={`flex-1 py-1.5 rounded-md ${mode === "cookie" ? "bg-atlas-panel shadow-soft" : "text-atlas-muted"}`}
+              onClick={() => setMode("cookie")}
+            >
+              Google / SSO
+            </button>
+          </div>
+
           {error && <div className="text-sm text-atlas-bad">{error}</div>}
           <div>
             <label className="label">Portal URL</label>
@@ -260,8 +286,12 @@ export default function IntegrationsPage() {
                   <span className="text-atlas-good">✓ Found a username/password login form</span>
                 ) : (
                   <span className="text-atlas-bad">
-                    ✗ No username/password login form found — this district may require SSO
-                    (Google/Microsoft/Clever), which this integration can't use.
+                    ✗ No username/password login form found — this district likely requires SSO.{" "}
+                    {mode !== "cookie" && (
+                      <button type="button" className="underline" onClick={() => setMode("cookie")}>
+                        Switch to Google / SSO mode
+                      </button>
+                    )}
                   </span>
                 )}
               </div>
@@ -286,25 +316,64 @@ export default function IntegrationsPage() {
             </div>
           )}
 
-          <div>
-            <label className="label">Username</label>
-            <input
-              className="input"
-              required
-              value={form.username}
-              onChange={(e) => setForm({ ...form, username: e.target.value })}
-            />
-          </div>
-          <div>
-            <label className="label">Password</label>
-            <input
-              className="input"
-              type="password"
-              required
-              value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-            />
-          </div>
+          {mode === "password" ? (
+            <>
+              <p className="text-sm text-atlas-muted">
+                Atlas logs in the same way you do on the PowerSchool website. Your password is
+                stored encrypted and only used to pull your grades.
+              </p>
+              <div>
+                <label className="label">Username</label>
+                <input
+                  className="input"
+                  required
+                  value={form.username}
+                  onChange={(e) => setForm({ ...form, username: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="label">Password</label>
+                <input
+                  className="input"
+                  type="password"
+                  required
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-sm text-atlas-muted space-y-1">
+                <p>
+                  Your school uses Google (or another SSO) to log into PowerSchool, so there's no
+                  password form for Atlas to use directly. Instead:
+                </p>
+                <ol className="list-decimal list-inside space-y-0.5">
+                  <li>Log into PowerSchool in this browser, as you normally do.</li>
+                  <li>Open Developer Tools (F12) → the <b>Network</b> tab → reload the page.</li>
+                  <li>Click any request to your PowerSchool domain (e.g. "home.html").</li>
+                  <li>In Request Headers, find <b>Cookie</b> and copy its entire value.</li>
+                  <li>Paste it below.</li>
+                </ol>
+                <p>
+                  This session will expire (typically within a day) — when a sync starts failing,
+                  just repeat these steps and reconnect with a fresh cookie.
+                </p>
+              </div>
+              <div>
+                <label className="label">Session cookie</label>
+                <textarea
+                  className="input font-mono text-xs"
+                  rows={4}
+                  required
+                  placeholder="JSESSIONID=...; other_cookie=...;"
+                  value={form.cookie}
+                  onChange={(e) => setForm({ ...form, cookie: e.target.value })}
+                />
+              </div>
+            </>
+          )}
         </form>
       </Modal>
     </AppShell>

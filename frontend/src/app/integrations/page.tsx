@@ -159,6 +159,19 @@ export default function IntegrationsPage() {
     }
   }
 
+  function openConnectModal() {
+    // Always start blank — credentials aren't sent back from the backend
+    // (only encrypted at rest), so there's nothing safe to pre-fill, and
+    // reusing stale values here would be exactly the "saving the wrong
+    // login" confusion this is meant to avoid. Re-opening this same modal
+    // while already connected re-submits to the same connect endpoints,
+    // which overwrite the saved login rather than creating a duplicate.
+    setForm({ base_url: "", username: "", password: "", cookie: "" });
+    setError(null);
+    setMode(powerschool?.config?.auth_mode === "cookie" ? "cookie" : "password");
+    setConnectOpen(true);
+  }
+
   async function disconnect(provider: string) {
     if (!confirm("Disconnect PowerSchool? This removes your saved login; imported grades stay.")) return;
     await apiDelete(`/integrations/${provider}`);
@@ -204,12 +217,15 @@ export default function IntegrationsPage() {
                     <button className="btn-ghost" disabled={debugging} onClick={debugScrape}>
                       {debugging ? "Fetching…" : "Debug scrape"}
                     </button>
+                    <button className="btn-ghost" onClick={openConnectModal}>
+                      Edit login
+                    </button>
                     <button className="btn-ghost" onClick={() => disconnect("powerschool")}>
                       Disconnect
                     </button>
                   </>
                 ) : (
-                  <button className="btn-primary" onClick={() => setConnectOpen(true)}>
+                  <button className="btn-primary" onClick={openConnectModal}>
                     Connect
                   </button>
                 )}
@@ -281,12 +297,12 @@ export default function IntegrationsPage() {
       <Modal
         open={connectOpen}
         onClose={closeConnectModal}
-        title="Connect PowerSchool"
+        title={powerschool ? "Update PowerSchool login" : "Connect PowerSchool"}
         footer={
           <>
             <button className="btn-ghost" onClick={closeConnectModal}>Cancel</button>
             <button className="btn-primary" form="ps-connect-form" disabled={connecting}>
-              {connecting ? "Connecting…" : "Connect"}
+              {connecting ? "Saving…" : powerschool ? "Save" : "Connect"}
             </button>
           </>
         }

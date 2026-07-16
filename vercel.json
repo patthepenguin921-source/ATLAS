@@ -1,5 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "backend/app/main.py": {
+      "maxDuration": 60
+    }
+  },
   "services": {
     "frontend": {
       "root": "frontend",

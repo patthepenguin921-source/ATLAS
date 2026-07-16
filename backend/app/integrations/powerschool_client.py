@@ -213,6 +213,8 @@ class PowerSchoolClient:
         """Fetch the login page and report what we found, without sending
         credentials — used to diagnose 'could not find the login form'
         without needing server log access."""
+        from app.config import settings  # local import: avoid a hard app dependency in this module
+
         r, soup, form = await self._fetch_login_page()
         forms = [
             {
@@ -229,6 +231,12 @@ class PowerSchoolClient:
             "page_title": soup.title.get_text(strip=True) if soup.title else None,
             "has_login_form": form is not None,
             "login_type": _classify_login_form(form) if form is not None else None,
+            # CAS logins fall back to real-browser (Playwright) automation,
+            # which needs a Chromium binary and unbounded execution time —
+            # neither available on Atlas's serverless hosting. The frontend
+            # uses this to point straight at Session cookie mode instead of
+            # suggesting a fallback that will just hang and fail.
+            "browser_fallback_available": not settings.is_serverless,
             "forms": forms,
             "html_snippet": r.text[:4000],
         }

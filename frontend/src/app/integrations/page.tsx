@@ -31,6 +31,7 @@ interface ProbeResult {
   page_title: string | null;
   has_login_form: boolean;
   login_type: "legacy" | "cas" | null;
+  browser_fallback_available: boolean;
   forms: { id: string | null; action: string | null; input_names: string[] }[];
   html_snippet: string;
 }
@@ -288,10 +289,15 @@ export default function IntegrationsPage() {
                 ) : probeResult.login_type === "cas" ? (
                   <span className="text-atlas-warn">
                     ⚠ Found a login form, but this district uses a newer ticket-based (CAS) login
-                    flow. Username &amp; password mode will automatically fall back to real-browser
-                    automation for this — it may take longer to sync and isn't guaranteed to work
-                    if the login page also has anti-bot protection. If it doesn't, Session cookie
-                    mode is the reliable fallback.{" "}
+                    flow.{" "}
+                    {probeResult.browser_fallback_available
+                      ? "Username & password mode will automatically fall back to real-browser " +
+                        "automation for this — it may take longer to sync and isn't guaranteed to " +
+                        "work if the login page also has anti-bot protection. If it doesn't, " +
+                        "Session cookie mode is the reliable fallback."
+                      : "Username & password mode can't handle this here — Atlas's hosted " +
+                        "environment can't run the real-browser automation this flow needs. " +
+                        "Use Session cookie mode instead."}{" "}
                     {mode !== "cookie" && (
                       <button type="button" className="underline" onClick={() => setMode("cookie")}>
                         Switch to Session cookie mode

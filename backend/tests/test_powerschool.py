@@ -238,6 +238,46 @@ def test_fetch_classes_skips_not_available_placeholders():
     asyncio.run(run())
 
 
+def test_debug_home_page_reports_raw_rows():
+    """Diagnostic used when a district's table layout doesn't match this
+    client's cell-index assumptions — reports the header row and a few
+    sample course rows verbatim so the real structure can be inspected."""
+    WIDE_HOME_PAGE = """
+    <html><body>
+    <table>
+      <tr><th>Exp</th><th>Last Week</th><th>Course</th><th>Grade</th></tr>
+      <tr id="ccid_555">
+        <td>1-3(A-E)</td>
+        <td>Not Available</td>
+        <td><a title="Ms. Rivera">Algebra II</a></td>
+        <td>[i]</td>
+      </tr>
+    </table>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/guardian/home.html" and request.method == "GET":
+            return httpx.Response(200, text=WIDE_HOME_PAGE)
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            result = await client.debug_home_page()
+            assert result["ccid_row_count"] == 1
+            assert "Exp" in result["header_row_html"]
+            assert "ccid_555" in result["sample_row_html"][0]
+            assert "Algebra II" in result["sample_row_html"][0]
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_probe_login_page_reports_form_found():
     async def run():
         transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))

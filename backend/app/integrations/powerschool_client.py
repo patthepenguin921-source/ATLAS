@@ -293,6 +293,26 @@ class PowerSchoolClient:
         if soup.find("input", attrs={"name": "contextData"}):
             raise PowerSchoolAuthError("PowerSchool login failed — check your username and password.")
 
+    async def debug_home_page(self) -> dict:
+        """Diagnostic twin of `probe_login_page` for the *authenticated*
+        grades page: reports the raw HTML of each course row instead of
+        parsed fields, so a district's actual column layout can be
+        inspected (e.g. attendance columns before the course name, shifting
+        `fetch_classes`'s fixed cell indices) without needing the student's/
+        parent's own browser dev tools."""
+        r = await self._client.get("/guardian/home.html")
+        soup = BeautifulSoup(r.text, "html.parser")
+        rows = soup.select('tr[id^="ccid_"]')
+        table = rows[0].find_parent("table") if rows else None
+        header_row = table.find("tr") if table is not None else None
+        return {
+            "final_url": str(r.url),
+            "status_code": r.status_code,
+            "ccid_row_count": len(rows),
+            "header_row_html": str(header_row)[:2000] if header_row is not None else None,
+            "sample_row_html": [str(row)[:3000] for row in rows[:3]],
+        }
+
     async def fetch_classes(self) -> list[PSClass]:
         r = await self._client.get("/guardian/home.html")
         soup = BeautifulSoup(r.text, "html.parser")

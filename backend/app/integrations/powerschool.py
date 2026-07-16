@@ -35,7 +35,11 @@ class PowerSchoolProvider(IntegrationProvider):
     name = "powerschool"
     status = "beta"
 
-    async def sync(self, user_id: str) -> dict[str, Any]:
+    async def _authenticated_client(self, user_id: str) -> PowerSchoolClient:
+        """Loads this user's saved PowerSchool integration and returns a
+        client already past login — shared by `sync()` and the debug-scrape
+        diagnostic so both use the exact same auth path (and its CAS/
+        serverless fallback handling)."""
         rows = await supabase.select(
             "integrations", filters={"user_id": eq(user_id), "provider": eq(self.name)}, limit=1,
         )
@@ -58,45 +62,60 @@ class PowerSchoolProvider(IntegrationProvider):
             except PowerSchoolAuthError as e:
                 await client.aclose()
                 raise RuntimeError(str(e)) from e
-        else:
-            client = PowerSchoolClient(base_url, creds["username"], creds["password"])
-            try:
-                await client.login()
-            except UnsupportedLoginFlow:
-                # Lightweight HTTP client can't speak this district's login
-                # flow (e.g. a newer CAS-based one) — fall back to driving a
-                # real browser, which can execute the page's JS/bot-check.
-                # Not guaranteed: bot-mitigation often also weighs the
-                # request's origin, and Atlas's server is cloud/datacenter
-                # infrastructure regardless of using a real browser.
-                await client.aclose()
-                if settings.is_serverless:
-                    # Playwright needs a Chromium binary this platform doesn't
-                    # ship and enough execution time to launch/drive a
-                    # browser — neither holds on Vercel's serverless
-                    # functions. Attempting it here would just hang until the
-                    # platform kills the function, which surfaces to the
-                    # browser as an opaque "Failed to fetch" instead of a
-                    # real error, so fail fast with an actionable message.
-                    raise RuntimeError(
-                        "This district's PowerSchool login uses a newer ticket-based (CAS) "
-                        "flow that needs real-browser automation, which isn't available in "
-                        "Atlas's hosted environment. Use Session cookie mode instead — log "
-                        "into PowerSchool in your own browser and paste the session cookie."
-                    )
-                try:
-                    cookie_header = await login_and_get_cookie_header(
-                        base_url, creds["username"], creds["password"]
-                    )
-                except BrowserLoginError as e:
-                    raise RuntimeError(
-                        f"Automated login isn't working for this district: {e}"
-                    ) from e
-                client = PowerSchoolClient(base_url, session_cookie=cookie_header)
-            except PowerSchoolAuthError as e:
-                await client.aclose()
-                raise RuntimeError(str(e)) from e
+            return client
 
+        client = PowerSchoolClient(base_url, creds["username"], creds["password"])
+        try:
+            await client.login()
+        except UnsupportedLoginFlow:
+            # Lightweight HTTP client can't speak this district's login
+            # flow (e.g. a newer CAS-based one) — fall back to driving a
+            # real browser, which can execute the page's JS/bot-check.
+            # Not guaranteed: bot-mitigation often also weighs the
+            # request's origin, and Atlas's server is cloud/datacenter
+            # infrastructure regardless of using a real browser.
+            await client.aclose()
+            if settings.is_serverless:
+                # Playwright needs a Chromium binary this platform doesn't
+                # ship and enough execution time to launch/drive a
+                # browser — neither holds on Vercel's serverless
+                # functions. Attempting it here would just hang until the
+                # platform kills the function, which surfaces to the
+                # browser as an opaque "Failed to fetch" instead of a
+                # real error, so fail fast with an actionable message.
+                raise RuntimeError(
+                    "This district's PowerSchool login uses a newer ticket-based (CAS) "
+                    "flow that needs real-browser automation, which isn't available in "
+                    "Atlas's hosted environment. Use Session cookie mode instead — log "
+                    "into PowerSchool in your own browser and paste the session cookie."
+                )
+            try:
+                cookie_header = await login_and_get_cookie_header(
+                    base_url, creds["username"], creds["password"]
+                )
+            except BrowserLoginError as e:
+                raise RuntimeError(
+                    f"Automated login isn't working for this district: {e}"
+                ) from e
+            client = PowerSchoolClient(base_url, session_cookie=cookie_header)
+        except PowerSchoolAuthError as e:
+            await client.aclose()
+            raise RuntimeError(str(e)) from e
+        return client
+
+    async def debug_scrape(self, user_id: str) -> dict[str, Any]:
+        """Fetches the authenticated grades page and reports its raw table
+        structure — lets a district's actual column layout be inspected
+        (e.g. extra attendance columns shifting where the course name
+        lives) without the user needing browser dev tools access."""
+        client = await self._authenticated_client(user_id)
+        try:
+            return await client.debug_home_page()
+        finally:
+            await client.aclose()
+
+    async def sync(self, user_id: str) -> dict[str, Any]:
+        client = await self._authenticated_client(user_id)
         try:
             classes = await client.fetch_classes()
             courses = assignments_count = grades_count = 0

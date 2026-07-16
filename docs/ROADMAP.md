@@ -19,11 +19,23 @@ Every phase produces a usable application. Status reflects what's in this repo.
       `integrations/powerschool_client.py` for the login handshake and its
       caveats (the assignment-detail scraping is best-effort and may need a
       selector tweak for a given district's PowerSchool version).
-      Two auth modes: username/password (districts with PowerSchool's native
-      login form) and a pasted session cookie (districts that gate
-      PowerSchool behind SSO — Google/Microsoft/Clever — where there's no
-      login form to automate at all; the cookie expires and needs periodic
-      re-pasting, so this mode is semi- rather than fully automatic).
+      Three auth paths, roughly in order of reliability:
+        1. **Username/password** (`powerschool_client.py`) — districts on
+           PowerSchool's legacy contextData/dbpw login form. Fully automatic.
+        2. **Real-browser fallback** (`powerschool_browser.py`, Playwright) —
+           kicks in automatically when a district uses PowerSchool's newer
+           CAS-based login form instead. Not guaranteed: bot-mitigation
+           systems (Akamai/Imperva-style) often weigh the request's *origin*
+           (IP/network reputation), and Atlas's backend runs from cloud
+           infrastructure — exactly what these systems are tuned to distrust,
+           independent of whether a real browser drove the login.
+        3. **Pasted session cookie** — the fallback of last resort for
+           districts where neither of the above works (true SSO gating, or
+           bot-mitigation that also blocks the real-browser path). The user
+           logs in with their own browser/network and pastes the resulting
+           cookie; it expires and needs periodic re-pasting, so this mode is
+           semi- rather than fully automatic. Confirmed useful in practice —
+           it's the one path that isn't tied to Atlas server's IP reputation.
 - [~] Schoology / Blackboard providers — orchestration, normalization, and
       persistence contract defined; concrete API clients are clearly-marked
       stubs (require per-district OAuth/credentials).

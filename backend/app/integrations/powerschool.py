@@ -12,9 +12,11 @@ from typing import Any
 from app.core.crypto import decrypt_json, encrypt_json
 from app.core.supabase_client import eq, supabase
 from app.integrations.base import IntegrationProvider
+from app.integrations.powerschool_browser import BrowserLoginError, login_and_get_cookie_header
 from app.integrations.powerschool_client import (
     PowerSchoolAuthError,
     PowerSchoolClient,
+    UnsupportedLoginFlow,
     map_category,
     map_status,
 )
@@ -50,17 +52,37 @@ class PowerSchoolProvider(IntegrationProvider):
 
         if auth_mode == "cookie":
             client = PowerSchoolClient(base_url, session_cookie=creds["cookie"])
+            try:
+                await client.verify_session()
+            except PowerSchoolAuthError as e:
+                await client.aclose()
+                raise RuntimeError(str(e)) from e
         else:
             client = PowerSchoolClient(base_url, creds["username"], creds["password"])
-        try:
             try:
-                if auth_mode == "cookie":
-                    await client.verify_session()
-                else:
-                    await client.login()
+                await client.login()
+            except UnsupportedLoginFlow:
+                # Lightweight HTTP client can't speak this district's login
+                # flow (e.g. a newer CAS-based one) — fall back to driving a
+                # real browser, which can execute the page's JS/bot-check.
+                # Not guaranteed: bot-mitigation often also weighs the
+                # request's origin, and Atlas's server is cloud/datacenter
+                # infrastructure regardless of using a real browser.
+                await client.aclose()
+                try:
+                    cookie_header = await login_and_get_cookie_header(
+                        base_url, creds["username"], creds["password"]
+                    )
+                except BrowserLoginError as e:
+                    raise RuntimeError(
+                        f"Automated login isn't working for this district: {e}"
+                    ) from e
+                client = PowerSchoolClient(base_url, session_cookie=cookie_header)
             except PowerSchoolAuthError as e:
+                await client.aclose()
                 raise RuntimeError(str(e)) from e
 
+        try:
             classes = await client.fetch_classes()
             courses = assignments_count = grades_count = 0
             errors: list[str] = []

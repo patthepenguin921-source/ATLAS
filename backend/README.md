@@ -47,7 +47,7 @@ app/
   services/          memory retrieval, ingestion, knowledge model, analytics
   agents/            Planner, Tutor, Analyst, Archivist, Coach (+ base/registry)
   routers/           REST endpoints (CRUD + intelligence)
-  integrations/      Schoology / PowerSchool / Blackboard scaffolds (Phase 2)
+  integrations/      PowerSchool (live) + Schoology / Blackboard scaffolds (Phase 2)
 ```
 
 ## API surface (under `/api/v1`)

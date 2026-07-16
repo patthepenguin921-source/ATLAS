@@ -37,6 +37,14 @@ class PowerSchoolAuthError(RuntimeError):
     pass
 
 
+class UnsupportedLoginFlow(PowerSchoolAuthError):
+    """Raised when a login form is found but isn't the legacy contextData
+    flow this client speaks (e.g. PowerSchool's newer CAS-based flow) — a
+    distinct case from "wrong credentials" or "no form found at all", so
+    callers can react differently (e.g. fall back to real-browser
+    automation instead of just failing)."""
+
+
 @dataclass
 class PSClass:
     ccid: str
@@ -246,12 +254,9 @@ class PowerSchoolClient:
             )
         login_type = _classify_login_form(form)
         if login_type == "cas":
-            raise PowerSchoolAuthError(
+            raise UnsupportedLoginFlow(
                 "This district's PowerSchool login uses a newer ticket-based (CAS) flow "
-                "this integration doesn't support — and its login page shows signs of "
-                "anti-bot protection, so automating it isn't realistic. Use Session cookie "
-                "mode instead: it bypasses login entirely by reusing an already-"
-                "authenticated browser session."
+                "this lightweight client doesn't speak."
             )
         fields = {
             inp.get("name"): inp.get("value", "")

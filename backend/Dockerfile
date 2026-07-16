@@ -11,6 +11,14 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Chromium for Playwright — used as a last-resort fallback when a district's
+# PowerSchool login can't be automated with a plain HTTP client (see
+# app/integrations/powerschool_browser.py). --with-deps installs the OS
+# packages Chromium needs (fonts, libgbm, etc.) alongside the browser itself.
+# This meaningfully increases image size/memory use; bump the Cloud Run
+# service's memory limit if the container starts getting OOM-killed.
+RUN python -m playwright install --with-deps chromium
+
 COPY app ./app
 
 EXPOSE 8000

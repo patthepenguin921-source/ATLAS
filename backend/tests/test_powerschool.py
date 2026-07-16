@@ -321,6 +321,53 @@ def test_login_raises_clear_error_for_cas_form():
     asyncio.run(run())
 
 
+def test_probe_reports_browser_fallback_available_by_default(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "vercel", "")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/public/home.html":
+            return httpx.Response(200, text=CAS_LOGIN_PAGE)
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient("https://fake.powerschool.com", transport=transport)
+        try:
+            result = await client.probe_login_page()
+            assert result["browser_fallback_available"] is True
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_probe_reports_no_browser_fallback_on_serverless(monkeypatch):
+    """On Vercel (settings.vercel set), there's no Chromium binary and no
+    room for a long-running browser automation — the probe should say so
+    up front instead of only failing once the user tries to connect."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "vercel", "1")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/public/home.html":
+            return httpx.Response(200, text=CAS_LOGIN_PAGE)
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient("https://fake.powerschool.com", transport=transport)
+        try:
+            result = await client.probe_login_page()
+            assert result["browser_fallback_available"] is False
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_crypto_round_trip(monkeypatch):
     from cryptography.fernet import Fernet
     from app.config import settings

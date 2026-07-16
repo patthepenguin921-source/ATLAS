@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.config import settings
 from app.core.crypto import decrypt_json, encrypt_json
 from app.core.supabase_client import eq, supabase
 from app.integrations.base import IntegrationProvider
@@ -69,6 +70,20 @@ class PowerSchoolProvider(IntegrationProvider):
                 # request's origin, and Atlas's server is cloud/datacenter
                 # infrastructure regardless of using a real browser.
                 await client.aclose()
+                if settings.is_serverless:
+                    # Playwright needs a Chromium binary this platform doesn't
+                    # ship and enough execution time to launch/drive a
+                    # browser — neither holds on Vercel's serverless
+                    # functions. Attempting it here would just hang until the
+                    # platform kills the function, which surfaces to the
+                    # browser as an opaque "Failed to fetch" instead of a
+                    # real error, so fail fast with an actionable message.
+                    raise RuntimeError(
+                        "This district's PowerSchool login uses a newer ticket-based (CAS) "
+                        "flow that needs real-browser automation, which isn't available in "
+                        "Atlas's hosted environment. Use Session cookie mode instead — log "
+                        "into PowerSchool in your own browser and paste the session cookie."
+                    )
                 try:
                     cookie_header = await login_and_get_cookie_header(
                         base_url, creds["username"], creds["password"]

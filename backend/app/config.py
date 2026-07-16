@@ -53,10 +53,20 @@ class Settings(BaseSettings):
     # default means cross-origin document uploads work without extra config.
     # Override with a comma-separated allow-list to lock this down.
     atlas_cors_origins: str = "*"
+    # Vercel sets this to "1" in every deployed function automatically — used
+    # to detect that we're on serverless infra with no Chromium binary and a
+    # hard execution-time limit, where Playwright browser automation
+    # (`powerschool_browser.py`) can't run and would otherwise hang until the
+    # platform kills the function.
+    vercel: str = ""
 
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.atlas_cors_origins.split(",") if o.strip()]
+
+    @property
+    def is_serverless(self) -> bool:
+        return bool(self.vercel)
 
     @property
     def has_supabase(self) -> bool:

@@ -81,6 +81,73 @@ def _handler_factory(*, valid_password: str):
     return handler
 
 
+# Some districts (e.g. the one that surfaced this) serve their login form
+# from the combined Parent+Student tabbed page at /public/home.html, with a
+# form action *relative* to that page — not from /guardian/home.html at all.
+PUBLIC_LOGIN_PAGE = """
+<html><body>
+<div>Parent Sign In</div>
+<form id="LoginForm" action="home.html" method="post">
+  <input type="hidden" name="pstoken" value="tok456">
+  <input type="hidden" name="contextData" value="beadfeed">
+  <input type="text" name="account" value="">
+  <input type="password" name="pw" value="">
+</form>
+<div>Student Sign In (separate SSO button, no form)</div>
+</body></html>
+"""
+
+
+def _public_login_handler_factory(*, valid_password: str):
+    def _is_authenticated(request: httpx.Request) -> bool:
+        return "sessionid=xyz789" in request.headers.get("cookie", "")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/public/home.html" and request.method == "GET":
+            return httpx.Response(200, text=PUBLIC_LOGIN_PAGE)
+        if request.url.path == "/public/home.html" and request.method == "POST":
+            from urllib.parse import unquote_plus
+            form = dict(x.split("=", 1) for x in request.content.decode().split("&") if "=" in x)
+            dbpw = unquote_plus(form.get("dbpw", ""))
+            expected = _hash_password(valid_password, "beadfeed")
+            if dbpw == expected:
+                return httpx.Response(
+                    200, text=HOME_PAGE_AUTHENTICATED,
+                    headers={"set-cookie": "sessionid=xyz789; Path=/"},
+                )
+            return httpx.Response(200, text=PUBLIC_LOGIN_PAGE)
+        if request.url.path == "/guardian/home.html" and request.method == "GET":
+            if _is_authenticated(request):
+                return httpx.Response(200, text=HOME_PAGE_AUTHENTICATED)
+            # No login form here when unauthenticated — the real one is at
+            # /public/home.html. This is exactly what tripped up the probe.
+            return httpx.Response(200, text="<html><body>Choose a sign-in method</body></html>")
+        if request.url.path == "/guardian/scores.html":
+            return httpx.Response(200, text=ASSIGNMENTS_PAGE)
+        return httpx.Response(404)
+
+    return handler
+
+
+def test_login_falls_back_to_public_home_html():
+    """Covers the real-world case where /guardian/home.html has no login
+    form and the actual Parent Sign In form lives at /public/home.html with
+    a relative form action."""
+    async def run():
+        transport = httpx.MockTransport(_public_login_handler_factory(valid_password="parent-pw"))
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", "parentuser", "parent-pw", transport=transport
+        )
+        try:
+            await client.login()
+            classes = await client.fetch_classes()
+            assert len(classes) == 1
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_login_success_and_scrape():
     async def run():
         transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))

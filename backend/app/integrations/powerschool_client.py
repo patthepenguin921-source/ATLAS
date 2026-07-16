@@ -22,9 +22,15 @@ import hmac
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import urljoin
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
+
+# Districts serve their login form from different URLs. '/public/home.html'
+# is the common combined Parent+Student tabbed login page; some install
+# versions serve the form directly at '/guardian/home.html' instead. Try both.
+_LOGIN_PATHS = ("/public/home.html", "/guardian/home.html")
 
 
 class PowerSchoolAuthError(RuntimeError):
@@ -151,12 +157,27 @@ class PowerSchoolClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def _fetch_login_page(self) -> tuple[httpx.Response, BeautifulSoup, Tag | None]:
+        """Try each known login path and return the first that has a login
+        form (an input named contextData). If none do, returns the last
+        response/soup fetched (for diagnostics) with form=None."""
+        response = soup = None
+        for path in _LOGIN_PATHS:
+            response = await self._client.get(path)
+            soup = BeautifulSoup(response.text, "html.parser")
+            form = next(
+                (f for f in soup.find_all("form") if f.find("input", attrs={"name": "contextData"})),
+                None,
+            )
+            if form is not None:
+                return response, soup, form
+        return response, soup, None
+
     async def probe_login_page(self) -> dict:
         """Fetch the login page and report what we found, without sending
         credentials — used to diagnose 'could not find the login form'
         without needing server log access."""
-        r = await self._client.get("/guardian/home.html")
-        soup = BeautifulSoup(r.text, "html.parser")
+        r, soup, form = await self._fetch_login_page()
         forms = [
             {
                 "id": f.get("id"),
@@ -166,11 +187,11 @@ class PowerSchoolClient:
             for f in soup.find_all("form")
         ]
         return {
-            "requested_url": f"{self._base}/guardian/home.html",
+            "requested_url": str(r.url),
             "final_url": str(r.url),
             "status_code": r.status_code,
             "page_title": soup.title.get_text(strip=True) if soup.title else None,
-            "has_login_form": any("contextData" in (f["input_names"] or []) for f in forms),
+            "has_login_form": form is not None,
             "forms": forms,
             "html_snippet": r.text[:4000],
         }
@@ -187,12 +208,7 @@ class PowerSchoolClient:
             )
 
     async def login(self) -> None:
-        r = await self._client.get("/guardian/home.html")
-        soup = BeautifulSoup(r.text, "html.parser")
-        form = next(
-            (f for f in soup.find_all("form") if f.find("input", attrs={"name": "contextData"})),
-            None,
-        )
+        r, soup, form = await self._fetch_login_page()
         if form is None:
             raise PowerSchoolAuthError(
                 "Could not find the PowerSchool login form — check the portal URL "
@@ -211,7 +227,10 @@ class PowerSchoolClient:
             "ldappassword": self._pw,
             "dbpw": _hash_password(self._pw, context_data),
         })
-        action = form.get("action") or "/guardian/home.html"
+        # Resolve the form's action against the page it was found on (not
+        # the site root) — some districts' login pages live under /public/
+        # and post to a path relative to that, not to /guardian/.
+        action = urljoin(str(r.url), form.get("action") or "/guardian/home.html")
         r = await self._client.post(action, data=fields)
         soup = BeautifulSoup(r.text, "html.parser")
         if soup.find("input", attrs={"name": "contextData"}):

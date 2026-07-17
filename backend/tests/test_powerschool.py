@@ -47,6 +47,29 @@ LOGIN_PAGE = """
 </body></html>
 """
 
+# The current PowerSchool sign-in page (as served by e.g. lexington1.powerschool.com):
+# it carries the CAS ticket markers *and* a real username/password form. Its
+# client-side doPCASLogin() just copies the plaintext password into `dbpw` and
+# posts — no contextData hash. There is deliberately no `contextData` field here.
+PCAS_LOGIN_PAGE = """
+<html><head><title>Parent Sign In</title></head><body>
+<form id="LoginForm" action="/guardian/home.html" method="post">
+  <input type="hidden" name="dbpw" value="">
+  <input type="hidden" name="translator_username" value="">
+  <input type="hidden" name="translator_password" value="">
+  <input type="hidden" name="translator_ldappassword" value="">
+  <input type="hidden" name="returnUrl" value="">
+  <input type="hidden" name="serviceName" value="PS Parent Portal">
+  <input type="hidden" name="serviceTicket" value="">
+  <input type="hidden" name="pcasServerUrl" value="/">
+  <input type="hidden" name="credentialType" value="User Id and Password Credential">
+  <input type="text" name="account" value="">
+  <input type="password" name="pw" value="">
+  <input type="password" name="translatorpw" value="">
+</form>
+</body></html>
+"""
+
 HOME_PAGE_AUTHENTICATED = """
 <html><body>
 <table>
@@ -54,6 +77,41 @@ HOME_PAGE_AUTHENTICATED = """
   <td>1</td>
   <td><a title="Ms. Rivera">Algebra II</a></td>
   <td><a href="/guardian/scores.html?frn=555">A- (91%)</a></td>
+</tr>
+</table>
+</body></html>
+"""
+
+# A grades grid shaped like Lexington's: a full attendance block
+# (Last Week / This Week) sits *before* the Course column, so the course name
+# is NOT in the second cell. The course/teacher cell is the only left-aligned
+# one; the teacher is a teacherinfo details link + a mailto link; the term
+# grade cells are "[ i ]" placeholders (new term, no grades posted yet).
+HOME_PAGE_ATTENDANCE_GRID = """
+<html><body>
+<table class="linkDescList grid">
+<tr class="center th2"><th>Exp</th><th>Last Week</th><th>This Week</th><th>Course</th><th>Q1</th><th>Absences</th><th>Tardies</th></tr>
+<tr class="center th2"><th>M</th><th>T</th><th>W</th><th>H</th><th>F</th><th>M</th><th>T</th><th>W</th><th>H</th><th>F</th></tr>
+<tr class="center" id="ccid_8817372">
+  <td>1-3(A-E)</td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td align="left">AP Calculus AB<br>
+    <a class="button mini dialogM" href="teacherinfo.html?frn=00576431&nolink=true" title="Details about Daichendt, Ana Nicoleta"><em class="ui-icon"></em></a>
+    <a href="mailto:adaichendt@lexington1.net">Email Daichendt, Ana Nicoleta</a>
+    <span class="display-flex"><span>- Rm:</span><span>L F207</span></span>
+  </td>
+  <td><a href="scores.html?frn=00437309537&fg=Q1&schoolid=3">[ i ]</a></td>
+  <td>0</td>
+  <td>0</td>
 </tr>
 </table>
 </body></html>
@@ -178,6 +236,92 @@ def test_login_falls_back_to_public_home_html():
     asyncio.run(run())
 
 
+def _pcas_login_handler_factory(*, valid_password: str):
+    """Fake portal that behaves like the current PowerSchool sign-in page:
+    the login form has no contextData and expects `dbpw` to be the plaintext
+    password (what doPCASLogin copies in), not an HMAC hash."""
+    def _is_authenticated(request: httpx.Request) -> bool:
+        return "sessionid=pcas1" in request.headers.get("cookie", "")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in ("/public/home.html", "/guardian/home.html") and request.method == "GET":
+            if _is_authenticated(request):
+                return httpx.Response(200, text=HOME_PAGE_AUTHENTICATED)
+            return httpx.Response(200, text=PCAS_LOGIN_PAGE)
+        if request.url.path == "/guardian/home.html" and request.method == "POST":
+            from urllib.parse import unquote_plus
+            form = {k: unquote_plus(v) for k, v in
+                    (x.split("=", 1) for x in request.content.decode().split("&") if "=" in x)}
+            if form.get("account") == "parentuser" and form.get("dbpw") == valid_password \
+                    and form.get("pw") == valid_password:
+                return httpx.Response(
+                    200, text=HOME_PAGE_AUTHENTICATED,
+                    headers={"set-cookie": "sessionid=pcas1; Path=/"},
+                )
+            return httpx.Response(200, text=PCAS_LOGIN_PAGE)  # re-render on failure
+        if request.url.path == "/guardian/scores.html":
+            return httpx.Response(200, text=ASSIGNMENTS_PAGE)
+        return httpx.Response(404)
+
+    return handler
+
+
+def test_pcas_login_posts_plaintext_dbpw_and_scrapes():
+    """The modern PowerSchool sign-in page (CAS ticket markers + a real
+    username/password form, no contextData). Login must post the plaintext
+    password as `dbpw` and land on the grades page."""
+    async def run():
+        transport = httpx.MockTransport(_pcas_login_handler_factory(valid_password="parent-pw"))
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", "parentuser", "parent-pw", transport=transport
+        )
+        try:
+            await client.login()  # should not raise
+            classes = await client.fetch_classes()
+            assert len(classes) == 1
+            assert classes[0].name == "Algebra II"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_pcas_login_wrong_password_raises():
+    async def run():
+        transport = httpx.MockTransport(_pcas_login_handler_factory(valid_password="parent-pw"))
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", "parentuser", "wrong-pw", transport=transport
+        )
+        try:
+            with pytest.raises(PowerSchoolAuthError):
+                await client.login()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_pcas_form_classified_as_automatable():
+    """A form with CAS ticket markers but a real password field is the
+    automatable 'pcas' flow — not the unsupported ticket/SSO 'cas' one."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/public/home.html":
+            return httpx.Response(200, text=PCAS_LOGIN_PAGE)
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient("https://fake.powerschool.com", transport=transport)
+        try:
+            result = await client.probe_login_page()
+            assert result["has_login_form"] is True
+            assert result["login_type"] == "pcas"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_login_success_and_scrape():
     async def run():
         transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))
@@ -232,6 +376,37 @@ def test_fetch_classes_skips_not_available_placeholders():
             classes = await client.fetch_classes()
             assert len(classes) == 1
             assert classes[0].name == "Algebra II"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_fetch_classes_attendance_grid_layout():
+    """Districts with a Last-Week/This-Week attendance block push the course
+    name well past the second column. The course cell is the left-aligned one;
+    the name, teacher (from the teacherinfo/mailto links) and period must all
+    come out right, and the "[ i ]" term-grade placeholders must yield no
+    grade rather than a false letter from the course title or room number."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/guardian/home.html" and request.method == "GET":
+            return httpx.Response(200, text=HOME_PAGE_ATTENDANCE_GRID)
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            classes = await client.fetch_classes()
+            assert len(classes) == 1
+            cls = classes[0]
+            assert cls.name == "AP Calculus AB"
+            assert cls.teacher == "Daichendt, Ana Nicoleta"
+            assert cls.period == "1-3(A-E)"
+            assert cls.grade_letter is None and cls.grade_percent is None
+            assert cls.detail_href == "scores.html?frn=00437309537&fg=Q1&schoolid=3"
         finally:
             await client.aclose()
 

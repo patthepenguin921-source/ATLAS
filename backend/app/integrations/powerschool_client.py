@@ -76,17 +76,27 @@ def _hash_password(password: str, context_data: str) -> str:
     return hmac.new(context_data.encode(), b64_no_pad.encode(), hashlib.md5).hexdigest()
 
 
-# PowerSchool has (at least) two login form shapes in the wild:
-#  - "legacy": has a `contextData` field — this is the MD5/HMAC dbpw
-#    handshake `login()` implements below.
-#  - "cas": has `credentialType`/`pcasServerUrl`/`serviceTicket` fields and
-#    an onsubmit="doPCASLogin(...)" handler — a newer ticket-based flow this
-#    client does NOT implement (undocumented, and the login pages that use
-#    it have shown signs of active bot-mitigation scripting, which would
-#    likely block a non-browser client regardless).
+# PowerSchool has (at least) three login form shapes in the wild:
+#  - "legacy": has a `contextData` field — the MD5/HMAC dbpw handshake
+#    `login()` implements below (older installs).
+#  - "pcas": the current PowerSchool sign-in page. It carries the
+#    `credentialType`/`pcasServerUrl`/`serviceTicket` fields *and* a real
+#    username/password form (an `account` text input + a `pw` password
+#    input). Its client-side `doPCASLogin()` just copies the *plaintext*
+#    password into `dbpw` and posts the form — the server does the
+#    credential exchange, so there's no client-side hashing to replicate.
+#    This IS automatable with a plain POST (see `login()`).
+#  - "cas": the same ticket markers but NO on-page password field — i.e. the
+#    page hands off to an external IdP/SSO and there are no credentials to
+#    submit here. NOT automatable by this client (needs the user's own
+#    browser session cookie instead).
 _LEGACY_FORM_MARKER = "contextData"
 _CAS_FORM_MARKERS = {"credentialType", "pcasServerUrl", "serviceTicket"}
 _LOGIN_FORM_MARKERS = {_LEGACY_FORM_MARKER, *_CAS_FORM_MARKERS}
+
+
+def _has_password_field(form: Tag) -> bool:
+    return form.find("input", attrs={"type": "password"}) is not None
 
 
 def _classify_login_form(form: Tag) -> str | None:
@@ -94,7 +104,10 @@ def _classify_login_form(form: Tag) -> str | None:
     if _LEGACY_FORM_MARKER in input_names:
         return "legacy"
     if input_names & _CAS_FORM_MARKERS:
-        return "cas"
+        # A real username/password form (has a password field) is the current
+        # "pcas" flow we can post directly; markers with no password field is a
+        # ticket/SSO hand-off we can't automate.
+        return "pcas" if _has_password_field(form) else "cas"
     return None
 
 
@@ -135,6 +148,17 @@ def _parse_grade(text: str) -> tuple[str | None, float | None]:
     return letter, percent
 
 
+def _grade_from_cell(text: str) -> tuple[str | None, float | None]:
+    """Parse a grade only from a *short, grade-shaped* cell. Real grade cells
+    are compact tokens ("A-", "92%", "A 92"); course titles ("AP Calculus AB")
+    and room numbers ("F207") would otherwise trip `_GRADE_RE`'s bare-letter
+    match, so anything longer than a grade token is rejected outright."""
+    t = text.strip()
+    if not t or len(t) > 12:
+        return None, None
+    return _parse_grade(t)
+
+
 def _parse_score(text: str) -> tuple[float | None, float | None]:
     if m := _SCORE_RE.search(text):
         return float(m.group(1)), float(m.group(2))
@@ -151,6 +175,22 @@ def _parse_date(text: str) -> str | None:
         except ValueError:
             continue
     return None
+
+
+def _extract_teacher(course_cell: Tag) -> str:
+    """Pull the teacher name out of a course cell. PowerSchool renders the
+    teacher as a `teacherinfo` details link (title="Details about <name>")
+    and a mailto link ("Email <name>") — either yields the name once its
+    boilerplate prefix is stripped."""
+    info = course_cell.find("a", href=re.compile("teacherinfo", re.I))
+    if info and info.get("title"):
+        name = re.sub(r"^\s*Details about\s+", "", info["title"], flags=re.I).strip()
+        if name:
+            return name
+    mail = course_cell.find("a", href=re.compile(r"^mailto:", re.I))
+    if mail:
+        return re.sub(r"^\s*Email\s+", "", mail.get_text(strip=True), flags=re.I).strip()
+    return ""
 
 
 def map_category(raw: str | None) -> str:
@@ -275,22 +315,38 @@ class PowerSchoolClient:
             inp.get("name"): inp.get("value", "")
             for inp in form.find_all("input") if inp.get("name")
         }
-        context_data = fields.get("contextData")
-        if not context_data:
-            raise PowerSchoolAuthError("PowerSchool login page did not return a contextData token.")
-        fields.update({
-            "account": self._user,
-            "pw": self._pw,
-            "ldappassword": self._pw,
-            "dbpw": _hash_password(self._pw, context_data),
-        })
+
+        if login_type == "pcas":
+            # Current PowerSchool sign-in page. Its `doPCASLogin()` handler
+            # copies the plaintext password into `dbpw` (the server, not the
+            # browser, does the credential exchange) — so there's no
+            # contextData hash to compute, we just submit the plaintext.
+            dbpw = self._pw
+        else:
+            context_data = fields.get("contextData")
+            if not context_data:
+                raise PowerSchoolAuthError(
+                    "PowerSchool login page did not return a contextData token."
+                )
+            dbpw = _hash_password(self._pw, context_data)
+
+        fields.update({"account": self._user, "pw": self._pw, "dbpw": dbpw})
+        # Only set ldappassword when the form actually has that field — the
+        # pcas page omits it (it carries translator_ldappassword instead), and
+        # posting spurious fields can trip stricter form validation.
+        if "ldappassword" in fields:
+            fields["ldappassword"] = self._pw
         # Resolve the form's action against the page it was found on (not
         # the site root) — some districts' login pages live under /public/
         # and post to a path relative to that, not to /guardian/.
         action = urljoin(str(r.url), form.get("action") or "/guardian/home.html")
         r = await self._client.post(action, data=fields)
         soup = BeautifulSoup(r.text, "html.parser")
-        if soup.find("input", attrs={"name": "contextData"}):
+        # A failed login re-renders a page that still contains the login form
+        # (legacy pages echo the contextData field; pcas pages re-show the
+        # username/password form). Either way, a login form still being present
+        # means we did not get in.
+        if next((f for f in soup.find_all("form") if _is_login_form(f)), None) is not None:
             raise PowerSchoolAuthError("PowerSchool login failed — check your username and password.")
 
     async def debug_home_page(self) -> dict:
@@ -323,7 +379,25 @@ class PowerSchoolClient:
             if len(cells) < 2:
                 continue
 
-            name = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+            # Where the course name lives varies by district. Grids with
+            # attendance columns (e.g. Lexington's, which has a full
+            # Last-Week/This-Week block before the course) mark the course
+            # cell as left-aligned while every other cell is centered — so
+            # prefer that cell, and only fall back to the second column for
+            # the simpler layouts (and the test fixtures) that lack it.
+            name_cell = next((c for c in cells if c.get("align") == "left"), None)
+            if name_cell is not None:
+                name = next(
+                    (s.strip() for s in name_cell.find_all(string=True, recursive=False) if s.strip()),
+                    "",
+                )
+                teacher = _extract_teacher(name_cell)
+            else:
+                name_cell = cells[1]
+                name = name_cell.get_text(strip=True)
+                title_el = row.find(attrs={"title": True})
+                teacher = title_el["title"] if title_el else ""
+
             if not name or name.strip().lower() in _PLACEHOLDER_COURSE_NAMES:
                 # Between school years/terms (e.g. over the summer, before a
                 # new schedule is built) PowerSchool lists each requested
@@ -332,9 +406,14 @@ class PowerSchoolClient:
                 # taking yet, so don't import it as one.
                 continue
 
+            # Grades sit in the term columns after the course cell; scan those
+            # (guarded so course titles/room numbers can't be misread as a
+            # letter grade). Early in a term they're all "[ i ]" placeholders,
+            # which correctly yields no grade.
+            name_idx = cells.index(name_cell)
             grade_letter = grade_percent = None
-            for c in reversed(cells):
-                letter, percent = _parse_grade(c.get_text(strip=True))
+            for c in cells[name_idx + 1:]:
+                letter, percent = _grade_from_cell(c.get_text(strip=True))
                 if letter or percent:
                     grade_letter, grade_percent = letter, percent
                     break
@@ -344,9 +423,6 @@ class PowerSchoolClient:
                 (l["href"] for l in links if re.search(r"scores|grade|assignment", l["href"], re.I)),
                 links[-1]["href"] if links else None,
             )
-
-            title_el = row.find(attrs={"title": True})
-            teacher = title_el["title"] if title_el else ""
 
             classes.append(PSClass(
                 ccid=ccid,

@@ -30,7 +30,7 @@ interface ProbeResult {
   status_code: number;
   page_title: string | null;
   has_login_form: boolean;
-  login_type: "legacy" | "cas" | null;
+  login_type: "legacy" | "pcas" | "cas" | null;
   browser_fallback_available: boolean;
   forms: { id: string | null; action: string | null; input_names: string[] }[];
   html_snippet: string;
@@ -361,7 +361,7 @@ export default function IntegrationsPage() {
                 </div>
               )}
               <div>
-                {probeResult.login_type === "legacy" ? (
+                {probeResult.login_type === "legacy" || probeResult.login_type === "pcas" ? (
                   <span className="text-atlas-good">✓ Found a login form Atlas can automate</span>
                 ) : probeResult.login_type === "cas" ? (
                   <span className="text-atlas-warn">

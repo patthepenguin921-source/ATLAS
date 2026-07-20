@@ -405,6 +405,7 @@ def test_fetch_classes_attendance_grid_layout():
             assert cls.name == "AP Calculus AB"
             assert cls.teacher == "Daichendt, Ana Nicoleta"
             assert cls.period == "1-3(A-E)"
+            assert cls.room == "L F207"
             assert cls.grade_letter is None and cls.grade_percent is None
             assert cls.detail_href == "scores.html?frn=00437309537&fg=Q1&schoolid=3"
         finally:

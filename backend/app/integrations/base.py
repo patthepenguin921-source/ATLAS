@@ -32,6 +32,20 @@ class IntegrationProvider:
         created = await supabase.insert("courses", payload)
         return created[0]["id"]
 
+    async def upsert_club(self, user_id: str, external_id: str, fields: dict[str, Any]) -> str:
+        existing = await supabase.select(
+            "clubs", columns="id",
+            filters={"user_id": eq(user_id), "external_id": eq(external_id),
+                     "external_source": eq(self.name)}, limit=1,
+        )
+        payload = {**fields, "user_id": user_id, "external_id": external_id,
+                   "external_source": self.name}
+        if existing:
+            await supabase.update("clubs", payload, filters={"id": eq(existing[0]["id"])})
+            return existing[0]["id"]
+        created = await supabase.insert("clubs", payload)
+        return created[0]["id"]
+
     async def upsert_assignment(self, user_id: str, external_id: str, fields: dict[str, Any]) -> str:
         existing = await supabase.select(
             "assignments", columns="id",

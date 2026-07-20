@@ -51,6 +51,12 @@ _CRUD = [
     make_crud_router(table="chat_projects", prefix="/chat-projects", tag="chat_projects",
                      writable={"name", "color"},
                      default_order="created_at.asc"),
+    # Clubs/activities (DECA, etc.) — tracked separately from academic
+    # courses; see app.integrations.course_mapping.is_club.
+    make_crud_router(table="clubs", prefix="/clubs", tag="clubs",
+                     writable={"name", "advisor", "meeting_info",
+                               "external_id", "external_source", "metadata"},
+                     default_order="name.asc"),
 ]
 
 api_router = APIRouter()

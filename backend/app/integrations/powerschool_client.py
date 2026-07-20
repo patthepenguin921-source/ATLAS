@@ -51,6 +51,7 @@ class PSClass:
     period: str
     name: str
     teacher: str
+    room: str
     grade_letter: str | None
     grade_percent: float | None
     detail_href: str | None
@@ -190,6 +191,33 @@ def _extract_teacher(course_cell: Tag) -> str:
     mail = course_cell.find("a", href=re.compile(r"^mailto:", re.I))
     if mail:
         return re.sub(r"^\s*Email\s+", "", mail.get_text(strip=True), flags=re.I).strip()
+    return ""
+
+
+# A label token ("- Rm:", "Room:", "Bldg:") whose *next* text node is the
+# room value — the shape seen in real course cells, e.g. a
+# `<span>- Rm:</span><span>L F207</span>` pair.
+_ROOM_LABEL_RE = re.compile(r"^-?\s*(?:rm\.?|room|bldg\.?|building)\s*:?\s*$", re.I)
+# A bare, unlabeled room-shaped token ("F207", "204", "B-12").
+_ROOM_TOKEN_RE = re.compile(r"^[a-z]{0,3}-?\d{1,4}[a-z]?$", re.I)
+
+
+def _extract_room(name_cell: Tag, name: str, teacher: str) -> str:
+    """Best-effort room lookup. PowerSchool sometimes renders the room as its
+    own short text node(s) inside the course cell alongside the course name
+    and teacher link, but the markup varies a lot by district — this only
+    returns a value when it finds either a "Rm:"-style label followed by its
+    value, or an unambiguous bare room token, and otherwise leaves it blank
+    rather than guessing wrong."""
+    texts = [t for t in (s.strip() for s in name_cell.stripped_strings) if t]
+    for i, t in enumerate(texts):
+        if _ROOM_LABEL_RE.match(t) and i + 1 < len(texts):
+            return texts[i + 1]
+    for t in texts:
+        if t == name or t == teacher:
+            continue
+        if _ROOM_TOKEN_RE.match(t):
+            return t
     return ""
 
 
@@ -398,6 +426,8 @@ class PowerSchoolClient:
                 title_el = row.find(attrs={"title": True})
                 teacher = title_el["title"] if title_el else ""
 
+            room = _extract_room(name_cell, name, teacher)
+
             if not name or name.strip().lower() in _PLACEHOLDER_COURSE_NAMES:
                 # Between school years/terms (e.g. over the summer, before a
                 # new schedule is built) PowerSchool lists each requested
@@ -429,6 +459,7 @@ class PowerSchoolClient:
                 period=cells[0].get_text(strip=True),
                 name=name,
                 teacher=teacher,
+                room=room,
                 grade_letter=grade_letter,
                 grade_percent=grade_percent,
                 detail_href=detail_href,

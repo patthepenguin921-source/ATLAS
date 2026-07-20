@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 _EXCLUDED_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\blunch\b", re.I),
     re.compile(r"\bambush\b", re.I),  # covers "AMBUSH 23" and any cohort variant
+    re.compile(r"\bcat\s*time\b", re.I),  # non-academic advisory block
 )
 
 

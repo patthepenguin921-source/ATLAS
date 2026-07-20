@@ -9,6 +9,8 @@ def test_excludes_lunch_and_ambush():
     assert course_mapping.is_excluded("7th Period Lunch")
     assert course_mapping.is_excluded("AMBUSH 23")
     assert course_mapping.is_excluded("Ambush - Period 4")
+    assert course_mapping.is_excluded("CAT Time")
+    assert course_mapping.is_excluded("CAT Time - Period 6")
     assert not course_mapping.is_excluded("AP Biology")
 
 

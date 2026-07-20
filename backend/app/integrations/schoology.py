@@ -21,6 +21,7 @@ from typing import Any
 
 from app.core.crypto import decrypt_json, encrypt_json
 from app.core.supabase_client import eq, supabase
+from app.integrations import course_mapping
 from app.integrations.base import IntegrationProvider
 from app.integrations.google_files import (
     download_google_file,
@@ -121,11 +122,105 @@ class SchoologyProvider(IntegrationProvider):
             await client.aclose()
 
     # ---- course reconciliation ----
-    async def _resolve_course(self, user_id: str, section: SchoologySection) -> str:
+    async def _resolve_club(self, user_id: str, section: SchoologySection) -> str:
+        """Clubs (DECA, etc.) get their own table — never mixed into GPA/
+        course data. See `course_mapping.is_club`."""
+        return await self.upsert_club(user_id, section.id, {
+            "name": section.display_name,
+            "meeting_info": section.location or None,
+            "metadata": {
+                "schoology_section_id": section.id,
+                "meeting_days": section.meeting_days,
+            },
+        })
+
+    async def _resolve_grouped_course(
+        self, user_id: str, section: SchoologySection,
+        group: course_mapping.CourseGroup, member: course_mapping.GroupMember,
+    ) -> str:
+        """Resolve/create the merged course row for a section matched by
+        `course_mapping.match_group` (e.g. an "HN Ext Lab" + "AP" pair that
+        should display as one course with linked semester rows).
+
+        Also self-heals accounts synced before this grouping existed: if this
+        exact section was already imported as its own standalone course, that
+        row is renamed/relabeled into the group in place (via the external_id
+        match below) rather than left as a stale duplicate — no manual
+        course cleanup required after a re-sync."""
+        existing = await supabase.select(
+            "courses", columns="id,metadata",
+            filters={"user_id": eq(user_id), "external_id": eq(section.id),
+                     "external_source": eq(self.name)}, limit=1,
+        )
+        group_rows = await supabase.select(
+            "courses", columns="id,semester,linked_course_id,metadata",
+            filters={"user_id": eq(user_id), "metadata->>course_group": eq(group.key)},
+        ) or []
+
+        patch: dict[str, Any] = {
+            "name": group.canonical_name,
+            "code": section.course_code or None,
+            "room": section.location or None,
+            "semester": member.semester,
+            "course_level": member.course_level,
+            "has_hn_prep_lab": member.has_hn_prep_lab,
+            "has_ap_prep_lab": member.has_ap_prep_lab,
+            "external_id": section.id,
+            "external_source": self.name,
+        }
+        meta_extra = {
+            "course_group": group.key,
+            "schoology_section_id": section.id,
+            "meeting_days": section.meeting_days,
+            "start_time": section.start_time,
+            "end_time": section.end_time,
+        }
+
+        if existing:
+            row_id = existing[0]["id"]
+            meta = {**(existing[0].get("metadata") or {}), **meta_extra}
+            await supabase.update("courses", {**patch, "metadata": meta}, filters={"id": eq(row_id)})
+            return row_id
+
+        # Reuse the group's row for this semester if one already exists
+        # (e.g. re-syncing the same section under a slightly different id).
+        same_semester = next((r for r in group_rows if r.get("semester") == member.semester), None)
+        if same_semester:
+            meta = {**(same_semester.get("metadata") or {}), **meta_extra}
+            await supabase.update(
+                "courses", {**patch, "metadata": meta}, filters={"id": eq(same_semester["id"])}
+            )
+            return same_semester["id"]
+
+        # First row for the group becomes the root; later semesters link to it.
+        root = next((r for r in group_rows if not r.get("linked_course_id")), None)
+        patch["metadata"] = meta_extra
+        if root:
+            patch["linked_course_id"] = root["id"]
+        created = await supabase.insert("courses", {**patch, "user_id": user_id})
+        return created[0]["id"]
+
+    async def _resolve_course(
+        self, user_id: str, section: SchoologySection, present_group_semesters: dict[str, set[str]],
+    ) -> str:
         """Return the course_id this Schoology section maps to, reusing an
         existing PowerSchool/manual/prior-Schoology course when one matches so
         the systems share a single course row. Only creates a new course when
         nothing matches."""
+        group_match = course_mapping.match_group(section.display_name)
+        if group_match:
+            group, member = group_match
+            # Only actually split into the group when there's real evidence
+            # this class is split this way: either the section itself is the
+            # distinctively-named HN prep-lab half (a name like "Physics 1 H
+            # Ext Lab" doesn't happen to a plain, already-existing course), or
+            # both halves showed up in this same sync. Otherwise a plain,
+            # already-reconciled course (e.g. a stand-alone "AP Biology" with
+            # no lab counterpart) would get needlessly split — fall through
+            # to ordinary name-based reconciliation instead.
+            if member.has_hn_prep_lab or len(present_group_semesters.get(group.key, set())) >= 2:
+                return await self._resolve_grouped_course(user_id, section, group, member)
+
         # 1) A course this provider already created/linked for this section.
         existing = await supabase.select(
             "courses", columns="id",
@@ -340,7 +435,7 @@ class SchoologyProvider(IntegrationProvider):
         google_token = config.get("google_access_token")  # optional, for Drive downloads
         client = await self._client(integration)
         report: dict[str, Any] = {
-            "courses": 0, "assignments": 0, "events": 0,
+            "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
             "documents": 0, "links": 0, "announcements": 0, "errors": [],
         }
         try:
@@ -348,9 +443,39 @@ class SchoologyProvider(IntegrationProvider):
             sections = await client.get_sections(uid)
             monday, sunday = week_bounds()
 
+            present_group_semesters: dict[str, set[str]] = {}
+            for s in sections:
+                gm = course_mapping.match_group(s.display_name)
+                if gm:
+                    g, m = gm
+                    present_group_semesters.setdefault(g.key, set()).add(m.semester)
+
             for section in sections:
+                # Non-academic blocks (lunch, advisory) — never imported, and
+                # any stale row from before this filter existed is removed.
+                if course_mapping.is_excluded(section.display_name):
+                    try:
+                        await supabase.delete(
+                            "courses",
+                            filters={"user_id": eq(user_id), "external_id": eq(section.id),
+                                     "external_source": eq(self.name)},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    report["excluded"] += 1
+                    continue
+
+                # Clubs/activities — tracked separately, never as a course.
+                if course_mapping.is_club(section.display_name):
+                    try:
+                        await self._resolve_club(user_id, section)
+                        report["clubs"] += 1
+                    except Exception as e:  # noqa: BLE001
+                        report["errors"].append(f"{section.display_name} (club): {e}")
+                    continue
+
                 try:
-                    course_id = await self._resolve_course(user_id, section)
+                    course_id = await self._resolve_course(user_id, section, present_group_semesters)
                     report["courses"] += 1
                 except Exception as e:  # noqa: BLE001
                     report["errors"].append(f"{section.display_name}: {e}")

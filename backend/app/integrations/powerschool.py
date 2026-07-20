@@ -103,6 +103,23 @@ class PowerSchoolProvider(IntegrationProvider):
             raise RuntimeError(str(e)) from e
         return client
 
+    async def _resolve_teacher_id(self, user_id: str, name: str) -> str | None:
+        """Look up (or create) a `teachers` row by name so PowerSchool-synced
+        courses link `teacher_id` instead of only stashing the name in
+        metadata — matches how the course detail page's teacher picker
+        expects teachers to be represented."""
+        name = (name or "").strip()
+        if not name:
+            return None
+        existing = await supabase.select(
+            "teachers", columns="id",
+            filters={"user_id": eq(user_id), "name": eq(name)}, limit=1,
+        )
+        if existing:
+            return existing[0]["id"]
+        created = await supabase.insert("teachers", {"user_id": user_id, "name": name})
+        return created[0]["id"]
+
     async def debug_scrape(self, user_id: str) -> dict[str, Any]:
         """Fetches the authenticated grades page and reports its raw table
         structure — lets a district's actual column layout be inspected
@@ -122,9 +139,12 @@ class PowerSchoolProvider(IntegrationProvider):
             errors: list[str] = []
 
             for cls in classes:
+                teacher_id = await self._resolve_teacher_id(user_id, cls.teacher)
                 course_id = await self.upsert_course(user_id, cls.ccid, {
                     "name": cls.name,
                     "period": cls.period,
+                    "room": cls.room or None,
+                    "teacher_id": teacher_id,
                     "current_grade": cls.grade_percent,
                     "current_letter": cls.grade_letter,
                     "metadata": {"teacher": cls.teacher},

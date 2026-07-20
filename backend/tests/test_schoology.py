@@ -398,3 +398,106 @@ def test_sync_is_idempotent(fake_db, monkeypatch):
 
 def test_normalize_name_basic():
     assert _normalize_name("AP  Calculus-AB!") == "ap calculus ab"
+
+
+# ---------------------------------------------------------------------------
+# Exclusions, clubs, and grouped (lab+AP / AB+BC) courses
+# ---------------------------------------------------------------------------
+GROUPED_SECTIONS = {"section": [
+    {"id": "601", "course_title": "Lunch A", "section_title": "", "course_code": "",
+     "section_code": "", "grading_periods": [1], "meeting_days": [], "start_time": "",
+     "end_time": "", "location": "", "active": 1},
+    {"id": "602", "course_title": "AMBUSH 23", "section_title": "", "course_code": "",
+     "section_code": "", "grading_periods": [1], "meeting_days": [], "start_time": "",
+     "end_time": "", "location": "", "active": 1},
+    {"id": "603", "course_title": "DECA", "section_title": "Sec 1", "course_code": "",
+     "section_code": "", "grading_periods": [1], "meeting_days": [], "start_time": "",
+     "end_time": "", "location": "", "active": 1},
+    {"id": "604", "course_title": "Physics 1 H Ext Lab", "section_title": "", "course_code": "PHYS1H",
+     "section_code": "", "grading_periods": [1], "meeting_days": [], "start_time": "",
+     "end_time": "", "location": "B12", "active": 1},
+    {"id": "605", "course_title": "AP Physics 1", "section_title": "", "course_code": "APPHYS1",
+     "section_code": "", "grading_periods": [1], "meeting_days": [], "start_time": "",
+     "end_time": "", "location": "B12", "active": 1},
+    {"id": "606", "course_title": "AP Calculus AB", "section_title": "", "course_code": "APCALCAB",
+     "section_code": "", "grading_periods": [1], "meeting_days": [], "start_time": "",
+     "end_time": "", "location": "C4", "active": 1},
+    {"id": "607", "course_title": "AP Calculus BC", "section_title": "", "course_code": "APCALCBC",
+     "section_code": "", "grading_periods": [1], "meeting_days": [], "start_time": "",
+     "end_time": "", "location": "C4", "active": 1},
+]}
+
+
+def _grouped_handler(request: httpx.Request) -> httpx.Response:
+    path = request.url.path
+    if path == "/v1/app-user-info":
+        return httpx.Response(200, json={"api_uid": 12345678})
+    if path.endswith("/sections") and "/users/" in path:
+        return httpx.Response(200, json=GROUPED_SECTIONS)
+    if "/assignments" in path:
+        return httpx.Response(200, json={"assignment": []})
+    if "/events" in path:
+        return httpx.Response(200, json={"event": []})
+    if "/folder/" in path:
+        return httpx.Response(200, json={"folder-item": []})
+    return httpx.Response(404, json={"error": f"no fixture for {path}"})
+
+
+def test_sync_excludes_lunch_and_ambush_and_routes_clubs_separately(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    async def _fake_client(self, integration):
+        return SchoologyClient("ckey", "csecret", transport=httpx.MockTransport(_grouped_handler))
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+
+    report = asyncio.run(provider.sync(USER_ID))
+
+    assert report["excluded"] == 2  # Lunch A + AMBUSH 23
+    assert report["clubs"] == 1  # DECA
+
+    courses = fake_db.tables["courses"]
+    names = {c["name"] for c in courses if c["id"] != BIO_COURSE}
+    assert "Lunch A" not in names
+    assert "AMBUSH 23" not in names
+    assert "DECA" not in names
+
+    clubs = fake_db.tables.get("clubs", [])
+    assert len(clubs) == 1 and clubs[0]["name"] == "DECA"
+
+
+def test_sync_merges_lab_and_ap_sections_into_one_grouped_course(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    async def _fake_client(self, integration):
+        return SchoologyClient("ckey", "csecret", transport=httpx.MockTransport(_grouped_handler))
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+
+    asyncio.run(provider.sync(USER_ID))
+
+    courses = fake_db.tables["courses"]
+    physics = [c for c in courses if c["name"] == "AP Physics"]
+    assert len(physics) == 2
+    by_sem = {c["semester"]: c for c in physics}
+    assert by_sem["s1"]["has_hn_prep_lab"] is True
+    assert by_sem["s1"]["course_level"] == "honors"
+    assert by_sem["s2"]["course_level"] == "ap"
+    assert by_sem["s2"]["has_hn_prep_lab"] is False
+    # The AP-half links back to the lab-half (the group's root row).
+    assert by_sem["s2"]["linked_course_id"] == by_sem["s1"]["id"]
+
+    calc = [c for c in courses if c["name"] == "AP Calc BC"]
+    assert len(calc) == 2
+    calc_by_sem = {c["semester"]: c for c in calc}
+    assert calc_by_sem["s1"]["course_level"] == "ap" and not calc_by_sem["s1"]["has_hn_prep_lab"]
+    assert calc_by_sem["s2"]["course_level"] == "ap" and not calc_by_sem["s2"]["has_hn_prep_lab"]
+    assert calc_by_sem["s2"]["linked_course_id"] == calc_by_sem["s1"]["id"]

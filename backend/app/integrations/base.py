@@ -18,7 +18,13 @@ class IntegrationProvider:
         )
 
     # ---- shared upsert helpers (normalized → Atlas schema) ----
-    async def upsert_course(self, user_id: str, external_id: str, fields: dict[str, Any]) -> str:
+    async def upsert_course(
+        self, user_id: str, external_id: str, fields: dict[str, Any],
+        *, create_only: dict[str, Any] | None = None,
+    ) -> str:
+        """`create_only` fields (e.g. an inferred course_level) are applied
+        only when the course is first created — a later sync never stomps a
+        value the user (or a subsequent match) has since set."""
         existing = await supabase.select(
             "courses", columns="id",
             filters={"user_id": eq(user_id), "external_id": eq(external_id),
@@ -29,7 +35,7 @@ class IntegrationProvider:
         if existing:
             await supabase.update("courses", payload, filters={"id": eq(existing[0]["id"])})
             return existing[0]["id"]
-        created = await supabase.insert("courses", payload)
+        created = await supabase.insert("courses", {**payload, **(create_only or {})})
         return created[0]["id"]
 
     async def upsert_club(self, user_id: str, external_id: str, fields: dict[str, Any]) -> str:

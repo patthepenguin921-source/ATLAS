@@ -254,7 +254,10 @@ class SchoologyProvider(IntegrationProvider):
                 await supabase.update("courses", patch, filters={"id": eq(c["id"])})
                 return c["id"]
 
-        # 3) No match — create a Schoology-owned course.
+        # 3) No match — create a Schoology-owned course. course_level is only
+        # a *default inferred from the name* (e.g. "AP English Lang" -> ap),
+        # applied on creation only so it never overrides a level the user
+        # sets afterward.
         return await self.upsert_course(user_id, section.id, {
             "name": section.display_name,
             "code": section.course_code or None,
@@ -265,7 +268,7 @@ class SchoologyProvider(IntegrationProvider):
                 "start_time": section.start_time,
                 "end_time": section.end_time,
             },
-        })
+        }, create_only={"course_level": course_mapping.infer_course_level(section.display_name)})
 
     # ---- week-at-a-glance ----
     async def _upsert_calendar_event(

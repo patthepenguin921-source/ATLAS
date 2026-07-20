@@ -15,7 +15,16 @@ def test_excludes_lunch_and_ambush():
 def test_club_detection():
     assert course_mapping.is_club("DECA")
     assert course_mapping.is_club("DECA - Chapter Meeting")
+    assert course_mapping.is_club("Lexington High Interact Club")
     assert not course_mapping.is_club("AP Biology")
+
+
+def test_infer_course_level():
+    assert course_mapping.infer_course_level("AP English Lang") == "ap"
+    assert course_mapping.infer_course_level("IB History") == "ib"
+    assert course_mapping.infer_course_level("DE Intro to Business") == "dual_enrollment"
+    assert course_mapping.infer_course_level("Honors Chemistry") == "honors"
+    assert course_mapping.infer_course_level("Algebra II") == "regular"
 
 
 def test_ap_physics_group_matching():
@@ -46,7 +55,7 @@ def test_ap_calc_ab_bc_group_matching():
     ab_group, ab_member = ab
     bc_group, bc_member = bc
     assert ab_group.key == bc_group.key == "ap_calc_bc"
-    assert ab_group.canonical_name == "AP Calc BC"
+    assert ab_group.canonical_name == "AP Calculus"
     # Both halves are AP-weighted; neither uses the HN prep-lab flag.
     assert ab_member.semester == "s1" and ab_member.course_level == "ap"
     assert not ab_member.has_hn_prep_lab

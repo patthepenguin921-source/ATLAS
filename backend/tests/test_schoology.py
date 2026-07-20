@@ -495,7 +495,7 @@ def test_sync_merges_lab_and_ap_sections_into_one_grouped_course(fake_db, monkey
     # The AP-half links back to the lab-half (the group's root row).
     assert by_sem["s2"]["linked_course_id"] == by_sem["s1"]["id"]
 
-    calc = [c for c in courses if c["name"] == "AP Calc BC"]
+    calc = [c for c in courses if c["name"] == "AP Calculus"]
     assert len(calc) == 2
     calc_by_sem = {c["semester"]: c for c in calc}
     assert calc_by_sem["s1"]["course_level"] == "ap" and not calc_by_sem["s1"]["has_hn_prep_lab"]

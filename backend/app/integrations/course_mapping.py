@@ -28,12 +28,14 @@ def is_excluded(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------
-# Clubs/activities (DECA, NHS, …) — tracked separately from academic courses
-# (see the `clubs` table) rather than mixed into GPA/course data. Extend this
-# list as more clubs show up; anything not matched here still imports as an
-# ordinary course.
+# Clubs/activities (DECA, Interact Club, …) — tracked separately from
+# academic courses (see the `clubs` table) rather than mixed into GPA/course
+# data. The generic "club" pattern catches most of them by itself; named
+# exceptions (orgs whose name doesn't contain the word "club") are added
+# individually as they show up.
 # ---------------------------------------------------------------------
 _CLUB_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bclub\b", re.I),
     re.compile(r"\bdeca\b", re.I),
 )
 
@@ -104,10 +106,10 @@ COURSE_GROUPS: tuple[CourseGroup, ...] = (
     ),
     # AP Calculus AB/BC: unlike Physics/Bio, both halves are already
     # AP-weighted — AB and BC are just the two semesters of one class,
-    # displayed together as "AP Calc BC" (no HN prep lab either half).
+    # displayed together as "AP Calculus" (no HN prep lab either half).
     CourseGroup(
         key="ap_calc_bc",
-        canonical_name="AP Calc BC",
+        canonical_name="AP Calculus",
         members=(
             GroupMember(
                 pattern=re.compile(r"\bap\b.*calc(ulus)?.*\bab\b", re.I),
@@ -130,3 +132,26 @@ def match_group(name: str) -> tuple[CourseGroup, GroupMember] | None:
             if member.pattern.search(name):
                 return group, member
     return None
+
+
+# ---------------------------------------------------------------------
+# GPA-weight inference for ordinary (non-grouped) courses. Schoology has no
+# "is this AP/Honors/DE" field, so a brand-new course otherwise defaults to
+# `course_level='regular'` — silently wrong for e.g. "AP English Lang". This
+# only fills in a sensible default when *creating* a course; it never
+# overwrites a level a user (or another matched course) already set.
+# ---------------------------------------------------------------------
+_LEVEL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bib\b", re.I), "ib"),
+    (re.compile(r"\bd\.?e\.?\b|dual\s*enroll", re.I), "dual_enrollment"),
+    (re.compile(r"\bap\b", re.I), "ap"),
+    (re.compile(r"\bh(?:on(?:ors)?)?\b", re.I), "honors"),
+)
+
+
+def infer_course_level(name: str) -> str:
+    name = name or ""
+    for pattern, level in _LEVEL_PATTERNS:
+        if pattern.search(name):
+            return level
+    return "regular"

@@ -24,7 +24,7 @@ Atlas backend on a schedule.
 | `daily-plan.workflow.json` | every day 06:00 | `POST /api/v1/agents/planner/daily-plan` → generates the day's plan |
 | `weekly-review.workflow.json` | Sundays 18:00 | `POST /api/v1/agents/coach/weekly-review` → weekend review |
 | `refresh-retention.workflow.json` | every day 03:00 | `POST /api/v1/knowledge/refresh-retention` → decays retention estimates |
-| `lms-sync.workflow.json` | every 4 hours | `POST /api/v1/integrations/schoology/sync` (Phase 2) |
+| `lms-sync.workflow.json` | 07:00 & 16:00 (America/New_York) | `POST /api/v1/integrations/schoology/sync` → morning & afternoon Schoology pull |
 
 Each is a minimal Schedule Trigger → HTTP Request. Extend them to fan out over
 multiple students, post results to Slack/email, or chain steps (e.g. sync →

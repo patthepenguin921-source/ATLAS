@@ -3,10 +3,14 @@
   "nodes": [
     {
       "parameters": {
-        "rule": { "interval": [{ "field": "hours", "hoursInterval": 4 }] }
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 7,16 * * *" }
+          ]
+        }
       },
       "id": "trigger",
-      "name": "Every 4 hours",
+      "name": "7am & 4pm (NY)",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [260, 300]
@@ -28,8 +32,8 @@
     }
   ],
   "connections": {
-    "Every 4 hours": { "main": [[{ "node": "Sync Schoology", "type": "main", "index": 0 }]] }
+    "7am & 4pm (NY)": { "main": [[{ "node": "Sync Schoology", "type": "main", "index": 0 }]] }
   },
-  "settings": {},
-  "active": false
+  "settings": { "timezone": "America/New_York" },
+  "active": true
 }

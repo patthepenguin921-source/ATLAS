@@ -20,8 +20,17 @@ interface SyncResult {
   courses?: number;
   assignments?: number;
   grades?: number;
+  events?: number;
+  documents?: number;
+  links?: number;
+  announcements?: number;
   errors?: string[];
   detail?: string;
+}
+
+interface SchoologyVerifyResult {
+  api_uid: string;
+  section_count: number;
 }
 
 interface ProbeResult {
@@ -68,6 +77,19 @@ export default function IntegrationsPage() {
   const [debugResult, setDebugResult] = useState<DebugScrapeResult | null>(null);
   const [debugError, setDebugError] = useState<string | null>(null);
 
+  // Schoology (API key / OAuth 1.0a) connect state
+  const [schoologyOpen, setSchoologyOpen] = useState(false);
+  const [schoologyConnecting, setSchoologyConnecting] = useState(false);
+  const [schoologyError, setSchoologyError] = useState<string | null>(null);
+  const [schoologyForm, setSchoologyForm] = useState({
+    domain: "",
+    consumer_key: "",
+    consumer_secret: "",
+  });
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<SchoologyVerifyResult | null>(null);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+
   async function load() {
     setIntegrations(await apiGet<Integration[]>("/integrations"));
   }
@@ -76,6 +98,62 @@ export default function IntegrationsPage() {
   }, []);
 
   const powerschool = integrations?.find((i) => i.provider === "powerschool");
+  const schoology = integrations?.find((i) => i.provider === "schoology");
+
+  function closeSchoologyModal() {
+    setSchoologyOpen(false);
+    setVerifyResult(null);
+    setVerifyError(null);
+    setSchoologyError(null);
+  }
+
+  function openSchoologyModal() {
+    setSchoologyForm({ domain: "", consumer_key: "", consumer_secret: "" });
+    setVerifyResult(null);
+    setVerifyError(null);
+    setSchoologyError(null);
+    setSchoologyOpen(true);
+  }
+
+  async function verifySchoology() {
+    if (!schoologyForm.consumer_key.trim() || !schoologyForm.consumer_secret.trim()) return;
+    setVerifying(true);
+    setVerifyError(null);
+    setVerifyResult(null);
+    try {
+      const result = await apiPost<SchoologyVerifyResult>("/integrations/schoology/verify", {
+        consumer_key: schoologyForm.consumer_key,
+        consumer_secret: schoologyForm.consumer_secret,
+        domain: schoologyForm.domain || undefined,
+      });
+      setVerifyResult(result);
+    } catch (err: any) {
+      setVerifyError(err.message ?? "Those credentials didn't work.");
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  async function connectSchoology(e: React.FormEvent) {
+    e.preventDefault();
+    setSchoologyConnecting(true);
+    setSchoologyError(null);
+    setLastResult(null);
+    try {
+      const result = await apiPost<SyncResult>("/integrations/schoology/connect", {
+        consumer_key: schoologyForm.consumer_key,
+        consumer_secret: schoologyForm.consumer_secret,
+        domain: schoologyForm.domain || undefined,
+      });
+      setLastResult(result);
+      closeSchoologyModal();
+      await load();
+    } catch (err: any) {
+      setSchoologyError(err.message ?? "Connection failed.");
+    } finally {
+      setSchoologyConnecting(false);
+    }
+  }
 
   function closeConnectModal() {
     setConnectOpen(false);
@@ -173,7 +251,8 @@ export default function IntegrationsPage() {
   }
 
   async function disconnect(provider: string) {
-    if (!confirm("Disconnect PowerSchool? This removes your saved login; imported grades stay.")) return;
+    const label = provider === "schoology" ? "Schoology" : "PowerSchool";
+    if (!confirm(`Disconnect ${label}? This removes your saved credentials; imported data stays.`)) return;
     await apiDelete(`/integrations/${provider}`);
     setLastResult(null);
     await load();
@@ -239,8 +318,12 @@ export default function IntegrationsPage() {
                 <>
                   <div className="font-medium text-atlas-good mb-1">Sync complete</div>
                   <div className="text-atlas-muted">
-                    {lastResult.courses ?? 0} courses · {lastResult.assignments ?? 0} assignments ·{" "}
-                    {lastResult.grades ?? 0} grades imported
+                    {lastResult.courses ?? 0} courses · {lastResult.assignments ?? 0} assignments
+                    {lastResult.grades !== undefined && ` · ${lastResult.grades} grades`}
+                    {lastResult.events !== undefined && ` · ${lastResult.events} calendar items`}
+                    {lastResult.documents !== undefined && ` · ${lastResult.documents} files`}
+                    {lastResult.links !== undefined && ` · ${lastResult.links} links`}
+                    {" imported"}
                   </div>
                   {lastResult.errors && lastResult.errors.length > 0 && (
                     <div className="text-atlas-warn mt-2">
@@ -287,8 +370,52 @@ export default function IntegrationsPage() {
             </div>
           )}
 
+          <div className="card mt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-medium flex items-center gap-2">
+                  Schoology
+                  {schoology && <Badge tone={STATUS_TONE[schoology.status]}>{schoology.status}</Badge>}
+                </div>
+                <div className="text-sm text-atlas-muted mt-1">
+                  {schoology
+                    ? schoology.last_synced_at
+                      ? `Last synced ${new Date(schoology.last_synced_at).toLocaleString()}`
+                      : "Connected — not yet synced"
+                    : "Auto-import your week-at-a-glance, assignments, and every course folder's files, slideshows, and links. Grades stay in PowerSchool."}
+                </div>
+                {schoology?.last_error && (
+                  <div className="text-sm text-atlas-bad mt-1">{schoology.last_error}</div>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {schoology ? (
+                  <>
+                    <button
+                      className="btn-ghost"
+                      disabled={syncingProvider === "schoology"}
+                      onClick={() => sync("schoology")}
+                    >
+                      {syncingProvider === "schoology" ? "Syncing…" : "Sync now"}
+                    </button>
+                    <button className="btn-ghost" onClick={openSchoologyModal}>
+                      Edit key
+                    </button>
+                    <button className="btn-ghost" onClick={() => disconnect("schoology")}>
+                      Disconnect
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn-primary" onClick={openSchoologyModal}>
+                    Connect
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
           <div className="card mt-4 opacity-60">
-            <div className="font-medium">Schoology, Blackboard</div>
+            <div className="font-medium">Blackboard</div>
             <div className="text-sm text-atlas-muted mt-1">Coming soon.</div>
           </div>
         </Section>
@@ -472,6 +599,94 @@ export default function IntegrationsPage() {
               </div>
             </>
           )}
+        </form>
+      </Modal>
+
+      <Modal
+        open={schoologyOpen}
+        onClose={closeSchoologyModal}
+        title={schoology ? "Update Schoology API key" : "Connect Schoology"}
+        footer={
+          <>
+            <button className="btn-ghost" onClick={closeSchoologyModal}>Cancel</button>
+            <button className="btn-primary" form="schoology-connect-form" disabled={schoologyConnecting}>
+              {schoologyConnecting ? "Saving…" : schoology ? "Save" : "Connect"}
+            </button>
+          </>
+        }
+      >
+        <form id="schoology-connect-form" onSubmit={connectSchoology} className="space-y-3">
+          <div className="text-sm text-atlas-muted space-y-1">
+            <p>
+              Generate a personal API key on your Schoology site — this is issued instantly by
+              Schoology itself (not your district) and doesn't need anyone's approval:
+            </p>
+            <ol className="list-decimal list-inside space-y-0.5">
+              <li>
+                Go to{" "}
+                <b>
+                  {schoologyForm.domain
+                    ? `${schoologyForm.domain.replace(/\/$/, "")}/api`
+                    : "your-schoology-site/api"}
+                </b>{" "}
+                (e.g. https://lexington1.schoology.com/api).
+              </li>
+              <li>Click <b>Request API credentials</b>.</li>
+              <li>Copy the <b>Key</b> and <b>Secret</b> and paste them below.</li>
+            </ol>
+            <p>
+              Your secret is stored encrypted and only used to read your courses, calendar, and
+              materials. Grades are never touched — those stay in PowerSchool.
+            </p>
+          </div>
+
+          {schoologyError && <div className="text-sm text-atlas-bad">{schoologyError}</div>}
+
+          <div>
+            <label className="label">Schoology web address</label>
+            <input
+              className="input"
+              placeholder="https://lexington1.schoology.com"
+              value={schoologyForm.domain}
+              onChange={(e) => setSchoologyForm({ ...schoologyForm, domain: e.target.value })}
+            />
+          </div>
+          <div>
+            <label className="label">Consumer key</label>
+            <input
+              className="input font-mono text-xs"
+              required
+              value={schoologyForm.consumer_key}
+              onChange={(e) => setSchoologyForm({ ...schoologyForm, consumer_key: e.target.value })}
+            />
+          </div>
+          <div>
+            <label className="label">Consumer secret</label>
+            <input
+              className="input font-mono text-xs"
+              type="password"
+              required
+              value={schoologyForm.consumer_secret}
+              onChange={(e) => setSchoologyForm({ ...schoologyForm, consumer_secret: e.target.value })}
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={verifying || !schoologyForm.consumer_key.trim() || !schoologyForm.consumer_secret.trim()}
+              onClick={verifySchoology}
+            >
+              {verifying ? "Checking…" : "Test key"}
+            </button>
+            {verifyResult && (
+              <span className="text-sm text-atlas-good">
+                ✓ Works — found {verifyResult.section_count} courses
+              </span>
+            )}
+            {verifyError && <span className="text-sm text-atlas-bad">{verifyError}</span>}
+          </div>
         </form>
       </Modal>
     </AppShell>

@@ -36,16 +36,21 @@ Every phase produces a usable application. Status reflects what's in this repo.
            cookie; it expires and needs periodic re-pasting, so this mode is
            semi- rather than fully automatic. Confirmed useful in practice —
            it's the one path that isn't tied to Atlas server's IP reputation.
-- [~] Schoology / Blackboard providers — orchestration, normalization, and
-      persistence contract defined; concrete API clients are clearly-marked
-      stubs (require per-district OAuth/credentials).
-- [ ] Calendar synchronization (schema + CRUD ready; provider push/pull pending)
+- [x] Schoology provider — two-legged OAuth 1.0a (personal API key/secret),
+      imports courses, a week-at-a-glance calendar, assignments (no grades —
+      grading stays in PowerSchool), and recursively ingests every course
+      folder's files/slideshows/links (incl. Google Docs/Slides). Reconciles
+      each section to the matching PowerSchool course instead of duplicating.
+- [~] Blackboard provider — orchestration/normalization/persistence contract
+      defined; concrete API client is a clearly-marked stub.
+- [x] Calendar synchronization — Schoology events + assignment due dates flow
+      into `calendar_events` (week-at-a-glance).
 - [x] Automatic document ingestion pipeline (usable now via upload/ingest-text)
-- [x] n8n workflow blueprints for scheduled sync
+- [x] n8n workflow blueprints for scheduled sync (Schoology runs 07:00 & 16:00)
 
-**Next:** wire a scheduled PowerSchool sync (n8n or a cron endpoint) instead
-of manual/on-connect only, and implement Schoology (REST + OAuth, most
-approachable of the remaining two) through `integrations/base.py`.
+**Next:** implement the Blackboard provider through `integrations/base.py`, and
+add a full Google OAuth connect so Schoology-linked Drive files download in the
+background without a per-sync token.
 
 ## Phase 3 — Adaptive intelligence ✅ (largely implemented)
 - [x] Daily planning (Planner agent → `daily_plans`)

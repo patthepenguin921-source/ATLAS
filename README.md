@@ -24,7 +24,7 @@ ATLAS/
 │       ├── services/    memory retrieval · ingestion · knowledge model · analytics
 │       ├── llm/         grounded Claude wrapper
 │       ├── embeddings/  pluggable (voyage | openai | local)
-│       └── integrations/Schoology · PowerSchool · Blackboard (Phase 2 scaffolds)
+│       └── integrations/Schoology (REST/OAuth) · PowerSchool (portal) · Blackboard (scaffold)
 ├── frontend/        Next.js + React + Tailwind app
 ├── automation/      n8n workflow blueprints (daily plan, weekly review, sync)
 ├── docs/            architecture & roadmap

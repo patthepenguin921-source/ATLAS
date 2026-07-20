@@ -35,10 +35,41 @@ interface Course {
   current_grade?: number | null;
   current_letter?: string | null;
   semester?: string;
+  linked_course_id?: string | null;
   sort_order: number;
 }
 
+interface CourseGroup {
+  key: string;
+  primary: Course;
+  members: Course[];
+}
+
 const SEMESTER_SHORT: Record<string, string> = { s1: "S1", s2: "S2" };
+
+// A class split into linked semester rows (e.g. an HN-weighted S1 feeding an
+// AP-weighted S2) is still one class — group those rows into a single card
+// instead of showing duplicates on the list. The detail page already shows
+// the S1/S2 breakdown for whichever row you open.
+function groupCourses(list: Course[]): CourseGroup[] {
+  const groups: CourseGroup[] = [];
+  const indexByKey = new Map<string, number>();
+  for (const c of list) {
+    const key = c.linked_course_id ?? c.id;
+    const idx = indexByKey.get(key);
+    if (idx === undefined) {
+      indexByKey.set(key, groups.length);
+      groups.push({ key, primary: c, members: [c] });
+    } else {
+      groups[idx].members.push(c);
+      if (!c.linked_course_id) groups[idx].primary = c; // prefer the root row
+    }
+  }
+  for (const g of groups) {
+    g.members.sort((a, b) => (a.semester ?? "").localeCompare(b.semester ?? ""));
+  }
+  return groups;
+}
 
 const emptyForm = {
   name: "",
@@ -94,14 +125,18 @@ export default function CoursesPage() {
     }, 0);
     if (from === null || from === i || !courses) return;
 
-    const reordered = [...courses];
-    const [moved] = reordered.splice(from, 1);
-    reordered.splice(i, 0, moved);
-    setCourses(reordered);
+    const reorderedGroups = [...groups];
+    const [moved] = reorderedGroups.splice(from, 1);
+    reorderedGroups.splice(i, 0, moved);
+    setCourses(reorderedGroups.flatMap((g) => g.members));
 
+    // Every member of a group (both semester halves) gets the same
+    // sort_order so they stay adjacent and in the right place next load.
     await Promise.all(
-      reordered.map((c, idx) =>
-        idx === c.sort_order ? null : apiPatch(`/courses/${c.id}`, { sort_order: idx })
+      reorderedGroups.flatMap((g, idx) =>
+        g.members.map((c) =>
+          c.sort_order === idx ? null : apiPatch(`/courses/${c.id}`, { sort_order: idx })
+        )
       )
     );
     load();
@@ -114,6 +149,8 @@ export default function CoursesPage() {
     }
     router.push(`/courses/${id}`);
   }
+
+  const groups = courses ? groupCourses(courses) : [];
 
   return (
     <AppShell
@@ -177,45 +214,67 @@ export default function CoursesPage() {
         <p className="text-xs text-atlas-muted mb-3">Click a card to open it · drag to reorder.</p>
       )}
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {courses?.map((c, i) => (
-          <div
-            key={c.id}
-            draggable
-            onDragStart={() => onDragStart(i)}
-            onDragOver={(e) => onDragOver(e, i)}
-            onDrop={() => onDrop(i)}
-            onClick={() => onCardClick(c.id)}
-            className={`card card-hover cursor-grab active:cursor-grabbing ${
-              overIndex === i ? "ring-2 ring-atlas-accent2" : ""
-            }`}
-          >
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="font-medium">{c.name}</div>
-                <div className="text-xs text-atlas-muted">{c.code || c.subject || "—"}</div>
+        {groups.map((g, i) => {
+          const c = g.primary;
+          const isSplit = g.members.length > 1;
+          const levels = Array.from(new Set(g.members.map((m) => m.course_level)));
+          return (
+            <div
+              key={g.key}
+              draggable
+              onDragStart={() => onDragStart(i)}
+              onDragOver={(e) => onDragOver(e, i)}
+              onDrop={() => onDrop(i)}
+              onClick={() => onCardClick(c.id)}
+              className={`card card-hover cursor-grab active:cursor-grabbing ${
+                overIndex === i ? "ring-2 ring-atlas-accent2" : ""
+              }`}
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="font-medium">{c.name}</div>
+                  <div className="text-xs text-atlas-muted">{c.code || c.subject || "—"}</div>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                  {isSplit ? (
+                    <>
+                      <Badge tone="accent">S1 · S2</Badge>
+                      {levels.length > 1 ? (
+                        <Badge tone="accent">
+                          {levels.map((l) => LEVEL_BADGE[l as CourseLevel] ?? l).join(" → ")}
+                        </Badge>
+                      ) : (
+                        levels[0] !== "regular" && (
+                          <Badge tone="accent">{LEVEL_BADGE[levels[0] as CourseLevel]}</Badge>
+                        )
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {c.semester && c.semester !== "full_year" && (
+                        <Badge tone="accent">{SEMESTER_SHORT[c.semester] ?? c.semester}</Badge>
+                      )}
+                      {c.course_level !== "regular" && (
+                        <Badge tone="accent">{LEVEL_BADGE[c.course_level]}</Badge>
+                      )}
+                      {c.has_hn_prep_lab && <Badge tone="warn">HN Prep Lab</Badge>}
+                      {c.has_ap_prep_lab && <Badge tone="warn">AP Prep Lab</Badge>}
+                    </>
+                  )}
+                </div>
               </div>
-              <div className="flex flex-col items-end gap-1">
-                {c.semester && c.semester !== "full_year" && (
-                  <Badge tone="accent">{SEMESTER_SHORT[c.semester] ?? c.semester}</Badge>
-                )}
-                {c.course_level !== "regular" && (
-                  <Badge tone="accent">{LEVEL_BADGE[c.course_level]}</Badge>
-                )}
-                {c.has_hn_prep_lab && <Badge tone="warn">HN Prep Lab</Badge>}
-                {c.has_ap_prep_lab && <Badge tone="warn">AP Prep Lab</Badge>}
+              <div className="mt-4 flex items-center justify-between">
+                <span className="text-xs text-atlas-muted">Current grade</span>
+                <span className={`text-lg font-semibold ${
+                  gradeTone(c.current_grade) === "good" ? "text-atlas-good"
+                  : gradeTone(c.current_grade) === "warn" ? "text-atlas-warn"
+                  : gradeTone(c.current_grade) === "bad" ? "text-atlas-bad" : ""}`}>
+                  {c.current_grade != null ? `${c.current_grade}% ${c.current_letter ?? ""}` : "—"}
+                </span>
               </div>
             </div>
-            <div className="mt-4 flex items-center justify-between">
-              <span className="text-xs text-atlas-muted">Current grade</span>
-              <span className={`text-lg font-semibold ${
-                gradeTone(c.current_grade) === "good" ? "text-atlas-good"
-                : gradeTone(c.current_grade) === "warn" ? "text-atlas-warn"
-                : gradeTone(c.current_grade) === "bad" ? "text-atlas-bad" : ""}`}>
-                {c.current_grade != null ? `${c.current_grade}% ${c.current_letter ?? ""}` : "—"}
-              </span>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </AppShell>
   );

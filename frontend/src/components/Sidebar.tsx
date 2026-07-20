@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "./AuthProvider";
+import { LogoMark } from "./Logo";
 
 // Monoline SVG marks — cleaner and more modern than glyph characters.
 const Icon = ({ d }: { d: string }) => (
@@ -38,8 +39,8 @@ export function Sidebar() {
     <aside className="w-60 shrink-0 border-r border-atlas-border bg-atlas-panel/60 backdrop-blur flex flex-col">
       <div className="px-5 py-6">
         <div className="text-xl font-display font-semibold tracking-tight flex items-center gap-2">
-          <span className="grid place-items-center w-7 h-7 rounded-lg bg-atlas-accent text-white text-sm font-bold">
-            A
+          <span className="grid place-items-center w-7 h-7 rounded-lg bg-atlas-accent text-white">
+            <LogoMark className="w-4 h-4" bg="#6a8bff" />
           </span>
           Atlas
         </div>

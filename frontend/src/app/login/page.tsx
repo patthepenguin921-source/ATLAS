@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { useAuth } from "@/components/AuthProvider";
+import { LogoMark } from "@/components/Logo";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -45,8 +46,9 @@ export default function LoginPage() {
     <div className="min-h-screen grid place-items-center px-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="text-3xl font-semibold tracking-tight">
-            <span className="text-atlas-accent">A</span>tlas
+          <div className="flex items-center justify-center gap-2.5">
+            <LogoMark className="w-8 h-8 text-atlas-accent" bg="#16181d" />
+            <span className="text-3xl font-semibold tracking-tight">Atlas</span>
           </div>
           <p className="text-atlas-muted text-sm mt-1">Your academic operating system</p>
         </div>

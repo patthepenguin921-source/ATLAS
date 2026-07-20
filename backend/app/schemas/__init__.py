@@ -107,6 +107,18 @@ class PowerSchoolConnectSessionRequest(BaseModel):
     display_name: Optional[str] = None
 
 
+class SchoologyConnectRequest(BaseModel):
+    """Schoology two-legged OAuth 1.0a: a personal consumer key + secret the
+    student generates at ``<their-domain>/api``. The REST host is always
+    api.schoology.com/v1; ``domain`` is stored only for display/deep-links."""
+
+    consumer_key: str
+    consumer_secret: str
+    domain: Optional[str] = None            # e.g. https://lexington1.schoology.com
+    api_base: Optional[str] = None          # override the default REST host if ever needed
+    display_name: Optional[str] = None
+
+
 # ---- Generic ----
 class GenericBody(BaseModel):
     """Free-form body for CRUD create/update; fields validated per-table."""

@@ -13,7 +13,15 @@ from app.core.supabase_client import eq, supabase
 from app.integrations import PROVIDERS, run_sync
 from app.integrations.powerschool import encrypt_credentials, encrypt_session_cookie
 from app.integrations.powerschool_client import PowerSchoolClient
-from app.schemas import GenericBody, PowerSchoolConnectRequest, PowerSchoolConnectSessionRequest
+from app.integrations.schoology import SchoologyProvider, encrypt_api_key
+from app.integrations.schoology_client import API_BASE as SCHOOLOGY_API_BASE
+from app.integrations.schoology_client import SchoologyAuthError
+from app.schemas import (
+    GenericBody,
+    PowerSchoolConnectRequest,
+    PowerSchoolConnectSessionRequest,
+    SchoologyConnectRequest,
+)
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -98,6 +106,49 @@ async def connect_powerschool(
     }
     await supabase.insert("integrations", row, upsert=True, on_conflict="user_id,provider")
     return await run_sync("powerschool", user.id)
+
+
+def _schoology_api_base(body: SchoologyConnectRequest) -> str:
+    return (body.api_base or SCHOOLOGY_API_BASE).strip().rstrip("/")
+
+
+@router.post("/schoology/verify")
+async def verify_schoology(
+    body: SchoologyConnectRequest, user: CurrentUser = Depends(get_current_user)
+):
+    """Check a Schoology API key + secret without saving them — lets the connect
+    screen confirm the credentials work (and show how many courses were found)
+    before committing."""
+    provider: SchoologyProvider = PROVIDERS["schoology"]  # type: ignore[assignment]
+    try:
+        return await provider.verify(
+            body.consumer_key.strip(), body.consumer_secret.strip(), _schoology_api_base(body)
+        )
+    except SchoologyAuthError as e:
+        raise HTTPException(401, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Could not reach Schoology: {e}") from e
+
+
+@router.post("/schoology/connect", status_code=201)
+async def connect_schoology(
+    body: SchoologyConnectRequest, user: CurrentUser = Depends(get_current_user)
+):
+    """Save the Schoology API key + secret (encrypted) and run a first sync so
+    the student sees right away whether it works."""
+    config: dict[str, str] = {"auth_mode": "api_key", "api_base": _schoology_api_base(body)}
+    if body.domain:
+        config["domain"] = body.domain.strip().rstrip("/")
+    row = {
+        "user_id": user.id,
+        "provider": "schoology",
+        "display_name": body.display_name or "Schoology",
+        "config": config,
+        "secret_ref": encrypt_api_key(body.consumer_key.strip(), body.consumer_secret.strip()),
+        "enabled": True,
+    }
+    await supabase.insert("integrations", row, upsert=True, on_conflict="user_id,provider")
+    return await run_sync("schoology", user.id)
 
 
 @router.get("/powerschool/debug-scrape")

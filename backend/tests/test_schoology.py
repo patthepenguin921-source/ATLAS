@@ -442,6 +442,10 @@ def test_debug_fetch_returns_raw_responses_for_first_academic_section(fake_db, m
     assert probed["raw_folder_sections_realm"]["id"] == SECTION_ID
     assert "folder-item" not in probed["raw_folder_sections_realm"]
     assert probed["raw_folder_sections_realm_no_id"]["id"] == SECTION_ID
+    # A candidate endpoint that doesn't exist for this fake API (404) must be
+    # captured as an inline error, not raise and blank out the whole probe.
+    assert "error" in probed["raw_materials_sections_realm"]
+    assert "error" in probed["raw_materials_sections_realm_root"]
 
 
 def test_debug_fetch_query_narrows_by_case_insensitive_name_match(fake_db, monkeypatch):

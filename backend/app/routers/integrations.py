@@ -16,13 +16,19 @@ from app.core.supabase_client import eq, supabase
 from app.integrations import PROVIDERS, run_sync, run_sync_for_all
 from app.integrations.powerschool import encrypt_credentials, encrypt_session_cookie
 from app.integrations.powerschool_client import PowerSchoolClient
-from app.integrations.schoology import SchoologyProvider, encrypt_api_key
+from app.integrations.schoology import (
+    SchoologyProvider,
+    encrypt_api_key,
+    merge_scraper_credentials,
+)
 from app.integrations.schoology_client import API_BASE as SCHOOLOGY_API_BASE
 from app.integrations.schoology_client import SchoologyAuthError
+from app.integrations.schoology_scraper import SchoologyScraperAuthError
 from app.schemas import (
     GenericBody,
     PowerSchoolConnectRequest,
     PowerSchoolConnectSessionRequest,
+    SchoologyConnectMaterialsRequest,
     SchoologyConnectRequest,
 )
 
@@ -194,6 +200,58 @@ async def connect_schoology(
     }
     await supabase.insert("integrations", row, upsert=True, on_conflict="user_id,provider")
     return await run_sync("schoology", user.id)
+
+
+@router.post("/schoology/connect-materials", status_code=201)
+async def connect_schoology_materials(
+    body: SchoologyConnectMaterialsRequest, user: CurrentUser = Depends(get_current_user)
+):
+    """Save Schoology login credentials used only to read course materials —
+    for districts whose personal API key is denied Courses-realm access
+    (assignments/events still come from the API key, unaffected). Merges into
+    the same `integrations` row as the API key rather than replacing it; the
+    API key must already be connected first (`/schoology/connect`)."""
+    rows = await supabase.select(
+        "integrations", filters={"user_id": eq(user.id), "provider": eq("schoology")}, limit=1,
+    )
+    if not rows:
+        raise HTTPException(
+            400, "Connect your Schoology API key first (Schoology → Connect) before adding materials access."
+        )
+    integration = rows[0]
+    config = dict(integration.get("config") or {})
+    if body.domain:
+        config["domain"] = body.domain.strip().rstrip("/")
+    if not config.get("domain"):
+        raise HTTPException(400, "Missing Schoology web address (e.g. https://yourdistrict.schoology.com).")
+    patch = {
+        "config": config,
+        "secret_ref": merge_scraper_credentials(
+            integration.get("secret_ref") or "", body.username.strip(), body.password
+        ),
+    }
+    await supabase.update("integrations", patch, filters={"id": eq(integration["id"])})
+    provider: SchoologyProvider = PROVIDERS["schoology"]  # type: ignore[assignment]
+    try:
+        return await provider.verify_materials_login(user.id)
+    except SchoologyScraperAuthError as e:
+        raise HTTPException(401, str(e)) from e
+
+
+@router.get("/schoology/debug-scrape-materials")
+async def debug_scrape_materials_schoology(
+    q: str | None = None, user: CurrentUser = Depends(get_current_user)
+):
+    """Logs in with the saved Schoology username/password and fetches one or
+    more sections' materials page verbatim (title, links, HTML snippet) — a
+    self-serve way to confirm the real authenticated page shape before a
+    parser is written against it. `q` narrows to sections whose name contains
+    it (e.g. `?q=AP+Physics`); omit it to probe the first academic section."""
+    provider: SchoologyProvider = PROVIDERS["schoology"]  # type: ignore[assignment]
+    try:
+        return await provider.debug_scrape_materials(user.id, query=q)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e)) from e
 
 
 @router.get("/schoology/debug-fetch")

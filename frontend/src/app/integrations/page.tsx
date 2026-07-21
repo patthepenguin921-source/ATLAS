@@ -65,6 +65,25 @@ interface SchoologyDebugResult {
   note?: string;
 }
 
+interface SchoologyMaterialsProbedSection {
+  section: { id: string; name: string };
+  materials_page: {
+    final_url: string;
+    status_code: number;
+    title: string | null;
+    link_count: number;
+    links: { text: string; href: string | null }[];
+    body_html_snippet: string | null;
+  };
+}
+
+interface SchoologyMaterialsDebugResult {
+  probed?: SchoologyMaterialsProbedSection[];
+  sections_found?: number;
+  available_sections?: string[];
+  note?: string;
+}
+
 const STATUS_TONE: Record<string, "good" | "warn" | "bad" | "default"> = {
   success: "good",
   running: "warn",
@@ -92,6 +111,17 @@ export default function IntegrationsPage() {
   const [schoologyDebugResult, setSchoologyDebugResult] = useState<SchoologyDebugResult | null>(null);
   const [schoologyDebugError, setSchoologyDebugError] = useState<string | null>(null);
   const [schoologyDebugQuery, setSchoologyDebugQuery] = useState("");
+
+  // Materials access (browser-login scraper) — for districts that block the
+  // API key from reading course materials/folders (Courses realm).
+  const [materialsForm, setMaterialsForm] = useState({ username: "", password: "" });
+  const [materialsConnecting, setMaterialsConnecting] = useState(false);
+  const [materialsError, setMaterialsError] = useState<string | null>(null);
+  const [materialsConnected, setMaterialsConnected] = useState(false);
+  const [materialsDebugging, setMaterialsDebugging] = useState(false);
+  const [materialsDebugResult, setMaterialsDebugResult] = useState<SchoologyMaterialsDebugResult | null>(null);
+  const [materialsDebugError, setMaterialsDebugError] = useState<string | null>(null);
+  const [materialsDebugQuery, setMaterialsDebugQuery] = useState("");
 
   // Schoology (API key / OAuth 1.0a) connect state
   const [schoologyOpen, setSchoologyOpen] = useState(false);
@@ -268,6 +298,42 @@ export default function IntegrationsPage() {
       setSchoologyDebugError(err.message ?? "Could not fetch from Schoology.");
     } finally {
       setSchoologyDebugging(false);
+    }
+  }
+
+  async function connectSchoologyMaterials(e: React.FormEvent) {
+    e.preventDefault();
+    setMaterialsConnecting(true);
+    setMaterialsError(null);
+    try {
+      await apiPost("/integrations/schoology/connect-materials", {
+        username: materialsForm.username,
+        password: materialsForm.password,
+      });
+      setMaterialsConnected(true);
+      setMaterialsForm({ username: "", password: "" });
+    } catch (err: any) {
+      setMaterialsError(err.message ?? "Login failed.");
+    } finally {
+      setMaterialsConnecting(false);
+    }
+  }
+
+  async function debugScrapeMaterials() {
+    setMaterialsDebugging(true);
+    setMaterialsDebugError(null);
+    setMaterialsDebugResult(null);
+    try {
+      const q = materialsDebugQuery.trim();
+      const path = q
+        ? `/integrations/schoology/debug-scrape-materials?q=${encodeURIComponent(q)}`
+        : "/integrations/schoology/debug-scrape-materials";
+      const result = await apiGet<SchoologyMaterialsDebugResult>(path);
+      setMaterialsDebugResult(result);
+    } catch (err: any) {
+      setMaterialsDebugError(err.message ?? "Could not fetch the materials page.");
+    } finally {
+      setMaterialsDebugging(false);
     }
   }
 
@@ -502,6 +568,92 @@ export default function IntegrationsPage() {
                     </div>
                   ))}
                 </>
+              )}
+            </div>
+          )}
+
+          {schoology && (
+            <div className="card mt-4">
+              <div className="font-medium flex items-center gap-2">
+                Materials access
+                {materialsConnected && <Badge tone="good">connected</Badge>}
+              </div>
+              <p className="text-sm text-atlas-muted mt-1">
+                Some districts let the API key list your courses but block it from reading course
+                materials/folders. If your synced materials always come back empty, log in below with
+                your normal Schoology username and password — this reads materials the same way your
+                own browser does, separately from the API key above. Only used for materials;
+                assignments/events keep coming from the API key.
+              </p>
+              <form onSubmit={connectSchoologyMaterials} className="mt-3 flex flex-wrap items-end gap-2">
+                <div>
+                  <label className="label">Username / email</label>
+                  <input
+                    className="input"
+                    required
+                    value={materialsForm.username}
+                    onChange={(e) => setMaterialsForm({ ...materialsForm, username: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">Password</label>
+                  <input
+                    className="input"
+                    type="password"
+                    required
+                    value={materialsForm.password}
+                    onChange={(e) => setMaterialsForm({ ...materialsForm, password: e.target.value })}
+                  />
+                </div>
+                <button className="btn-primary" disabled={materialsConnecting}>
+                  {materialsConnecting ? "Signing in…" : "Save & verify"}
+                </button>
+              </form>
+              {materialsError && <div className="text-sm text-atlas-bad mt-2">{materialsError}</div>}
+              {materialsConnected && (
+                <div className="text-sm text-atlas-good mt-2">✓ Login works — materials access saved.</div>
+              )}
+
+              <div className="flex items-center gap-2 mt-3">
+                <input
+                  className="input w-32 text-xs"
+                  placeholder="AP Physics…"
+                  value={materialsDebugQuery}
+                  onChange={(e) => setMaterialsDebugQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && debugScrapeMaterials()}
+                />
+                <button className="btn-ghost" disabled={materialsDebugging} onClick={debugScrapeMaterials}>
+                  {materialsDebugging ? "Fetching…" : "Debug scrape materials"}
+                </button>
+              </div>
+              {materialsDebugError && (
+                <div className="text-sm text-atlas-bad mt-2">{materialsDebugError}</div>
+              )}
+              {materialsDebugResult && (
+                <div className="mt-3 text-xs space-y-3">
+                  {materialsDebugResult.note ? (
+                    <div className="text-atlas-muted">
+                      {materialsDebugResult.note}
+                      {materialsDebugResult.available_sections && materialsDebugResult.available_sections.length > 0 && (
+                        <> Try one of: {materialsDebugResult.available_sections.join(", ")}</>
+                      )}
+                    </div>
+                  ) : (
+                    materialsDebugResult.probed?.map((p) => (
+                      <div key={p.section.id} className="space-y-1.5 border-t border-atlas-border pt-3 first:border-0 first:pt-0">
+                        <div className="font-medium">{p.section.name} ({p.section.id})</div>
+                        <div>
+                          <span className="text-atlas-muted">Fetched: </span>
+                          {p.materials_page.final_url} ({p.materials_page.status_code}) — {p.materials_page.title}
+                        </div>
+                        <div className="text-atlas-muted">{p.materials_page.link_count} links found</div>
+                        <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-60 overflow-auto">
+                          {JSON.stringify(p.materials_page.links, null, 2)}
+                        </pre>
+                      </div>
+                    ))
+                  )}
+                </div>
               )}
             </div>
           )}

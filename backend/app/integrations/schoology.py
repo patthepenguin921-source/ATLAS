@@ -8,6 +8,16 @@ generates at ``<their-domain>/api`` — see ``schoology_client.py``. Credentials
 are encrypted at rest in ``integrations.secret_ref`` (``app.core.crypto``),
 mirroring the PowerSchool provider.
 
+Some districts restrict a personal API key to the Sections realm only
+(assignments/events) and deny it Courses-realm access outright — including
+course materials/folders (confirmed via ``debug_fetch``: even a bare
+``GET /courses/{id}`` 401/403s for such a key). For that case there's a second,
+independent auth path — ``schoology_scraper.py`` — that logs in with the
+student's own username/password the same way a browser does, reading
+materials from the authenticated web session instead of the API. Both
+credential sets live on the same ``integrations`` row; see
+``merge_scraper_credentials``.
+
 Deliberately does NOT touch grades: grading is owned by PowerSchool. This
 provider matches each Schoology section to the student's existing (PowerSchool/
 manual) course so the two systems share one course row instead of duplicating.
@@ -38,6 +48,7 @@ from app.integrations.schoology_client import (
     links_of,
     week_bounds,
 )
+from app.integrations.schoology_scraper import SchoologyScraperAuthError, SchoologyScraperClient
 from app.services import ingestion
 
 # Assignment/material title keywords → Atlas assignment_category enum values.
@@ -49,6 +60,18 @@ _CATEGORY_KEYWORDS = (
 
 def encrypt_api_key(consumer_key: str, consumer_secret: str) -> str:
     return encrypt_json({"consumer_key": consumer_key, "consumer_secret": consumer_secret})
+
+
+def merge_scraper_credentials(existing_secret_ref: str, username: str, password: str) -> str:
+    """Add (or replace) materials-scraper login credentials on top of an
+    existing encrypted secret blob, keeping whatever's already there (the
+    API key) intact — the two auth methods live side by side on one
+    `integrations` row: the API key still handles assignments/events, the
+    scraper login is only for the materials a district's API key can't see."""
+    creds = decrypt_json(existing_secret_ref) if existing_secret_ref else {}
+    creds["schoology_username"] = username
+    creds["schoology_password"] = password
+    return encrypt_json(creds)
 
 
 def _map_category(text: str) -> str:
@@ -201,6 +224,86 @@ class SchoologyProvider(IntegrationProvider):
             return {"probed": probed}
         finally:
             await client.aclose()
+
+    # ---- materials scraper (bypasses the blocked Courses-realm API) ----
+    async def _scraper_client(self, user_id: str) -> SchoologyScraperClient:
+        """Load this user's saved materials-scraper login (if configured) and
+        return a logged-in client. Raises a clear error if materials-scraper
+        credentials haven't been saved yet, or if the domain is missing, or
+        if login itself fails — every case a caller needs to distinguish."""
+        integration = await self._load_integration(user_id)
+        creds = decrypt_json(integration["secret_ref"])
+        if not creds.get("schoology_username") or not creds.get("schoology_password"):
+            raise RuntimeError(
+                "Materials access isn't connected yet — add your Schoology username "
+                "and password under \"Materials access\" first."
+            )
+        config = integration.get("config") or {}
+        domain = config.get("domain")
+        if not domain:
+            raise RuntimeError(
+                "Materials access needs your Schoology web address (e.g. "
+                "https://yourdistrict.schoology.com) — add it in the Schoology connect form."
+            )
+        client = SchoologyScraperClient(domain, creds["schoology_username"], creds["schoology_password"])
+        try:
+            await client.login()
+        except SchoologyScraperAuthError:
+            await client.aclose()
+            raise
+        return client
+
+    async def verify_materials_login(self, user_id: str) -> dict[str, Any]:
+        """Confirm the saved materials-scraper login actually works — used
+        right after saving it, so a typo'd password surfaces immediately
+        instead of silently failing on the next scheduled sync."""
+        client = await self._scraper_client(user_id)
+        await client.aclose()
+        return {"status": "success"}
+
+    async def debug_scrape_materials(self, user_id: str, query: str | None = None) -> dict[str, Any]:
+        """Fetch one or more sections' materials page after logging in as the
+        student, verbatim — mirrors `debug_fetch`'s query-matching, but for
+        the scraper path. Used to confirm the real authenticated page shape
+        (title/links/HTML snippet) before writing a parser against it, rather
+        than guessing — the API side of this integration burned several
+        rounds guessing at endpoints instead of verifying, so this one is
+        built diagnostic-first."""
+        api_client = await self._client(await self._load_integration(user_id))
+        try:
+            uid = await api_client.current_user_id()
+            sections = await api_client.get_sections(uid)
+        finally:
+            await api_client.aclose()
+        academic = [
+            s for s in sections
+            if not course_mapping.is_excluded(s.display_name)
+            and not course_mapping.is_club(s.display_name)
+        ]
+        if not academic:
+            return {"sections_found": len(sections), "note": "No academic sections to probe."}
+        if query:
+            q = query.strip().lower()
+            matches = [s for s in academic if q in s.display_name.lower()]
+            if not matches:
+                return {
+                    "note": f"No section matched {query!r}.",
+                    "available_sections": [s.display_name for s in academic],
+                }
+        else:
+            matches = [academic[0]]
+
+        scraper = await self._scraper_client(user_id)
+        try:
+            probed = []
+            for s in matches:
+                probed.append({
+                    "section": {"id": s.id, "name": s.display_name},
+                    "materials_page": await scraper.debug_materials_page(s.id),
+                })
+            return {"probed": probed}
+        finally:
+            await scraper.aclose()
 
     # ---- course reconciliation ----
     async def _resolve_club(self, user_id: str, section: SchoologySection) -> str:

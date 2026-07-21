@@ -402,6 +402,31 @@ def test_sync_reconciles_course_and_imports_without_grades(fake_db, monkeypatch)
     assert google_docs and "docs.google.com" in google_docs[0]["metadata"]["source_url"]
 
 
+def test_debug_fetch_returns_raw_responses_for_first_academic_section(fake_db, monkeypatch):
+    """Regression for the case where every content endpoint (assignments/
+    events/folder) returns 200 with an empty collection — the classic
+    signature of a district-restricted student API key that can list
+    sections but isn't granted content read access. debug_fetch must surface
+    the raw response verbatim so that's diagnosable without server logs."""
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    async def _fake_client(self, integration):
+        return _mock_client()
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+
+    result = asyncio.run(provider.debug_fetch(USER_ID))
+
+    assert result["probed_section"] == {"id": SECTION_ID, "name": "AP Biology"}
+    assert result["raw_assignments"] == ASSIGNMENTS
+    assert result["raw_events"] == EVENTS
+    assert result["raw_folder_root"] == FOLDER_ROOT
+
+
 def test_sync_is_idempotent(fake_db, monkeypatch):
     provider = SchoologyProvider()
 

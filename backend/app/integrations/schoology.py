@@ -122,18 +122,20 @@ class SchoologyProvider(IntegrationProvider):
             await client.aclose()
 
     async def debug_fetch(self, user_id: str, query: str | None = None) -> dict[str, Any]:
-        """Fetch one or more connected academic sections' raw assignments/
-        events/folder-root responses from Schoology, verbatim — a self-serve
-        way to see exactly what the API key can and can't see, without server
-        log access. `raw_assignments`/`raw_events` legitimately can be empty
-        (a teacher who only posts files/folders and never creates graded
-        Assignment or Event objects) — that's not a bug. `raw_folder_root` is
-        the one to watch: it must contain a `folder-item` array; if it instead
-        looks like a *section* object (course_title/section_title/etc, no
-        folder-item key), the course realm lookup failed for that account for
-        some reason and materials genuinely aren't reachable — worth reporting
-        upstream, since (unlike the sections-vs-courses realm mismatch this
-        replaced) there's no known remaining cause for that shape by design.
+        """Fetch one or more connected academic sections' raw responses from
+        Schoology, verbatim, without server log access — including every
+        candidate shape for "the folder contents" tried so far, since which
+        one this district's API key can actually use hasn't been nailed down
+        by guessing alone (the courses-realm endpoint the docs describe
+        rejects this key with 401/403, while the sections-realm endpoint
+        returns 200 but the section's own detail object instead of a real
+        folder listing). Each candidate is fetched independently and its
+        error (if any) reported inline rather than aborting the whole probe,
+        so a single blocked endpoint doesn't hide the others' results.
+        `raw_assignments`/`raw_events` legitimately can be empty (a teacher
+        who never creates graded Assignment/Event objects) — that's not a
+        bug; a real folder-item array in any of the `raw_folder_*` keys is
+        what actually matters here.
 
         `query` narrows which section(s) to probe by a case-insensitive
         substring of the display name (e.g. "AP Physics") — every matching
@@ -143,6 +145,13 @@ class SchoologyProvider(IntegrationProvider):
         section found, matching the original single-section behavior."""
         integration = await self._load_integration(user_id)
         client = await self._client(integration)
+
+        async def _try(path: str) -> Any:
+            try:
+                return await client.get_raw(path)
+            except Exception as e:  # noqa: BLE001
+                return {"error": str(e)}
+
         try:
             uid = await client.current_user_id()
             sections = await client.get_sections(uid)
@@ -170,11 +179,12 @@ class SchoologyProvider(IntegrationProvider):
                 course_realm_id = s.course_id or s.id
                 probed.append({
                     "section": {"id": s.id, "name": s.display_name, "course_id": s.course_id},
-                    "raw_assignments": await client.get_raw(
-                        f"/sections/{s.id}/assignments?with_attachments=1&limit=200"
-                    ),
-                    "raw_events": await client.get_raw(f"/sections/{s.id}/events?limit=200"),
-                    "raw_folder_root": await client.get_raw(f"/courses/{course_realm_id}/folder/0"),
+                    "raw_assignments": await _try(f"/sections/{s.id}/assignments?with_attachments=1&limit=200"),
+                    "raw_events": await _try(f"/sections/{s.id}/events?limit=200"),
+                    "raw_course_detail": await _try(f"/courses/{course_realm_id}"),
+                    "raw_folder_courses_realm": await _try(f"/courses/{course_realm_id}/folder/0"),
+                    "raw_folder_sections_realm": await _try(f"/sections/{s.id}/folder/0"),
+                    "raw_folder_sections_realm_no_id": await _try(f"/sections/{s.id}/folder"),
                 })
             return {"probed": probed}
         finally:

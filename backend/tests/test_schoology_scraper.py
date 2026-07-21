@@ -11,11 +11,91 @@ import asyncio
 import httpx
 import pytest
 
-from app.integrations.schoology_scraper import SchoologyScraperAuthError, SchoologyScraperClient
+from app.integrations.schoology_scraper import (
+    SchoologyScraperAuthError,
+    SchoologyScraperClient,
+    parse_materials_page,
+)
 
 BASE_URL = "https://lexington1.schoology.com"
 VALID_USER = "student@example.com"
 VALID_PASS = "correct-horse-battery-staple"
+
+# Verbatim link dump from a real course materials page (AP Biology: Section
+# 2, course id 8435659601) — confirms the boilerplate filter against actual
+# Schoology chrome rather than a guess at its shape. The only real content on
+# this page is the one folder, which happens to appear twice (top nav +
+# sidebar) — both must collapse to a single parsed entry.
+REAL_MATERIALS_PAGE_LINKS = [
+    {"text": "Skip to Content", "href": "#main"},
+    {"text": "Folder. Syllabus and Other Important Documents",
+     "href": "/course/8435659601/materials?f=1003379126"},
+    {"text": "Course Profile", "href": "/course/8435659601"},
+    {"text": "Current Menu Item Materials Dropdown Materials", "href": "/course/8435659601/materials"},
+    {"text": "Updates", "href": "/course/8435659601/updates"},
+    {"text": "Grades", "href": "/course/8435659601/student_grades"},
+    {"text": "Mastery", "href": "/course/8435659601/student_mastery"},
+    {"text": "Members", "href": "/course/8435659601/members"},
+    {"text": "Course Profile", "href": "/course-templates/8435659601"},
+    {"text": "Canva for Education", "href": "/apps/4673660618/run/course/8435659601"},
+    {"text": "CodeAI", "href": "/apps/7293540612/run/course/8435659601"},
+    {"text": "Google Meet", "href": "/apps/7169483585/run/course/8435659601"},
+    {"text": "Lingco Classroom", "href": "/apps/2414152280/run/course/8435659601"},
+    {"text": "Math Nation", "href": "/apps/2940901321/run/course/8435659601"},
+    {"text": "McGraw Hill K-12 SSO", "href": "/apps/652250061/run/course/8435659601"},
+    {"text": "Nearpod LTI 1.3 by Nearpod", "href": "/apps/6695120929/run/course/8435659601"},
+    {"text": "Newsela", "href": "/apps/2147537916/run/course/8435659601"},
+    {"text": "AP Biology: Section 2", "href": "/course/8435659601"},
+    {"text": "Lexington High School", "href": "/school/8896103"},
+    {"text": "All Materials", "href": "/course/8435659601/materials"},
+    {"text": "Assignments", "href": "/course/8435659601/materials?list_filter=assignments"},
+    {"text": "Tests/Quizzes", "href": "/course/8435659601/materials?list_filter=assessments"},
+    {"text": "Files", "href": "/course/8435659601/materials?list_filter=documents_files"},
+    {"text": "Links", "href": "/course/8435659601/materials?list_filter=documents_links"},
+    {"text": "Discussions", "href": "/course/8435659601/materials?list_filter=discussion"},
+    {"text": "Pages", "href": "/course/8435659601/materials?list_filter=pages"},
+    {"text": "Albums", "href": "/course/8435659601/materials?list_filter=album"},
+    {"text": "SCORM", "href": "/course/8435659601/materials?list_filter=scorm"},
+    {"text": "Web Content", "href": "/course/8435659601/materials?list_filter=web"},
+    {"text": "External Tools", "href": "/course/8435659601/materials?list_filter=documents_external_tools"},
+    {"text": "Assessments", "href": "/course/8435659601/materials?list_filter=course_assessment"},
+    {"text": "Managed Assessments", "href": "/course/8435659601/materials?list_filter=common_assessments"},
+    {"text": "Syllabus and Other Important Documents", "href": "/course/8435659601/materials?f=1003379126"},
+    {"text": "Export", "href": "/calendar/feed/export/course/8435659601"},
+    {"text": "1 Admin", "href": "/course/8435659601/members"},
+    {"text": "", "href": "/user/131510895"},
+]
+
+
+def test_parse_materials_page_filters_real_boilerplate_dump():
+    """The only two non-chrome things on this real page are the one folder
+    link and its duplicate — both collapse to the single classified folder."""
+    parsed = parse_materials_page(REAL_MATERIALS_PAGE_LINKS)
+    assert len(parsed) == 1
+    item = parsed[0]
+    assert item.name == "Syllabus and Other Important Documents"
+    assert item.kind == "folder"
+    assert item.material_type == "Folder"
+    assert item.href == "/course/8435659601/materials?f=1003379126"
+
+
+def test_parse_materials_page_classifies_items_vs_folders():
+    links = [
+        {"text": "Folder. Unit 1", "href": "/course/1/materials?f=10"},
+        {"text": "File. Lab handout.pdf", "href": "/attachment/download/123"},
+        {"text": "Link. Khan Academy video", "href": "/materials/link/456"},
+        {"text": "Some plain title with no type prefix", "href": "/materials/page/789"},
+    ]
+    parsed = parse_materials_page(links)
+    by_name = {p.name: p for p in parsed}
+    assert by_name["Unit 1"].kind == "folder"
+    assert by_name["Lab handout.pdf"].kind == "item"
+    assert by_name["Lab handout.pdf"].material_type == "File"
+    assert by_name["Khan Academy video"].material_type == "Link"
+    # No recognized type prefix -> still comes through as a plain item,
+    # never silently dropped.
+    assert by_name["Some plain title with no type prefix"].kind == "item"
+    assert by_name["Some plain title with no type prefix"].material_type == ""
 
 LOGIN_PAGE = """
 <html><body>
@@ -291,6 +371,86 @@ def test_debug_materials_page_reports_app_domain_login_failure_without_crashing(
             result = await client.debug_materials_page("8435659601", student_uid="23381548")
             assert result["district_materials"]["status_code"] == 200
             assert "app.schoology.com login failed" in result["app_preview_parent"]["error"]
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# walk_materials: recurses real folders, filters chrome on every page it
+# visits (not just the root), and dedupes by name across a re-scan.
+# ---------------------------------------------------------------------------
+WALK_ROOT_PAGE = """
+<html><body>
+<a href="#main">Skip to Content</a>
+<a href="/course/8435659601/materials?f=1003379126">Folder. Syllabus and Other Important Documents</a>
+</body></html>
+"""
+
+WALK_SYLLABUS_FOLDER_PAGE = """
+<html><body>
+<a href="#main">Skip to Content</a>
+<a href="/attachment/download/500">File. Syllabus.pdf</a>
+<a href="/course/8435659601/materials?f=999">Folder. Nested Unit</a>
+</body></html>
+"""
+
+WALK_NESTED_FOLDER_PAGE = """
+<html><body>
+<a href="/materials/link/700">Link. Extra Resource</a>
+</body></html>
+"""
+
+
+def _walk_handler(request: httpx.Request) -> httpx.Response:
+    path = request.url.path
+    if path == "/login" and request.method == "GET":
+        return httpx.Response(200, text=LOGIN_PAGE)
+    if path == "/login" and request.method == "POST":
+        form = dict(httpx.QueryParams(request.content.decode()))
+        if form.get("pass") == VALID_PASS:
+            return httpx.Response(200, text=DASHBOARD_PAGE)
+        return httpx.Response(200, text=LOGIN_FAILED_PAGE)
+    if path == "/course/8435659601/materials":
+        f = request.url.params.get("f")
+        if f == "1003379126":
+            return httpx.Response(200, text=WALK_SYLLABUS_FOLDER_PAGE)
+        if f == "999":
+            return httpx.Response(200, text=WALK_NESTED_FOLDER_PAGE)
+        return httpx.Response(200, text=WALK_ROOT_PAGE)
+    return httpx.Response(404, text="not found")
+
+
+def test_walk_materials_recurses_folders_and_returns_leaf_items():
+    async def run():
+        transport = httpx.MockTransport(_walk_handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            items = await client.walk_materials("8435659601")
+            by_name = {i.name: i for i in items}
+            assert set(by_name) == {"Syllabus.pdf", "Extra Resource"}
+            assert by_name["Syllabus.pdf"].folder_path == "Syllabus and Other Important Documents"
+            assert by_name["Extra Resource"].folder_path == (
+                "Syllabus and Other Important Documents/Nested Unit"
+            )
+            # Folders themselves are never returned as items.
+            assert all(i.kind == "item" for i in items)
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_walk_materials_skips_already_known_names_on_a_rescan():
+    """A rescan that already recorded "Syllabus.pdf" only needs to surface
+    what's new — mirrors the "a" then "a"+"b" -> only "b" example."""
+    async def run():
+        transport = httpx.MockTransport(_walk_handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            items = await client.walk_materials("8435659601", known_names={"Syllabus.pdf"})
+            assert {i.name for i in items} == {"Extra Resource"}
         finally:
             await client.aclose()
 

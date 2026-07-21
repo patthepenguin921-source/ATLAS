@@ -30,10 +30,12 @@ from app.integrations.schoology import (
 )
 from app.integrations.schoology_client import (
     SchoologyClient,
+    SchoologySection,
     files_of,
     links_of,
     week_bounds,
 )
+from app.integrations.schoology_scraper import MaterialLink
 from app.services import ingestion
 
 USER_ID = str(uuid.uuid4())
@@ -690,3 +692,168 @@ def test_sync_merges_lab_and_ap_sections_into_one_grouped_course(fake_db, monkey
     assert calc_by_sem["s1"]["course_level"] == "ap" and not calc_by_sem["s1"]["has_hn_prep_lab"]
     assert calc_by_sem["s2"]["course_level"] == "ap" and not calc_by_sem["s2"]["has_hn_prep_lab"]
     assert calc_by_sem["s2"]["linked_course_id"] == calc_by_sem["s1"]["id"]
+
+
+# ---------------------------------------------------------------------------
+# Materials via the login-scraper fallback (schoology_scraper.py) — reached
+# when the API materials walk comes back empty (a district-restricted key
+# looks identical to "no materials" from the caller's side).
+# ---------------------------------------------------------------------------
+_SCRAPE_SECTION = SchoologySection(
+    id=SECTION_ID, course_id=COURSE_ID, course_title="AP Biology", section_title="Sec 1",
+    course_code="APBIO", section_code="", grading_periods=[1], meeting_days=[],
+    start_time="", end_time="", location="", active=True,
+)
+
+
+def test_sync_scraped_materials_skips_silently_when_not_configured(fake_db, monkeypatch):
+    """No materials-scraper login saved yet is an expected, common case (most
+    accounts won't need it — only districts that block the Courses realm for
+    the API key do) — must not show up in report["errors"]."""
+    provider = SchoologyProvider()
+
+    async def _fake_scraper_client(self, user_id):
+        raise RuntimeError(
+            "Materials access isn't connected yet — add your Schoology username "
+            "and password under \"Materials access\" first."
+        )
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+    ))
+    assert report == {"documents": 0, "errors": []}
+    assert fake_db.tables["documents"] == []
+
+
+class _FakeScraperClient:
+    """Stands in for `SchoologyScraperClient.walk_materials` — the parsing/
+    recursion/dedupe logic itself is covered directly against real page data
+    in test_schoology_scraper.py; this only exercises how the provider wires
+    its result into `documents`."""
+
+    def __init__(self, items: list[MaterialLink]):
+        self._items = items
+        self.known_names_calls: list[set[str] | None] = []
+        self.closed = False
+
+    async def walk_materials(self, section_id, *, known_names=None):
+        self.known_names_calls.append(known_names)
+        known = {n.strip().lower() for n in (known_names or set())}
+        return [i for i in self._items if i.name.strip().lower() not in known]
+
+    async def aclose(self):
+        self.closed = True
+
+
+def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                     kind="item", material_type="File", folder_path="Unit 1"),
+        MaterialLink(name="Notes", href="/materials/page/2",
+                     kind="item", material_type="Page", folder_path="Unit 1"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+    ))
+
+    assert report["documents"] == 2
+    assert report["errors"] == []
+    assert scraper.closed is True
+    docs = fake_db.tables["documents"]
+    by_name = {d["metadata"]["material_name"]: d for d in docs}
+    assert set(by_name) == {"Syllabus.pdf", "Notes"}
+    assert by_name["Syllabus.pdf"]["metadata"]["folder"] == "Unit 1"
+    assert by_name["Syllabus.pdf"]["metadata"]["material_type"] == "File"
+    assert by_name["Syllabus.pdf"]["metadata"]["source_url"] == "/attachment/download/1"
+
+
+def test_sync_scraped_materials_rescan_only_adds_whats_new(fake_db, monkeypatch):
+    """The "a" then "a"+"b" -> only "b" gets added example: a name already
+    recorded for this course from a prior scan must be handed back to
+    `walk_materials` as already-known, and not re-ingested."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient([
+        MaterialLink(name="a", href="/materials/a", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report1: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report1,
+    ))
+    assert report1["documents"] == 1
+
+    # Second scan: "a" is already known, "b" is new.
+    scraper2 = _FakeScraperClient([
+        MaterialLink(name="a", href="/materials/a", kind="item", material_type="File"),
+        MaterialLink(name="b", href="/materials/b", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client_2(self, user_id):
+        return scraper2
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client_2)
+
+    report2: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report2,
+    ))
+
+    assert scraper2.known_names_calls == [{"a"}]
+    assert report2["documents"] == 1
+    docs = fake_db.tables["documents"]
+    assert {d["metadata"]["material_name"] for d in docs} == {"a", "b"}
+
+
+def test_sync_falls_back_to_scraper_only_when_api_materials_are_empty(fake_db, monkeypatch):
+    """A district that blocks the Courses realm for the API key returns a
+    valid, empty folder listing — identical to "this course has no
+    materials" from the caller's side. Only that empty case should trigger
+    the scraper fallback; a working API materials walk must never also pull
+    the scraper path (that would double-import everything)."""
+    provider = SchoologyProvider()
+
+    def _empty_folder_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith(f"/courses/{COURSE_ID}/folder/0"):
+            return httpx.Response(200, json={"folder-item": []})
+        return _handler(request)
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    async def _fake_client(self, integration):
+        return SchoologyClient("ckey", "csecret", transport=httpx.MockTransport(_empty_folder_handler))
+
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Fallback Item", href="/materials/x", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report = asyncio.run(provider.sync(USER_ID))
+
+    assert report["errors"] == []
+    docs = fake_db.tables["documents"]
+    names = {d.get("metadata", {}).get("material_name") for d in docs}
+    assert "Fallback Item" in names

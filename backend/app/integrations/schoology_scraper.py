@@ -37,13 +37,131 @@ browser would use to resolve it.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
 _LOGIN_PATH = "/login"
 _APP_DOMAIN = "https://app.schoology.com"
+_MAX_MATERIALS_DEPTH = 8
+
+# Links that show up on every course's materials page regardless of what the
+# course actually contains — site chrome (skip-link, course nav tabs,
+# third-party app launchers, the materials-type filter sidebar, admin/export
+# actions) rather than course content. Confirmed against a real materials
+# page rather than guessed (see `debug_materials_page`'s docstring): this is
+# the literal boilerplate a real page's link dump returned, apart from its
+# one actual content folder ("Folder. Syllabus and Other Important
+# Documents") — which is why folders are recognized by their "Folder. " text
+# prefix (see `_KNOWN_TYPE_PREFIXES`) instead of being blocklisted by exact
+# text like everything else here.
+_BOILERPLATE_LINK_TEXTS = frozenset({
+    "Skip to Content",
+    "Course Profile",
+    "Current Menu Item Materials Dropdown Materials",
+    "Updates",
+    "Grades",
+    "Mastery",
+    "Members",
+    "Export",
+    "All Materials",
+    "Assignments",
+    "Tests/Quizzes",
+    "Files",
+    "Links",
+    "Discussions",
+    "Pages",
+    "Albums",
+    "SCORM",
+    "Web Content",
+    "External Tools",
+    "Assessments",
+    "Managed Assessments",
+})
+
+# href *patterns* for chrome that isn't safe to blocklist by exact text
+# (course/section names vary per course, installed app names vary per
+# district, …) — matched structurally instead.
+_BOILERPLATE_HREF_PATTERNS = (
+    re.compile(r"^/course/\d+$"),  # course profile / course name link
+    re.compile(r"^/course/\d+/(updates|student_grades|student_mastery|members)$"),
+    re.compile(r"^/course-templates/\d+$"),
+    re.compile(r"^/apps/\d+/run/course/\d+$"),  # third-party app launchers
+    re.compile(r"^/school/\d+$"),
+    re.compile(r"^/calendar/feed/export/course/\d+$"),
+    re.compile(r"^/user/\d+$"),  # logged-in user's own profile link
+)
+_ADMIN_TEXT_RE = re.compile(r"^\d+\s+Admin$")  # e.g. "1 Admin"
+
+# Schoology prefixes each real material's link text with its type for
+# screen readers, e.g. "Folder. Syllabus and Other Important Documents" —
+# confirmed for "Folder"; the rest mirror the same lowercase vocabulary the
+# API uses for a material's own `type` field (see `SchoologyMaterial.type`
+# in schoology_client.py), so they're a reasonable bet but unconfirmed
+# against a real non-folder item yet. An unrecognized/missing prefix still
+# comes through as a plain item (never silently dropped) — it just won't
+# have `material_type` set.
+_KNOWN_TYPE_PREFIXES = frozenset({
+    "folder", "file", "link", "page", "document", "discussion",
+    "assignment", "assessment", "album", "quiz", "test",
+})
+
+
+@dataclass
+class MaterialLink:
+    """A single real course-materials item or folder, already filtered clear
+    of Schoology's page chrome (see `parse_materials_page`)."""
+    name: str  # display text, with the "Folder. "/"File. " etc. type prefix stripped
+    href: str
+    kind: str  # "folder" or "item"
+    material_type: str = ""  # the type prefix Schoology's own a11y text supplies, e.g. "Folder", "File" — "" if unrecognized
+    folder_path: str = ""  # breadcrumb of parent folder names, filled in while walking
+
+
+def _classify_link(text: str, href: str) -> MaterialLink | None:
+    text = (text or "").strip()
+    href = (href or "").strip()
+    if not text or not href:
+        return None
+    if text in _BOILERPLATE_LINK_TEXTS or _ADMIN_TEXT_RE.match(text):
+        return None
+    if any(p.match(href) for p in _BOILERPLATE_HREF_PATTERNS):
+        return None
+
+    prefix, sep, rest = text.partition(". ")
+    if sep and prefix.lower() in _KNOWN_TYPE_PREFIXES and rest.strip():
+        name = rest.strip()
+        material_type = prefix
+        kind = "folder" if prefix.lower() == "folder" else "item"
+    else:
+        name = text
+        material_type = ""
+        kind = "item"
+
+    return MaterialLink(name=name, href=href, kind=kind, material_type=material_type)
+
+
+def parse_materials_page(links: list[dict[str, Any]]) -> list[MaterialLink]:
+    """Filter a materials page's raw link dump (as returned by
+    `_describe_page`) down to real course content — folders and items —
+    with Schoology's page chrome (nav, app launchers, type filters,
+    admin/export actions) removed. The chrome is the same on every course's
+    materials page (confirmed against a real account), so it's recognized
+    structurally rather than by course-specific content. Duplicate hrefs
+    (the confirmed page repeats its one folder link in two different nav
+    spots) collapse to a single entry."""
+    out: list[MaterialLink] = []
+    seen_hrefs: set[str] = set()
+    for link in links:
+        parsed = _classify_link(link.get("text", ""), link.get("href", ""))
+        if parsed is None or parsed.href in seen_hrefs:
+            continue
+        seen_hrefs.add(parsed.href)
+        out.append(parsed)
+    return out
 
 
 class SchoologyScraperAuthError(RuntimeError):
@@ -221,3 +339,58 @@ class SchoologyScraperClient:
             except Exception as e:  # noqa: BLE001
                 results[name] = {"requested_url": url, "error": str(e)}
         return results
+
+    async def walk_materials(
+        self, section_id: str, *, known_names: set[str] | None = None,
+    ) -> list[MaterialLink]:
+        """Depth-first walk of a section's materials page and every folder
+        inside it, returning only real, new leaf items — folders are never
+        returned themselves, only recursed into (`parse_materials_page`
+        strips Schoology's page chrome from each page's raw link dump first).
+
+        `known_names` is the set of item names (case-insensitive) already
+        pulled for this course on a previous scan; anything matching is
+        skipped, so a re-scan only returns what's actually new. Pass
+        `None`/empty on a first scan (or to force a full re-pull).
+
+        Items are matched by name rather than a stable Schoology id — the
+        scraped HTML doesn't expose one for a bare item the way the API's
+        folder listing does (see `SchoologyClient.walk_materials`'s bare-item
+        fallback) — so a folder that's renamed, or two items that legitimately
+        share a name across different folders (distinguished here by
+        `folder_path`, but not by the name-only dedupe), are known
+        limitations of this path.
+        """
+        if not self._logged_in:
+            await self.login()
+        known = {n.strip().lower() for n in (known_names or set()) if n and n.strip()}
+        base_url = f"{self._base}/course/{section_id}/materials"
+
+        found: list[MaterialLink] = []
+        visited: set[str] = set()
+
+        async def _walk(url: str, folder_path: str, depth: int) -> None:
+            if depth > _MAX_MATERIALS_DEPTH or url in visited:
+                return
+            visited.add(url)
+            r = await self._client.get(url)
+            soup = BeautifulSoup(r.text, "html.parser")
+            raw_links = [
+                {"text": a.get_text(" ", strip=True), "href": a.get("href")}
+                for a in soup.find_all("a", href=True)
+            ]
+            for link in parse_materials_page(raw_links):
+                resolved_href = urljoin(url, link.href)
+                if link.kind == "folder":
+                    child_path = f"{folder_path}/{link.name}" if folder_path else link.name
+                    await _walk(resolved_href, child_path, depth + 1)
+                    continue
+                if link.name.strip().lower() in known:
+                    continue
+                found.append(MaterialLink(
+                    name=link.name, href=resolved_href, kind=link.kind,
+                    material_type=link.material_type, folder_path=folder_path,
+                ))
+
+        await _walk(base_url, "", 0)
+        return found

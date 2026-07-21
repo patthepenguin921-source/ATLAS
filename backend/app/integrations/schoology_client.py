@@ -20,6 +20,12 @@ Signing notes (learned against the live API):
   * ``GET /users/me`` 302-redirects to ``/users/{uid}`` and re-sends the same
     signed header, which Schoology rejects as a replay — so resolve the current
     user id via ``GET /app-user-info`` (returns ``api_uid``) instead.
+  * Course Materials (folders) live under ``/courses/{course_id}/folder/...``
+    — the *course*, not the section — unlike assignments/events, which are
+    ``/sections/{section_id}/...``. Calling the folder endpoint with a section
+    id instead doesn't error; it silently 200s with that section's own detail
+    object (no ``folder-item`` key), which looks exactly like "no materials"
+    from the caller's side. See ``SchoologyClient.walk_materials``.
 """
 from __future__ import annotations
 
@@ -56,6 +62,7 @@ def _q(value: Any) -> str:
 @dataclass
 class SchoologySection:
     id: str
+    course_id: str
     course_title: str
     section_title: str
     course_code: str
@@ -280,6 +287,7 @@ class SchoologyClient:
         for s in raw:
             sections.append(SchoologySection(
                 id=str(s.get("id")),
+                course_id=str(s.get("course_id") or ""),
                 course_title=str(s.get("course_title") or ""),
                 section_title=str(s.get("section_title") or ""),
                 course_code=str(s.get("course_code") or ""),
@@ -335,10 +343,20 @@ class SchoologyClient:
         return out
 
     # ---- folders / materials (recursive) ----
-    async def walk_materials(self, section_id: str) -> list[SchoologyMaterial]:
-        """Depth-first walk of every folder in a section, returning every
+    async def walk_materials(self, course_id: str) -> list[SchoologyMaterial]:
+        """Depth-first walk of every folder in a course, returning every
         non-folder material found (documents, pages, discussions, assignments,
         media, links, …) with its attachments and a breadcrumb path.
+
+        Course Materials (folders) live under the **course** realm
+        (``/courses/{course_id}/folder/...``), not the section — unlike
+        assignments/events, which are per-section. Calling this with a
+        section id instead silently returns the section's own detail object
+        (still HTTP 200, valid JSON, just the wrong resource) with no
+        ``folder-item`` array at all — which looks exactly like an empty
+        folder rather than an error, and was the actual root cause behind
+        "course folders never sync". Pass ``section.course_id`` (falling back
+        to the section id only if a section is somehow missing one).
 
         Fulfils the "look in every folder for new items" requirement.
         """
@@ -349,7 +367,7 @@ class SchoologyClient:
             if depth > _MAX_FOLDER_DEPTH or folder_id in seen:
                 return
             seen.add(folder_id)
-            data = await self._get_json(f"/sections/{section_id}/folder/{folder_id}")
+            data = await self._get_json(f"/courses/{course_id}/folder/{folder_id}")
             for item in _as_list(data, "folder-item"):
                 itype = str(item.get("type") or "").lower()
                 title = str(item.get("title") or "").strip()
@@ -369,7 +387,7 @@ class SchoologyClient:
                     # resource. Without this fallback these items are silently
                     # dropped, which is exactly what "folder contents don't
                     # get pulled" looks like from the student's side.
-                    location = f"/sections/{section_id}/documents/{item_id}"
+                    location = f"/courses/{course_id}/documents/{item_id}"
                 materials.append(SchoologyMaterial(
                     id=item_id,
                     type=itype or "document",

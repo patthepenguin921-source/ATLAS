@@ -124,17 +124,16 @@ class SchoologyProvider(IntegrationProvider):
     async def debug_fetch(self, user_id: str, query: str | None = None) -> dict[str, Any]:
         """Fetch one or more connected academic sections' raw assignments/
         events/folder-root responses from Schoology, verbatim — a self-serve
-        way to see exactly what the API key can and can't see. Some districts
-        issue student API keys that can list sections (roster-level access)
-        but are denied read access to assignments/materials content; that
-        shows up as every content endpoint returning `200 OK` with an empty
-        collection, with no error anywhere for a sync to report. This
-        surfaces the raw response so that's confirmable without server log
-        access — if `raw_assignments`/`raw_events`/`raw_folder_root` come back
-        essentially empty here even though the section clearly has content
-        when browsing schoology.com directly, that's a district-side API
-        permission the student needs their Schoology admin to grant, not an
-        Atlas bug.
+        way to see exactly what the API key can and can't see, without server
+        log access. `raw_assignments`/`raw_events` legitimately can be empty
+        (a teacher who only posts files/folders and never creates graded
+        Assignment or Event objects) — that's not a bug. `raw_folder_root` is
+        the one to watch: it must contain a `folder-item` array; if it instead
+        looks like a *section* object (course_title/section_title/etc, no
+        folder-item key), the course realm lookup failed for that account for
+        some reason and materials genuinely aren't reachable — worth reporting
+        upstream, since (unlike the sections-vs-courses realm mismatch this
+        replaced) there's no known remaining cause for that shape by design.
 
         `query` narrows which section(s) to probe by a case-insensitive
         substring of the display name (e.g. "AP Physics") — every matching
@@ -168,13 +167,14 @@ class SchoologyProvider(IntegrationProvider):
 
             probed = []
             for s in matches:
+                course_realm_id = s.course_id or s.id
                 probed.append({
-                    "section": {"id": s.id, "name": s.display_name},
+                    "section": {"id": s.id, "name": s.display_name, "course_id": s.course_id},
                     "raw_assignments": await client.get_raw(
                         f"/sections/{s.id}/assignments?with_attachments=1&limit=200"
                     ),
                     "raw_events": await client.get_raw(f"/sections/{s.id}/events?limit=200"),
-                    "raw_folder_root": await client.get_raw(f"/sections/{s.id}/folder/0"),
+                    "raw_folder_root": await client.get_raw(f"/courses/{course_realm_id}/folder/0"),
                 })
             return {"probed": probed}
         finally:
@@ -616,9 +616,10 @@ class SchoologyProvider(IntegrationProvider):
             report["events"] += 1
 
         # 3) Every folder, recursively — files/slideshows/links/pages become
-        #    searchable course knowledge.
+        #    searchable course knowledge. Course Materials live under the
+        #    *course* realm, not the section — see walk_materials' docstring.
         try:
-            materials = await client.walk_materials(sid)
+            materials = await client.walk_materials(section.course_id or sid)
         except Exception as e:  # noqa: BLE001
             materials = []
             report["errors"].append(f"{section.display_name} materials: {e}")

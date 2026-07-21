@@ -197,16 +197,20 @@ async def connect_schoology(
 
 
 @router.get("/schoology/debug-fetch")
-async def debug_fetch_schoology(user: CurrentUser = Depends(get_current_user)):
-    """Fetches one connected section's raw assignments/events/folder-root
-    response from Schoology and returns it verbatim — a self-serve way to see
-    whether the API key can actually read content (some districts issue
-    student keys that can list sections but are denied assignments/materials
-    access, which looks like a normal successful-but-empty sync) without
-    needing server log access."""
+async def debug_fetch_schoology(
+    q: str | None = None, user: CurrentUser = Depends(get_current_user)
+):
+    """Fetches one or more connected sections' raw assignments/events/
+    folder-root response from Schoology and returns it verbatim — a self-serve
+    way to see whether the API key can actually read content (some districts
+    issue student keys that can list sections but are denied assignments/
+    materials access, which looks like a normal successful-but-empty sync)
+    without needing server log access. `q` narrows to sections whose name
+    contains it (e.g. `?q=AP+Physics`); omit it to just probe the first
+    academic section found."""
     provider: SchoologyProvider = PROVIDERS["schoology"]  # type: ignore[assignment]
     try:
-        return await provider.debug_fetch(user.id)
+        return await provider.debug_fetch(user.id, query=q)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, str(e)) from e
 

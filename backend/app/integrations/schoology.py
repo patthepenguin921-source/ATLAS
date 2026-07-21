@@ -134,8 +134,13 @@ class SchoologyProvider(IntegrationProvider):
         so a single blocked endpoint doesn't hide the others' results.
         `raw_assignments`/`raw_events` legitimately can be empty (a teacher
         who never creates graded Assignment/Event objects) — that's not a
-        bug; a real folder-item array in any of the `raw_folder_*` keys is
-        what actually matters here.
+        bug; a real folder-item array in any of the `raw_folder_*`/
+        `raw_materials_*` keys is what actually matters here. The
+        `raw_materials_*` candidates aren't in the public API docs, but the
+        web UI's own materials tab (`.../course/{section_id}/materials` —
+        "course" there is the web UI's name for what the API calls a
+        section) suggests an undocumented sections-scoped resource by that
+        name might exist.
 
         `query` narrows which section(s) to probe by a case-insensitive
         substring of the display name (e.g. "AP Physics") — every matching
@@ -185,6 +190,13 @@ class SchoologyProvider(IntegrationProvider):
                     "raw_folder_courses_realm": await _try(f"/courses/{course_realm_id}/folder/0"),
                     "raw_folder_sections_realm": await _try(f"/sections/{s.id}/folder/0"),
                     "raw_folder_sections_realm_no_id": await _try(f"/sections/{s.id}/folder"),
+                    # Not in the public docs, but the web UI's own materials
+                    # tab (https://<district>.schoology.com/course/{section_id}
+                    # /materials — "course" here is the web UI's name for what
+                    # the API calls a section) suggests an undocumented
+                    # sections-scoped materials resource might exist.
+                    "raw_materials_sections_realm": await _try(f"/sections/{s.id}/materials"),
+                    "raw_materials_sections_realm_root": await _try(f"/sections/{s.id}/materials/0"),
                 })
             return {"probed": probed}
         finally:

@@ -119,6 +119,21 @@ class SchoologyConnectRequest(BaseModel):
     display_name: Optional[str] = None
 
 
+class SchoologyConnectMaterialsRequest(BaseModel):
+    """Some districts restrict a personal API key to roster-level access only
+    (Sections realm: assignments/events) and deny it Courses-realm access
+    entirely — including course materials/folders. This logs in with the
+    student's own Schoology username + password instead (the same login they
+    already use in a browser) so materials can be read from the authenticated
+    web session, which isn't subject to that API-key restriction. Merges into
+    the same integration row as the API key rather than replacing it — both
+    auth methods are used for different parts of the sync."""
+
+    username: str
+    password: str
+    domain: Optional[str] = None            # required if not already set via the API-key connect
+
+
 # ---- Generic ----
 class GenericBody(BaseModel):
     """Free-form body for CRUD create/update; fields validated per-table."""

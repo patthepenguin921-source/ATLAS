@@ -196,6 +196,21 @@ async def connect_schoology(
     return await run_sync("schoology", user.id)
 
 
+@router.get("/schoology/debug-fetch")
+async def debug_fetch_schoology(user: CurrentUser = Depends(get_current_user)):
+    """Fetches one connected section's raw assignments/events/folder-root
+    response from Schoology and returns it verbatim — a self-serve way to see
+    whether the API key can actually read content (some districts issue
+    student keys that can list sections but are denied assignments/materials
+    access, which looks like a normal successful-but-empty sync) without
+    needing server log access."""
+    provider: SchoologyProvider = PROVIDERS["schoology"]  # type: ignore[assignment]
+    try:
+        return await provider.debug_fetch(user.id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e)) from e
+
+
 @router.get("/powerschool/debug-scrape")
 async def debug_scrape_powerschool(user: CurrentUser = Depends(get_current_user)):
     """Fetches the already-connected account's authenticated grades page and

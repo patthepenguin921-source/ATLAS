@@ -121,6 +121,44 @@ class SchoologyProvider(IntegrationProvider):
         finally:
             await client.aclose()
 
+    async def debug_fetch(self, user_id: str) -> dict[str, Any]:
+        """Fetch one connected academic section's raw assignments/events/
+        folder-root response from Schoology, verbatim — a self-serve way to
+        see exactly what the API key can and can't see. Some districts issue
+        student API keys that can list sections (roster-level access) but are
+        denied read access to assignments/materials content; that shows up as
+        every content endpoint returning `200 OK` with an empty collection,
+        with no error anywhere for a sync to report. This surfaces the raw
+        response so that's confirmable without server log access — if
+        `raw_assignments`/`raw_events`/`raw_folder_root` come back essentially
+        empty here even though the section clearly has content when browsing
+        schoology.com directly, that's a district-side API permission the
+        student needs their Schoology admin to grant, not an Atlas bug."""
+        integration = await self._load_integration(user_id)
+        client = await self._client(integration)
+        try:
+            uid = await client.current_user_id()
+            sections = await client.get_sections(uid)
+            academic = [
+                s for s in sections
+                if not course_mapping.is_excluded(s.display_name)
+                and not course_mapping.is_club(s.display_name)
+            ]
+            if not academic:
+                return {"sections_found": len(sections), "note": "No academic sections to probe."}
+            s = academic[0]
+            raw_assignments = await client.get_raw(f"/sections/{s.id}/assignments?with_attachments=1&limit=200")
+            raw_events = await client.get_raw(f"/sections/{s.id}/events?limit=200")
+            raw_folder_root = await client.get_raw(f"/sections/{s.id}/folder/0")
+            return {
+                "probed_section": {"id": s.id, "name": s.display_name},
+                "raw_assignments": raw_assignments,
+                "raw_events": raw_events,
+                "raw_folder_root": raw_folder_root,
+            }
+        finally:
+            await client.aclose()
+
     # ---- course reconciliation ----
     async def _resolve_club(self, user_id: str, section: SchoologySection) -> str:
         """Clubs (DECA, etc.) get their own table — never mixed into GPA/
@@ -167,7 +205,6 @@ class SchoologyProvider(IntegrationProvider):
             "has_ap_prep_lab": member.has_ap_prep_lab,
             "external_id": section.id,
             "external_source": self.name,
-            "is_active": section.active,
         }
         meta_extra = {
             "course_group": group.key,
@@ -201,13 +238,34 @@ class SchoologyProvider(IntegrationProvider):
         created = await supabase.insert("courses", {**patch, "user_id": user_id})
         return created[0]["id"]
 
+    async def _refresh_active_status(self, course_id: str, active: bool) -> None:
+        """Best-effort: keep `is_active` current (the signal that moves a
+        class between "current" and "completed" in the UI) without ever
+        blocking the rest of the sync if this particular write fails — e.g. a
+        migration not yet applied to this project's database, or any other
+        transient error. Assignments/materials/grades are the important part
+        of a sync; a cosmetic status flag must never be able to take the
+        whole course down with it."""
+        try:
+            await supabase.update("courses", {"is_active": active}, filters={"id": eq(course_id)})
+        except Exception:  # noqa: BLE001
+            pass
+
     async def _resolve_course(
         self, user_id: str, section: SchoologySection, present_group_semesters: dict[str, set[str]],
     ) -> str:
-        """Return the course_id this Schoology section maps to, reusing an
-        existing PowerSchool/manual/prior-Schoology course when one matches so
-        the systems share a single course row. Only creates a new course when
-        nothing matches."""
+        """Return the course_id this Schoology section maps to (see
+        `_resolve_course_id`), then best-effort refresh its active status."""
+        course_id = await self._resolve_course_id(user_id, section, present_group_semesters)
+        await self._refresh_active_status(course_id, section.active)
+        return course_id
+
+    async def _resolve_course_id(
+        self, user_id: str, section: SchoologySection, present_group_semesters: dict[str, set[str]],
+    ) -> str:
+        """Reuse an existing PowerSchool/manual/prior-Schoology course when one
+        matches so the systems share a single course row. Only creates a new
+        course when nothing matches."""
         group_match = course_mapping.match_group(section.display_name)
         if group_match:
             group, member = group_match
@@ -223,18 +281,12 @@ class SchoologyProvider(IntegrationProvider):
                 return await self._resolve_grouped_course(user_id, section, group, member)
 
         # 1) A course this provider already created/linked for this section.
-        # Every branch below keeps `is_active` current — a section that was
-        # active last sync but has since ended (grading period over) is the
-        # signal that moves a class from "current" to "completed" in the UI.
         existing = await supabase.select(
             "courses", columns="id",
             filters={"user_id": eq(user_id), "external_id": eq(section.id),
                      "external_source": eq(self.name)}, limit=1,
         )
         if existing:
-            await supabase.update(
-                "courses", {"is_active": section.active}, filters={"id": eq(existing[0]["id"])}
-            )
             return existing[0]["id"]
         linked = await supabase.select(
             "courses", columns="id",
@@ -242,9 +294,6 @@ class SchoologyProvider(IntegrationProvider):
                      "metadata->>schoology_section_id": eq(section.id)}, limit=1,
         )
         if linked:
-            await supabase.update(
-                "courses", {"is_active": section.active}, filters={"id": eq(linked[0]["id"])}
-            )
             return linked[0]["id"]
 
         # 2) An existing course (any source) whose name matches — link, don't dupe.
@@ -257,7 +306,7 @@ class SchoologyProvider(IntegrationProvider):
             ):
                 meta = {**(c.get("metadata") or {}), "schoology_section_id": section.id,
                         "schoology_web_url": section.raw.get("profile_url")}
-                patch: dict[str, Any] = {"metadata": meta, "is_active": section.active}
+                patch: dict[str, Any] = {"metadata": meta}
                 # Fill in scheduling details PowerSchool doesn't provide, if empty.
                 if section.location and not (c.get("metadata") or {}).get("room"):
                     patch.setdefault("room", section.location)
@@ -272,7 +321,6 @@ class SchoologyProvider(IntegrationProvider):
             "name": section.display_name,
             "code": section.course_code or None,
             "room": section.location or None,
-            "is_active": section.active,
             "metadata": {
                 "schoology_section_id": section.id,
                 "meeting_days": section.meeting_days,

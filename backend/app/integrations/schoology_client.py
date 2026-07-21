@@ -249,6 +249,15 @@ class SchoologyClient:
             next_url = (data.get("links") or {}).get("next")
         return items
 
+    # ---- diagnostics ----
+    async def get_raw(self, path: str) -> dict[str, Any]:
+        """Fetch a raw JSON response from an arbitrary API path, verbatim —
+        used by the debug-fetch diagnostic so a district-restricted API key
+        (one that can list sections but is denied read access to assignments/
+        materials content) can be confirmed by looking at the actual response
+        instead of guessing from a 200-with-nothing-in-it symptom."""
+        return await self._get_json(path)
+
     # ---- identity ----
     async def current_user_id(self) -> str:
         data = await self._get_json("/app-user-info")

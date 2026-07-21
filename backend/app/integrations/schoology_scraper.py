@@ -103,21 +103,15 @@ class SchoologyScraperClient:
             )
         self._logged_in = True
 
-    async def debug_materials_page(self, section_id: str) -> dict[str, Any]:
-        """Diagnostic: fetch one section's materials page after login and
-        report its raw structure — title, every link's href/text, and a
-        truncated HTML snippet — so the real authenticated page shape can be
-        confirmed before writing a parser against it, the same way
-        `SchoologyProvider.debug_fetch` did for the API side."""
-        if not self._logged_in:
-            await self.login()
-        r = await self._client.get(f"/course/{section_id}/materials")
+    async def _describe_page(self, url: str) -> dict[str, Any]:
+        r = await self._client.get(url)
         soup = BeautifulSoup(r.text, "html.parser")
         links = [
             {"text": a.get_text(" ", strip=True), "href": a.get("href")}
             for a in soup.find_all("a", href=True)
         ]
         return {
+            "requested_url": url,
             "final_url": str(r.url),
             "status_code": r.status_code,
             "title": soup.title.string if soup.title else None,
@@ -125,3 +119,38 @@ class SchoologyScraperClient:
             "links": links[:60],
             "body_html_snippet": str(soup.find("body"))[:6000] if soup.find("body") else None,
         }
+
+    async def debug_materials_page(self, section_id: str, student_uid: str | None = None) -> dict[str, Any]:
+        """Diagnostic: fetch a section's materials page after login and
+        report its raw structure — title, every link's href/text, and a
+        truncated HTML snippet — so the real authenticated page shape can be
+        confirmed before writing a parser against it, the same way
+        `SchoologyProvider.debug_fetch` did for the API side.
+
+        Tries every candidate URL independently (one failing/redirecting
+        doesn't hide the others' results) since it's genuinely unclear which
+        one this account can actually reach: the district subdomain
+        (`{base}/course/{id}/materials`) is where login happens, but a parent
+        account's own browser link for a course's home page is on a
+        completely different domain — `app.schoology.com/course/{id}/preview/
+        {student_uid}/parent` — and that domain's session cookie (if any) may
+        not be the same one login established, since cookies don't cross
+        domains by default. `student_uid` is the Schoology numeric id of the
+        student being previewed (from that URL's own path, or
+        `SchoologyClient.current_user_id()` against the API)."""
+        if not self._logged_in:
+            await self.login()
+
+        candidates = {"district_materials": f"{self._base}/course/{section_id}/materials"}
+        if student_uid:
+            candidates["app_preview_parent"] = (
+                f"https://app.schoology.com/course/{section_id}/preview/{student_uid}/parent"
+            )
+
+        results: dict[str, Any] = {}
+        for name, url in candidates.items():
+            try:
+                results[name] = await self._describe_page(url)
+            except Exception as e:  # noqa: BLE001
+                results[name] = {"requested_url": url, "error": str(e)}
+        return results

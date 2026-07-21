@@ -65,16 +65,21 @@ interface SchoologyDebugResult {
   note?: string;
 }
 
+interface SchoologyMaterialsPageCandidate {
+  requested_url: string;
+  final_url?: string;
+  status_code?: number;
+  title?: string | null;
+  link_count?: number;
+  links?: { text: string; href: string | null }[];
+  body_html_snippet?: string | null;
+  error?: string;
+}
+
 interface SchoologyMaterialsProbedSection {
   section: { id: string; name: string };
-  materials_page: {
-    final_url: string;
-    status_code: number;
-    title: string | null;
-    link_count: number;
-    links: { text: string; href: string | null }[];
-    body_html_snippet: string | null;
-  };
+  // Keyed by candidate name, e.g. "district_materials", "app_preview_parent"
+  materials_page: Record<string, SchoologyMaterialsPageCandidate>;
 }
 
 interface SchoologyMaterialsDebugResult {
@@ -640,16 +645,27 @@ export default function IntegrationsPage() {
                     </div>
                   ) : (
                     materialsDebugResult.probed?.map((p) => (
-                      <div key={p.section.id} className="space-y-1.5 border-t border-atlas-border pt-3 first:border-0 first:pt-0">
+                      <div key={p.section.id} className="space-y-2 border-t border-atlas-border pt-3 first:border-0 first:pt-0">
                         <div className="font-medium">{p.section.name} ({p.section.id})</div>
-                        <div>
-                          <span className="text-atlas-muted">Fetched: </span>
-                          {p.materials_page.final_url} ({p.materials_page.status_code}) — {p.materials_page.title}
-                        </div>
-                        <div className="text-atlas-muted">{p.materials_page.link_count} links found</div>
-                        <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-60 overflow-auto">
-                          {JSON.stringify(p.materials_page.links, null, 2)}
-                        </pre>
+                        {Object.entries(p.materials_page).map(([candidate, page]) => (
+                          <div key={candidate} className="space-y-1 bg-atlas-panel2 p-2 rounded">
+                            <div className="font-medium">{candidate}</div>
+                            {page.error ? (
+                              <div className="text-atlas-bad">{page.error}</div>
+                            ) : (
+                              <>
+                                <div>
+                                  <span className="text-atlas-muted">Fetched: </span>
+                                  {page.final_url} ({page.status_code}) — {page.title}
+                                </div>
+                                <div className="text-atlas-muted">{page.link_count} links found</div>
+                                <pre className="whitespace-pre-wrap break-all bg-atlas-bg p-2 rounded max-h-60 overflow-auto">
+                                  {JSON.stringify(page.links, null, 2)}
+                                </pre>
+                              </>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     ))
                   )}

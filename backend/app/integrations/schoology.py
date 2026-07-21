@@ -299,7 +299,7 @@ class SchoologyProvider(IntegrationProvider):
             for s in matches:
                 probed.append({
                     "section": {"id": s.id, "name": s.display_name},
-                    "materials_page": await scraper.debug_materials_page(s.id),
+                    "materials_page": await scraper.debug_materials_page(s.id, student_uid=uid),
                 })
             return {"probed": probed}
         finally:

@@ -56,10 +56,24 @@ MATERIALS_PAGE = """
 </body></html>
 """
 
+# A parent account's own browser link for a course's home page lives on a
+# completely different domain (app.schoology.com) than login (the district
+# subdomain) — see schoology_scraper.py's debug_materials_page docstring.
+PREVIEW_PARENT_PAGE = """
+<html><head><title>AP Biology</title></head>
+<body>
+  <a href="/course/8435659601/materials">Materials</a>
+  <a href="/course/8435659601/grades">Grades</a>
+</body></html>
+"""
+
 
 def _handler_factory(*, valid_password: str):
     def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
         path = request.url.path
+        if host == "app.schoology.com" and path == "/course/8435659601/preview/23381548/parent":
+            return httpx.Response(200, text=PREVIEW_PARENT_PAGE)
         if path == "/login" and request.method == "GET":
             return httpx.Response(200, text=LOGIN_PAGE)
         if path == "/login" and request.method == "POST":
@@ -151,17 +165,41 @@ def test_login_with_no_recognizable_form_raises():
     asyncio.run(run())
 
 
-def test_debug_materials_page_logs_in_first_and_reports_links():
+def test_debug_materials_page_without_student_uid_only_tries_district_domain():
     async def run():
         transport = httpx.MockTransport(_handler_factory(valid_password=VALID_PASS))
         client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
         try:
             result = await client.debug_materials_page("8435659601")
-            assert result["status_code"] == 200
-            assert result["title"] == "Course Materials"
-            hrefs = {l["href"] for l in result["links"]}
+            assert set(result.keys()) == {"district_materials"}
+            page = result["district_materials"]
+            assert page["status_code"] == 200
+            assert page["title"] == "Course Materials"
+            hrefs = {l["href"] for l in page["links"]}
             assert "/attachment/download/123" in hrefs
             assert "/course/8435659601/materials/folder/42" in hrefs
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_debug_materials_page_with_student_uid_also_tries_app_domain():
+    """A parent account's course-home link lives on a different domain
+    (app.schoology.com/course/{id}/preview/{uid}/parent) than login — both
+    candidates must be probed and reported independently."""
+    async def run():
+        transport = httpx.MockTransport(_handler_factory(valid_password=VALID_PASS))
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.debug_materials_page("8435659601", student_uid="23381548")
+            assert set(result.keys()) == {"district_materials", "app_preview_parent"}
+            preview = result["app_preview_parent"]
+            assert preview["status_code"] == 200
+            assert preview["title"] == "AP Biology"
+            assert preview["requested_url"] == (
+                "https://app.schoology.com/course/8435659601/preview/23381548/parent"
+            )
         finally:
             await client.aclose()
 

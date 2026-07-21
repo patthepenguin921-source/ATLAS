@@ -478,9 +478,11 @@ export default function IntegrationsPage() {
               ) : (
                 <>
                   <div className="text-atlas-muted">
-                    If these come back empty even though this course clearly has content when you browse
-                    schoology.com yourself, your district hasn&apos;t granted this API key read access to
-                    assignments/materials — ask your school&apos;s Schoology admin to enable that for your key.
+                    An empty raw_assignments/raw_events is normal if this teacher never creates
+                    graded Assignment/Event objects in Schoology. raw_folder_root is the one to
+                    check — it should contain a &quot;folder-item&quot; array. If it looks like a section
+                    object instead (course_title, section_title, etc, no folder-item key), that
+                    means the sync couldn&apos;t reach this course&apos;s materials.
                   </div>
                   {schoologyDebugResult.probed?.map((p) => (
                     <div key={p.section.id} className="space-y-1.5 border-t border-atlas-border pt-3 first:border-0 first:pt-0">

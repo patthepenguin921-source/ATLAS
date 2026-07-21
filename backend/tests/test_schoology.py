@@ -51,9 +51,10 @@ def _this_week_iso() -> str:
 
 
 SECTION_ID = "555"
+COURSE_ID = "9999"  # distinct from SECTION_ID — materials live under this realm, not the section
 
 SECTIONS = {"section": [{
-    "id": SECTION_ID, "course_title": "AP Biology", "section_title": "Sec 1",
+    "id": SECTION_ID, "course_id": COURSE_ID, "course_title": "AP Biology", "section_title": "Sec 1",
     "course_code": "APBIO", "section_code": "", "grading_periods": [1],
     "meeting_days": ["1", "3"], "start_time": "08:00", "end_time": "08:50",
     "location": "F207", "active": 1,
@@ -127,9 +128,9 @@ def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=ASSIGNMENTS)
     if path.endswith(f"/sections/{SECTION_ID}/events"):
         return httpx.Response(200, json=EVENTS)
-    if path.endswith(f"/sections/{SECTION_ID}/folder/0"):
+    if path.endswith(f"/courses/{COURSE_ID}/folder/0"):
         return httpx.Response(200, json=FOLDER_ROOT)
-    if path.endswith(f"/sections/{SECTION_ID}/folder/42"):
+    if path.endswith(f"/courses/{COURSE_ID}/folder/42"):
         return httpx.Response(200, json=FOLDER_42)
     if path.endswith("/documents/77"):
         return httpx.Response(200, json=DOCUMENT_77)
@@ -299,7 +300,7 @@ def test_walk_materials_recurses_into_subfolders():
     async def run():
         client = _mock_client()
         try:
-            materials = await client.walk_materials(SECTION_ID)
+            materials = await client.walk_materials(COURSE_ID)
             # Both the document with an explicit location AND the bare file
             # (no type/location/attachments in the listing) nested inside
             # "Unit 1" must be found, with breadcrumb.
@@ -314,7 +315,7 @@ def test_walk_materials_recurses_into_subfolders():
             # its attachment can still be resolved.
             bare = by_title["syllabus.pdf"]
             assert bare.folder_path == "Unit 1"
-            assert bare.location == f"/sections/{SECTION_ID}/documents/99"
+            assert bare.location == f"/courses/{COURSE_ID}/documents/99"
             bare_detail = await client.fetch_material_detail(bare)
             assert files_of(bare_detail["attachments"])[0]["filename"] == "syllabus.pdf"
         finally:
@@ -424,7 +425,7 @@ def test_debug_fetch_returns_raw_responses_for_first_academic_section(fake_db, m
 
     assert len(result["probed"]) == 1
     probed = result["probed"][0]
-    assert probed["section"] == {"id": SECTION_ID, "name": "AP Biology"}
+    assert probed["section"] == {"id": SECTION_ID, "name": "AP Biology", "course_id": COURSE_ID}
     assert probed["raw_assignments"] == ASSIGNMENTS
     assert probed["raw_events"] == EVENTS
     assert probed["raw_folder_root"] == FOLDER_ROOT

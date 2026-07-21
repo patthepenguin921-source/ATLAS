@@ -132,6 +132,12 @@ def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=FOLDER_ROOT)
     if path.endswith(f"/courses/{COURSE_ID}/folder/42"):
         return httpx.Response(200, json=FOLDER_42)
+    if path.endswith(f"/courses/{COURSE_ID}"):
+        return httpx.Response(200, json={"id": COURSE_ID, "title": "AP Biology"})
+    if path.endswith(f"/sections/{SECTION_ID}/folder/0") or path.endswith(f"/sections/{SECTION_ID}/folder"):
+        # The wrong-realm shape this bug produced in production: 200 OK, but
+        # the section's own detail object instead of a folder listing.
+        return httpx.Response(200, json=SECTIONS["section"][0])
     if path.endswith("/documents/77"):
         return httpx.Response(200, json=DOCUMENT_77)
     if path.endswith("/documents/99"):
@@ -404,12 +410,12 @@ def test_sync_reconciles_course_and_imports_without_grades(fake_db, monkeypatch)
 
 
 def test_debug_fetch_returns_raw_responses_for_first_academic_section(fake_db, monkeypatch):
-    """Regression for the case where every content endpoint (assignments/
-    events/folder) returns 200 with an empty collection — the classic
-    signature of a district-restricted student API key that can list
-    sections but isn't granted content read access. debug_fetch must surface
-    the raw response verbatim so that's diagnosable without server logs.
-    With no query, it probes just the first academic section found."""
+    """debug_fetch must surface every candidate "folder contents" endpoint
+    verbatim (courses realm, sections realm, sections realm with no id) so
+    which one actually works for a given district's API key is diagnosable
+    without server logs, and one endpoint being rejected must not hide the
+    others' results. With no query, it probes just the first academic
+    section found."""
     provider = SchoologyProvider()
 
     async def _fake_load(self, user_id):
@@ -428,7 +434,14 @@ def test_debug_fetch_returns_raw_responses_for_first_academic_section(fake_db, m
     assert probed["section"] == {"id": SECTION_ID, "name": "AP Biology", "course_id": COURSE_ID}
     assert probed["raw_assignments"] == ASSIGNMENTS
     assert probed["raw_events"] == EVENTS
-    assert probed["raw_folder_root"] == FOLDER_ROOT
+    assert probed["raw_course_detail"] == {"id": COURSE_ID, "title": "AP Biology"}
+    # The correct one: courses-realm folder returns a real folder-item listing.
+    assert probed["raw_folder_courses_realm"] == FOLDER_ROOT
+    # The wrong-realm shape this bug produced in production: 200 OK with the
+    # section's own detail object instead — no folder-item key, no error.
+    assert probed["raw_folder_sections_realm"]["id"] == SECTION_ID
+    assert "folder-item" not in probed["raw_folder_sections_realm"]
+    assert probed["raw_folder_sections_realm_no_id"]["id"] == SECTION_ID
 
 
 def test_debug_fetch_query_narrows_by_case_insensitive_name_match(fake_db, monkeypatch):

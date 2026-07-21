@@ -54,10 +54,8 @@ interface DebugScrapeResult {
 }
 
 interface SchoologyProbedSection {
-  section: { id: string; name: string };
-  raw_assignments?: unknown;
-  raw_events?: unknown;
-  raw_folder_root?: unknown;
+  section: { id: string; name: string; course_id?: string };
+  [rawKey: string]: unknown;
 }
 
 interface SchoologyDebugResult {
@@ -479,22 +477,28 @@ export default function IntegrationsPage() {
                 <>
                   <div className="text-atlas-muted">
                     An empty raw_assignments/raw_events is normal if this teacher never creates
-                    graded Assignment/Event objects in Schoology. raw_folder_root is the one to
-                    check — it should contain a &quot;folder-item&quot; array. If it looks like a section
-                    object instead (course_title, section_title, etc, no folder-item key), that
-                    means the sync couldn&apos;t reach this course&apos;s materials.
+                    graded Assignment/Event objects in Schoology. The raw_folder_* keys are what
+                    matter — the real folder listing is whichever one contains a
+                    &quot;folder-item&quot; array. An &quot;error&quot; key means that specific endpoint was
+                    rejected; a section-shaped object (course_title, section_title, etc, no
+                    folder-item key) means that endpoint returned the wrong resource.
                   </div>
                   {schoologyDebugResult.probed?.map((p) => (
                     <div key={p.section.id} className="space-y-1.5 border-t border-atlas-border pt-3 first:border-0 first:pt-0">
-                      <div className="font-medium">{p.section.name} ({p.section.id})</div>
-                      {(["raw_assignments", "raw_events", "raw_folder_root"] as const).map((key) => (
-                        <div key={key}>
-                          <div className="text-atlas-muted">{key}:</div>
-                          <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-60 overflow-auto">
-                            {JSON.stringify(p[key], null, 2)}
-                          </pre>
-                        </div>
-                      ))}
+                      <div className="font-medium">
+                        {p.section.name} (section {p.section.id}
+                        {p.section.course_id ? `, course ${p.section.course_id}` : ""})
+                      </div>
+                      {Object.entries(p)
+                        .filter(([key]) => key !== "section")
+                        .map(([key, value]) => (
+                          <div key={key}>
+                            <div className="text-atlas-muted">{key}:</div>
+                            <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-60 overflow-auto">
+                              {JSON.stringify(value, null, 2)}
+                            </pre>
+                          </div>
+                        ))}
                     </div>
                   ))}
                 </>

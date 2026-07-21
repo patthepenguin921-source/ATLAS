@@ -138,6 +138,17 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+def _to_bool(value: Any, default: bool) -> bool:
+    """Schoology's 0/1 boolean flags arrive as JSON integers. `value or
+    "<default>"` (the previous approach) silently loses a real ``0`` — the
+    int ``0`` is falsy, so it falls through to the default instead of being
+    read as False. Missing/blank stays default; everything else is judged on
+    its own value."""
+    if value is None or str(value).strip() == "":
+        return default
+    return str(value).strip().lower() not in ("0", "false")
+
+
 def _parse_dt(value: str | None) -> str | None:
     """Schoology datetimes look like ``2022-12-06 23:59:00`` (or a bare date).
     Return an ISO-8601 string, or ``None`` for empty/unparseable values."""
@@ -269,7 +280,7 @@ class SchoologyClient:
                 start_time=str(s.get("start_time") or ""),
                 end_time=str(s.get("end_time") or ""),
                 location=str(s.get("location") or ""),
-                active=str(s.get("active") or "1") not in ("0", "false", ""),
+                active=_to_bool(s.get("active"), default=True),
                 raw=s,
             ))
         return sections
@@ -290,7 +301,7 @@ class SchoologyClient:
                 assignment_type=str(a.get("assignment_type") or a.get("type") or "assignment"),
                 web_url=str(a.get("web_url") or ""),
                 folder_id=str(a.get("folder_id")) if a.get("folder_id") else None,
-                published=str(a.get("published") or "1") not in ("0", "false", ""),
+                published=_to_bool(a.get("published"), default=True),
                 attachments=a.get("attachments") or {},
                 raw=a,
             ))
@@ -307,7 +318,7 @@ class SchoologyClient:
                 description=str(e.get("description") or ""),
                 start=_parse_dt(e.get("start")),
                 end=_parse_dt(e.get("end")),
-                all_day=str(e.get("all_day") or "0") not in ("0", "false", ""),
+                all_day=_to_bool(e.get("all_day"), default=False),
                 type=str(e.get("type") or "event"),
                 assignment_id=str(e.get("assignment_id")) if e.get("assignment_id") else None,
                 web_url=str(e.get("web_url") or ""),
@@ -338,15 +349,27 @@ class SchoologyClient:
                     child_path = f"{path}/{title}" if path and title else (title or path)
                     await _walk(item_id, child_path, depth + 1)
                     continue
+                location = str(item["location"]) if item.get("location") else None
+                inline_attachments = item.get("attachments") or {}
+                url = str(item["url"]) if item.get("url") else None
+                if not location and not url and not inline_attachments and item_id:
+                    # A plain file/link dropped straight into a folder shows up
+                    # in the listing with no "location", "url", or
+                    # "attachments" at all (only a bare id/title) — Schoology
+                    # only exposes its download info via the Documents
+                    # resource. Without this fallback these items are silently
+                    # dropped, which is exactly what "folder contents don't
+                    # get pulled" looks like from the student's side.
+                    location = f"/sections/{section_id}/documents/{item_id}"
                 materials.append(SchoologyMaterial(
                     id=item_id,
                     type=itype or "document",
                     title=title or "Untitled",
                     body=str(item.get("body") or ""),
-                    url=str(item["url"]) if item.get("url") else None,
-                    location=str(item["location"]) if item.get("location") else None,
+                    url=url,
+                    location=location,
                     folder_path=path,
-                    attachments=item.get("attachments") or {},
+                    attachments=inline_attachments,
                 ))
 
         await _walk("0", "", 0)

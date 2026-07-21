@@ -25,6 +25,27 @@ PROVIDERS: dict[str, IntegrationProvider] = {
 }
 
 
+async def run_sync_for_all(provider: str) -> dict[str, Any]:
+    """Sync every user who has this provider connected & enabled — the entry
+    point automated schedulers (Vercel Cron, n8n, …) call, since a scheduler
+    has no logged-in user to scope a request to the way the normal
+    `POST /integrations/{provider}/sync` endpoint does."""
+    rows = await supabase.select(
+        "integrations", columns="user_id",
+        filters={"provider": eq(provider), "enabled": eq("true")},
+    ) or []
+    results = [
+        {"user_id": row["user_id"], **await run_sync(provider, row["user_id"])}
+        for row in rows
+    ]
+    return {
+        "provider": provider,
+        "synced": len(results),
+        "errors": sum(1 for r in results if r["status"] == "error"),
+        "results": results,
+    }
+
+
 async def run_sync(provider: str, user_id: str) -> dict[str, Any]:
     impl = PROVIDERS[provider]
     await _set_status(user_id, provider, "running")

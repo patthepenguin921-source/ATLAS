@@ -167,6 +167,7 @@ class SchoologyProvider(IntegrationProvider):
             "has_ap_prep_lab": member.has_ap_prep_lab,
             "external_id": section.id,
             "external_source": self.name,
+            "is_active": section.active,
         }
         meta_extra = {
             "course_group": group.key,
@@ -222,12 +223,18 @@ class SchoologyProvider(IntegrationProvider):
                 return await self._resolve_grouped_course(user_id, section, group, member)
 
         # 1) A course this provider already created/linked for this section.
+        # Every branch below keeps `is_active` current — a section that was
+        # active last sync but has since ended (grading period over) is the
+        # signal that moves a class from "current" to "completed" in the UI.
         existing = await supabase.select(
             "courses", columns="id",
             filters={"user_id": eq(user_id), "external_id": eq(section.id),
                      "external_source": eq(self.name)}, limit=1,
         )
         if existing:
+            await supabase.update(
+                "courses", {"is_active": section.active}, filters={"id": eq(existing[0]["id"])}
+            )
             return existing[0]["id"]
         linked = await supabase.select(
             "courses", columns="id",
@@ -235,6 +242,9 @@ class SchoologyProvider(IntegrationProvider):
                      "metadata->>schoology_section_id": eq(section.id)}, limit=1,
         )
         if linked:
+            await supabase.update(
+                "courses", {"is_active": section.active}, filters={"id": eq(linked[0]["id"])}
+            )
             return linked[0]["id"]
 
         # 2) An existing course (any source) whose name matches — link, don't dupe.
@@ -247,7 +257,7 @@ class SchoologyProvider(IntegrationProvider):
             ):
                 meta = {**(c.get("metadata") or {}), "schoology_section_id": section.id,
                         "schoology_web_url": section.raw.get("profile_url")}
-                patch: dict[str, Any] = {"metadata": meta}
+                patch: dict[str, Any] = {"metadata": meta, "is_active": section.active}
                 # Fill in scheduling details PowerSchool doesn't provide, if empty.
                 if section.location and not (c.get("metadata") or {}).get("room"):
                     patch.setdefault("room", section.location)
@@ -262,6 +272,7 @@ class SchoologyProvider(IntegrationProvider):
             "name": section.display_name,
             "code": section.course_code or None,
             "room": section.location or None,
+            "is_active": section.active,
             "metadata": {
                 "schoology_section_id": section.id,
                 "meeting_days": section.meeting_days,
@@ -593,9 +604,13 @@ class SchoologyProvider(IntegrationProvider):
         m: SchoologyMaterial, google_token: str | None, report: dict[str, Any],
     ) -> None:
         owner_external_id = f"material:{m.id}"
-        # Fetch the material's full record for attachments the folder listing omits.
+        # Fetch the material's full record for attachments the folder listing
+        # omits — every non-folder type can need this (a bare file/link is
+        # fetched from its Documents-resource location; assignments/pages/
+        # discussions/packages/media-albums likewise only expose attachments
+        # once fetched directly with with_attachments=1).
         attachments = m.attachments
-        if not attachments and m.location and m.type in ("document", "assignment", "page", "discussion"):
+        if not attachments and m.location:
             try:
                 detail = await client.fetch_material_detail(m)
                 attachments = detail.get("attachments") or {}

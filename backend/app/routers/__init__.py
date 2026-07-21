@@ -17,7 +17,7 @@ _CRUD = [
                      writable={"term_id", "teacher_id", "name", "code", "subject",
                                "course_level", "has_hn_prep_lab", "has_ap_prep_lab",
                                "credit_hours", "color", "period", "room", "sort_order",
-                               "semester", "linked_course_id",
+                               "semester", "linked_course_id", "is_active",
                                "external_id", "external_source", "metadata"},
                      default_order="sort_order.asc,created_at.desc"),
     make_crud_router(table="assignments", prefix="/assignments", tag="assignments",

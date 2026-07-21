@@ -33,5 +33,15 @@
       "source": "/(.*)",
       "destination": { "type": "service", "service": "frontend" }
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/backend/api/v1/integrations/cron/schoology/sync",
+      "schedule": "0 11 * * *"
+    },
+    {
+      "path": "/api/backend/api/v1/integrations/cron/schoology/sync",
+      "schedule": "0 20 * * *"
+    }
   ]
 }

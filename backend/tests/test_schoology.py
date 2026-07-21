@@ -459,6 +459,52 @@ def test_sync_flips_course_inactive_when_section_grading_period_ends(fake_db, mo
     assert fake_db.tables["courses"][0]["is_active"] is False
 
 
+def test_sync_survives_is_active_write_failure(fake_db, monkeypatch):
+    """Regression: a real deployment hit `Could not find the 'is_active'
+    column of 'courses' in the schema cache` (a migration that hadn't been
+    applied yet) on EVERY course, which aborted course resolution and so
+    skipped assignments/materials for the whole account. The `is_active`
+    write must be best-effort — a failure there must never block the rest of
+    the sync."""
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    async def _fake_client(self, integration):
+        return _mock_client()
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+
+    real_update = fake_db.update
+
+    async def _flaky_update(table, patch, *, filters):
+        if table == "courses" and "is_active" in patch:
+            raise RuntimeError(
+                "Supabase error 400: Could not find the 'is_active' column of "
+                "'courses' in the schema cache"
+            )
+        return await real_update(table, patch, filters=filters)
+
+    # The fixture already pointed `supabase.update` at `fake_db.update` — patch
+    # the same target the provider actually calls, not the fixture's fake.
+    monkeypatch.setattr(supabase, "update", _flaky_update)
+
+    report = asyncio.run(provider.sync(USER_ID))
+
+    # The is_active write failed, but everything else must still have gone
+    # through: no error surfaced, and the course still got its assignments,
+    # events, and materials (including the folder contents).
+    assert report["errors"] == []
+    assert report["courses"] == 1
+    assert len(fake_db.tables["assignments"]) == 1
+    docs = fake_db.tables["documents"]
+    assert any("syllabus.pdf" in d["title"] for d in docs)
+    # And the is_active column itself was simply never written this run.
+    assert "is_active" not in fake_db.tables["courses"][0]
+
+
 def test_normalize_name_basic():
     assert _normalize_name("AP  Calculus-AB!") == "ap calculus ab"
 

@@ -24,6 +24,32 @@ no separate service to run:
 Hitting the endpoint manually (e.g. from another scheduler) works the same
 way — `curl -X POST .../integrations/cron/schoology/sync -H "X-Cron-Secret: <value>"`.
 
+## Cloud Run + Cloud Scheduler (if you're moving the backend off Vercel)
+
+Vercel's "auto-inject the secret as a Bearer header" trick is Vercel-specific
+and only fires from Vercel's own Cron Jobs — it does nothing on Cloud Run.
+If the backend runs on Cloud Run instead:
+
+1. Set `ATLAS_CRON_SECRET` as an env var on the Cloud Run service — ideally
+   via Secret Manager (`gcloud run services update <name>
+   --update-secrets=ATLAS_CRON_SECRET=your-secret:latest`) rather than
+   plaintext.
+2. Cloud Run has no cron of its own, so **Cloud Scheduler** is what actually
+   calls the endpoint. Run `automation/cloud-scheduler-setup.sh` (needs the
+   `gcloud` CLI, authenticated and pointed at your project):
+   ```bash
+   PROJECT_ID=my-gcp-project \
+   CLOUD_RUN_URL=https://atlas-backend-xyz.a.run.app \
+   CRON_SECRET=the-same-value-as-ATLAS_CRON_SECRET \
+   ./automation/cloud-scheduler-setup.sh
+   ```
+   This creates two jobs (7am/4pm America/New_York, real IANA timezone — no
+   UTC math needed) that call `/integrations/cron/schoology/sync` with an
+   `X-Cron-Secret` header — the same endpoint accepts either that header or
+   Vercel's Bearer-token form, so no code changes are needed either way.
+3. Once Cloud Run is live, the `crons` block in `vercel.json` becomes dead
+   weight (nothing left on Vercel for it to call) — fine to leave or remove.
+
 ## n8n blueprints (for jobs with no native scheduler yet)
 
 The daily plan, weekly review, and retention refresh don't have a Vercel Cron

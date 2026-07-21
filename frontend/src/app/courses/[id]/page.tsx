@@ -208,6 +208,7 @@ export default function CourseDetailPage() {
       }
     >
       <div className="flex flex-wrap items-center gap-2 mb-6">
+        {course.is_active === false && <Badge tone="default">Completed</Badge>}
         {level !== "regular" && <Badge tone="accent">{LEVEL_BADGE[level]}</Badge>}
         {currentSemester !== "full_year" && (
           <Badge tone="accent">{SEMESTER_LABEL[currentSemester]}</Badge>

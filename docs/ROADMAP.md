@@ -46,7 +46,15 @@ Every phase produces a usable application. Status reflects what's in this repo.
 - [x] Calendar synchronization — Schoology events + assignment due dates flow
       into `calendar_events` (week-at-a-glance).
 - [x] Automatic document ingestion pipeline (usable now via upload/ingest-text)
-- [x] n8n workflow blueprints for scheduled sync (Schoology runs 07:00 & 16:00)
+- [x] Automated Schoology sync — a built-in Vercel Cron trigger
+      (`GET /integrations/cron/schoology/sync`, secret-protected) runs the
+      sync for every connected user twice a day with zero extra
+      infrastructure; n8n blueprints remain available for jobs without a
+      native scheduler yet (daily plan, weekly review, retention refresh)
+- [x] Completed classes — Schoology's per-section `active` flag now persists
+      to `courses.is_active`, so a class whose grading period ended moves out
+      of the main courses grid into a collapsed "Completed classes" section
+      instead of staying mixed in with the current term
 
 **Next:** implement the Blackboard provider through `integrations/base.py`, and
 add a full Google OAuth connect so Schoology-linked Drive files download in the
@@ -89,4 +97,5 @@ orchestrator that lets agents call one another.
 | Review a concept | `POST /knowledge/review` |
 | Connect PowerSchool | `POST /integrations/powerschool/connect` (also runs the first sync) |
 | Sync an LMS | `POST /integrations/{provider}/sync` |
+| Automated sync (scheduler-only, cron-secret auth) | `GET`/`POST /integrations/cron/{provider}/sync` |
 | Disconnect an integration | `DELETE /integrations/{provider}` |

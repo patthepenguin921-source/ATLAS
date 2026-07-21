@@ -90,19 +90,29 @@ EVENTS = {"event": [
      "type": "event", "assignment_id": None, "web_url": ""},
 ]}
 
-# Root folder -> a subfolder -> a document with a file attachment.
+# Root folder -> a subfolder -> a document with a file attachment, plus a bare
+# file dropped straight into the folder (no "type"/"location"/"attachments" in
+# the listing itself — only resolvable via the Documents resource).
 FOLDER_ROOT = {"folder-item": [
     {"id": "42", "type": "folder", "title": "Unit 1"},
 ]}
 FOLDER_42 = {"folder-item": [
     {"id": "77", "type": "document", "title": "Intro Notes",
      "location": "https://api.schoology.com/v1/sections/555/documents/77"},
+    {"id": "99", "title": "syllabus.pdf"},
 ]}
 DOCUMENT_77 = {
     "id": "77", "title": "Intro Notes", "type": "document",
     "attachments": {"files": {"file": [{
         "id": "88", "title": "Notes", "filename": "notes.pdf",
         "download_path": "https://api.schoology.com/v1/download/88", "extension": "pdf",
+    }]}},
+}
+DOCUMENT_99 = {
+    "id": "99", "title": "syllabus.pdf",
+    "attachments": {"files": {"file": [{
+        "id": "100", "title": "syllabus.pdf", "filename": "syllabus.pdf",
+        "download_path": "https://api.schoology.com/v1/download/100", "extension": "pdf",
     }]}},
 }
 
@@ -123,6 +133,8 @@ def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=FOLDER_42)
     if path.endswith("/documents/77"):
         return httpx.Response(200, json=DOCUMENT_77)
+    if path.endswith("/documents/99"):
+        return httpx.Response(200, json=DOCUMENT_99)
     if "/download/" in path:
         return httpx.Response(200, content=b"%PDF-1.4 fake pdf bytes")
     return httpx.Response(404, json={"error": f"no fixture for {path}"})
@@ -288,12 +300,23 @@ def test_walk_materials_recurses_into_subfolders():
         client = _mock_client()
         try:
             materials = await client.walk_materials(SECTION_ID)
-            # The document nested inside "Unit 1" must be found, with breadcrumb.
-            assert len(materials) == 1
-            m = materials[0]
-            assert m.title == "Intro Notes" and m.folder_path == "Unit 1"
-            detail = await client.fetch_material_detail(m)
+            # Both the document with an explicit location AND the bare file
+            # (no type/location/attachments in the listing) nested inside
+            # "Unit 1" must be found, with breadcrumb.
+            assert len(materials) == 2
+            by_title = {m.title: m for m in materials}
+            notes = by_title["Intro Notes"]
+            assert notes.folder_path == "Unit 1"
+            detail = await client.fetch_material_detail(notes)
             assert files_of(detail["attachments"])[0]["filename"] == "notes.pdf"
+
+            # The bare file gets a synthesized Documents-resource location so
+            # its attachment can still be resolved.
+            bare = by_title["syllabus.pdf"]
+            assert bare.folder_path == "Unit 1"
+            assert bare.location == f"/sections/{SECTION_ID}/documents/99"
+            bare_detail = await client.fetch_material_detail(bare)
+            assert files_of(bare_detail["attachments"])[0]["filename"] == "syllabus.pdf"
         finally:
             await client.aclose()
 
@@ -349,6 +372,8 @@ def test_sync_reconciles_course_and_imports_without_grades(fake_db, monkeypatch)
     assert len(courses) == 1
     assert courses[0]["metadata"]["schoology_section_id"] == SECTION_ID
     assert report["courses"] == 1
+    # The section is active this sync, so the course is a "current" class.
+    assert courses[0]["is_active"] is True
 
     # Assignment imported and linked to the existing course.
     assignments = fake_db.tables["assignments"]
@@ -365,11 +390,13 @@ def test_sync_reconciles_course_and_imports_without_grades(fake_db, monkeypatch)
     kinds = sorted(e["kind"] for e in events)
     assert kinds == ["due", "exam"]
 
-    # Materials + attachments became documents (nested doc's file, the
-    # assignment's file, and the Google link recorded for later download).
+    # Materials + attachments became documents (nested doc's file, the bare
+    # file dropped straight into the folder, the assignment's file, and the
+    # Google link recorded for later download).
     docs = fake_db.tables["documents"]
     titles = {d["title"] for d in docs}
     assert any("Lab handout" in t or "lab.pdf" in t for t in titles)
+    assert any("syllabus.pdf" in t for t in titles)
     # The Google Slides link with no token is stored & flagged for auth.
     google_docs = [d for d in docs if d.get("metadata", {}).get("needs_google_auth")]
     assert google_docs and "docs.google.com" in google_docs[0]["metadata"]["source_url"]
@@ -394,6 +421,42 @@ def test_sync_is_idempotent(fake_db, monkeypatch):
     # A second sync must not duplicate assignments or re-ingest the same files.
     assert len(fake_db.tables["assignments"]) == n_assign
     assert len(fake_db.tables["documents"]) == n_docs
+
+
+def test_sync_flips_course_inactive_when_section_grading_period_ends(fake_db, monkeypatch):
+    """When Schoology reports a section as no longer active (the grading
+    period ended — a completed class), a re-sync must flip is_active to
+    False so the UI can show it as completed instead of current."""
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+
+    async def _active_client(self, integration):
+        return _mock_client()
+
+    monkeypatch.setattr(SchoologyProvider, "_client", _active_client)
+    asyncio.run(provider.sync(USER_ID))
+    assert fake_db.tables["courses"][0]["is_active"] is True
+
+    ended_sections = {"section": [{**SECTIONS["section"][0], "active": 0}]}
+
+    def _ended_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/app-user-info":
+            return httpx.Response(200, json={"api_uid": 12345678})
+        if path.endswith("/sections") and "/users/" in path:
+            return httpx.Response(200, json=ended_sections)
+        return _handler(request)
+
+    async def _ended_client(self, integration):
+        return SchoologyClient("ckey", "csecret", transport=httpx.MockTransport(_ended_handler))
+
+    monkeypatch.setattr(SchoologyProvider, "_client", _ended_client)
+    asyncio.run(provider.sync(USER_ID))
+    assert fake_db.tables["courses"][0]["is_active"] is False
 
 
 def test_normalize_name_basic():

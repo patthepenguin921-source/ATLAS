@@ -6,11 +6,14 @@ Automation (n8n) can also call these endpoints on a schedule.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import hmac
 
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from app.config import settings
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
-from app.integrations import PROVIDERS, run_sync
+from app.integrations import PROVIDERS, run_sync, run_sync_for_all
 from app.integrations.powerschool import encrypt_credentials, encrypt_session_cookie
 from app.integrations.powerschool_client import PowerSchoolClient
 from app.integrations.schoology import SchoologyProvider, encrypt_api_key
@@ -66,6 +69,48 @@ async def sync_provider(provider: str, user: CurrentUser = Depends(get_current_u
     if provider not in PROVIDERS:
         raise HTTPException(400, f"Unknown provider. Known: {list(PROVIDERS)}")
     return await run_sync(provider, user.id)
+
+
+def _check_cron_secret(request: Request) -> None:
+    """Auth for unattended scheduler calls — no user session exists, so this
+    checks a shared secret instead of a bearer JWT. Accepts either the
+    `Authorization: Bearer <secret>` header Vercel Cron sends automatically
+    when `CRON_SECRET` is set, or a plain `X-Cron-Secret` header for other
+    schedulers (n8n, curl, …)."""
+    if not settings.atlas_cron_secret:
+        raise HTTPException(
+            503, "Automated sync isn't configured — set ATLAS_CRON_SECRET on the backend."
+        )
+    auth = request.headers.get("authorization") or ""
+    provided = (
+        auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else
+        request.headers.get("x-cron-secret") or ""
+    )
+    if not provided or not hmac.compare_digest(provided, settings.atlas_cron_secret):
+        raise HTTPException(401, "Bad or missing cron secret.")
+
+
+async def _cron_sync_provider(provider: str, request: Request):
+    """Automated sync trigger for schedulers (Vercel Cron, n8n, …) — runs the
+    given provider's sync for every user who has it connected & enabled.
+    Secured by ATLAS_CRON_SECRET instead of a user session; see
+    `_check_cron_secret`."""
+    _check_cron_secret(request)
+    if provider not in PROVIDERS:
+        raise HTTPException(400, f"Unknown provider. Known: {list(PROVIDERS)}")
+    return await run_sync_for_all(provider)
+
+
+# GET: Vercel Cron Jobs always invoke via GET. POST: kept for n8n/curl/other
+# schedulers that prefer it — both do the same thing.
+@router.get("/cron/{provider}/sync")
+async def cron_sync_provider_get(provider: str, request: Request):
+    return await _cron_sync_provider(provider, request)
+
+
+@router.post("/cron/{provider}/sync")
+async def cron_sync_provider_post(provider: str, request: Request):
+    return await _cron_sync_provider(provider, request)
 
 
 @router.delete("/{provider}", status_code=204)

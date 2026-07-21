@@ -37,6 +37,7 @@ interface Course {
   semester?: string;
   linked_course_id?: string | null;
   sort_order: number;
+  is_active?: boolean;
 }
 
 interface CourseGroup {
@@ -71,6 +72,15 @@ function groupCourses(list: Course[]): CourseGroup[] {
   return groups;
 }
 
+// A group counts as completed only once every semester half has ended —
+// Schoology flips `is_active` false per-section as each grading period
+// closes, so a split course (e.g. HN Prep Lab S1 -> AP S2) stays "current"
+// until its last half wraps up. Rows synced before the column existed have
+// no value yet, so undefined defaults to active.
+function isGroupActive(g: CourseGroup): boolean {
+  return g.members.some((m) => m.is_active !== false);
+}
+
 const emptyForm = {
   name: "",
   code: "",
@@ -88,6 +98,7 @@ export default function CoursesPage() {
   const dragIndex = useRef<number | null>(null);
   const didDragRef = useRef(false);
   const [overIndex, setOverIndex] = useState<number | null>(null);
+  const [showCompleted, setShowCompleted] = useState(false);
 
   async function load() {
     setCourses(await apiGet("/courses"));
@@ -125,7 +136,7 @@ export default function CoursesPage() {
     }, 0);
     if (from === null || from === i || !courses) return;
 
-    const reorderedGroups = [...groups];
+    const reorderedGroups = [...activeGroups];
     const [moved] = reorderedGroups.splice(from, 1);
     reorderedGroups.splice(i, 0, moved);
     setCourses(reorderedGroups.flatMap((g) => g.members));
@@ -150,7 +161,11 @@ export default function CoursesPage() {
     router.push(`/courses/${id}`);
   }
 
-  const groups = courses ? groupCourses(courses) : [];
+  const allGroups = courses ? groupCourses(courses) : [];
+  const activeGroups = allGroups.filter(isGroupActive);
+  const completedGroups = allGroups
+    .filter((g) => !isGroupActive(g))
+    .sort((a, b) => a.primary.name.localeCompare(b.primary.name));
 
   return (
     <AppShell
@@ -210,11 +225,14 @@ export default function CoursesPage() {
 
       {!courses && <Loading />}
       {courses && !courses.length && <Empty>No courses yet. Add your first one.</Empty>}
-      {courses && courses.length > 0 && (
+      {courses && courses.length > 0 && activeGroups.length === 0 && (
+        <Empty>No current classes — see completed classes below.</Empty>
+      )}
+      {activeGroups.length > 0 && (
         <p className="text-xs text-atlas-muted mb-3">Click a card to open it · drag to reorder.</p>
       )}
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {groups.map((g, i) => {
+        {activeGroups.map((g, i) => {
           const c = g.primary;
           const isSplit = g.members.length > 1;
           const levels = Array.from(new Set(g.members.map((m) => m.course_level)));
@@ -276,6 +294,45 @@ export default function CoursesPage() {
           );
         })}
       </div>
+
+      {completedGroups.length > 0 && (
+        <div className="mt-8">
+          <button
+            className="text-xs font-semibold text-atlas-muted uppercase tracking-wide hover:text-atlas-text"
+            onClick={() => setShowCompleted((s) => !s)}
+          >
+            {showCompleted ? "Hide" : "Show"} completed classes ({completedGroups.length})
+          </button>
+          {showCompleted && (
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 mt-3">
+              {completedGroups.map((g) => {
+                const c = g.primary;
+                return (
+                  <div
+                    key={g.key}
+                    onClick={() => onCardClick(c.id)}
+                    className="card cursor-pointer opacity-60 hover:opacity-90 transition-opacity"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="font-medium">{c.name}</div>
+                        <div className="text-xs text-atlas-muted">{c.code || c.subject || "—"}</div>
+                      </div>
+                      <Badge tone="default">Completed</Badge>
+                    </div>
+                    <div className="mt-4 flex items-center justify-between">
+                      <span className="text-xs text-atlas-muted">Final grade</span>
+                      <span className="text-lg font-semibold text-atlas-muted">
+                        {c.current_grade != null ? `${c.current_grade}% ${c.current_letter ?? ""}` : "—"}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </AppShell>
   );
 }

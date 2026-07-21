@@ -254,6 +254,25 @@ async def debug_scrape_materials_schoology(
         raise HTTPException(502, str(e)) from e
 
 
+@router.get("/schoology/debug-walk-materials")
+async def debug_walk_materials_schoology(
+    q: str | None = None, user: CurrentUser = Depends(get_current_user)
+):
+    """Walks one or more sections' materials folders via the scraper login
+    and returns the classified result — real folders recursed into, real
+    items returned, Schoology's page chrome (nav, app launchers, type
+    filters, admin/export links) filtered out. A self-serve way to confirm
+    the parser (`schoology_scraper.parse_materials_page`) against a real
+    account before `sync()` relies on it. `q` narrows to sections whose name
+    contains it (e.g. `?q=AP+Biology`); omit it to probe the first academic
+    section."""
+    provider: SchoologyProvider = PROVIDERS["schoology"]  # type: ignore[assignment]
+    try:
+        return await provider.debug_walk_materials(user.id, query=q)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e)) from e
+
+
 @router.get("/schoology/debug-fetch")
 async def debug_fetch_schoology(
     q: str | None = None, user: CurrentUser = Depends(get_current_user)

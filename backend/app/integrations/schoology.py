@@ -48,7 +48,11 @@ from app.integrations.schoology_client import (
     links_of,
     week_bounds,
 )
-from app.integrations.schoology_scraper import SchoologyScraperAuthError, SchoologyScraperClient
+from app.integrations.schoology_scraper import (
+    MaterialLink,
+    SchoologyScraperAuthError,
+    SchoologyScraperClient,
+)
 from app.services import ingestion
 
 # Assignment/material title keywords → Atlas assignment_category enum values.
@@ -300,6 +304,56 @@ class SchoologyProvider(IntegrationProvider):
                 probed.append({
                     "section": {"id": s.id, "name": s.display_name},
                     "materials_page": await scraper.debug_materials_page(s.id, student_uid=uid),
+                })
+            return {"probed": probed}
+        finally:
+            await scraper.aclose()
+
+    async def debug_walk_materials(self, user_id: str, query: str | None = None) -> dict[str, Any]:
+        """Fetch one or more sections' materials pages via the scraper login,
+        walk every folder, and report the classified result — real folders
+        recursed into, real items returned, Schoology's page chrome (nav, app
+        launchers, type filters, admin/export links) filtered out. Lets
+        `schoology_scraper.parse_materials_page`'s classification be
+        confirmed against a real account before `sync()` is trusted to rely
+        on it for materials a blocked API key can't see (see
+        `_sync_scraped_materials`)."""
+        api_client = await self._client(await self._load_integration(user_id))
+        try:
+            uid = await api_client.current_user_id()
+            sections = await api_client.get_sections(uid)
+        finally:
+            await api_client.aclose()
+        academic = [
+            s for s in sections
+            if not course_mapping.is_excluded(s.display_name)
+            and not course_mapping.is_club(s.display_name)
+        ]
+        if not academic:
+            return {"sections_found": len(sections), "note": "No academic sections to probe."}
+        if query:
+            q = query.strip().lower()
+            matches = [s for s in academic if q in s.display_name.lower()]
+            if not matches:
+                return {
+                    "note": f"No section matched {query!r}.",
+                    "available_sections": [s.display_name for s in academic],
+                }
+        else:
+            matches = [academic[0]]
+
+        scraper = await self._scraper_client(user_id)
+        try:
+            probed = []
+            for s in matches:
+                items = await scraper.walk_materials(s.id)
+                probed.append({
+                    "section": {"id": s.id, "name": s.display_name},
+                    "items": [
+                        {"name": i.name, "type": i.material_type or None,
+                         "folder": i.folder_path or None, "href": i.href}
+                        for i in items
+                    ],
                 })
             return {"probed": probed}
         finally:
@@ -754,6 +808,17 @@ class SchoologyProvider(IntegrationProvider):
                 m=m, google_token=google_token, report=report,
             )
 
+        # A district that blocks the Courses realm for the student's API key
+        # returns a clean, valid, *empty* list here — identical to "this
+        # course really has no materials" from the caller's side. Only fall
+        # back to the login-scraper path when the API came back empty, so a
+        # working API stays the source of truth and materials never get
+        # double-imported through both paths.
+        if not materials:
+            await self._sync_scraped_materials(
+                user_id=user_id, course_id=course_id, section=section, report=report,
+            )
+
     async def _import_assignment(
         self, *, client: SchoologyClient, user_id: str, course_id: str,
         section: SchoologySection, a: SchoologyAssignment, monday: date, sunday: date,
@@ -837,3 +902,70 @@ class SchoologyProvider(IntegrationProvider):
                 owner_external_id=owner_external_id, attachments=attachments,
                 google_token=google_token, report=report,
             )
+
+    # ---- material ingestion: login-scraper fallback ----
+    async def _sync_scraped_materials(
+        self, *, user_id: str, course_id: str, section: SchoologySection, report: dict[str, Any],
+    ) -> None:
+        """Materials via the login-scraper session (`schoology_scraper.py`) —
+        only reached when the API materials walk came back empty (see the
+        call site in `_sync_section`). Dedupes per course by item name, not a
+        stable Schoology id: the scraped HTML doesn't expose one for a bare
+        item, so `SchoologyScraperClient.walk_materials` is handed every name
+        already recorded for this course and only returns what's new — a
+        rescan that finds "a" and "b" where a prior scan already recorded "a"
+        only needs to add "b" (per `walk_materials`'s `known_names`)."""
+        try:
+            scraper = await self._scraper_client(user_id)
+        except RuntimeError as e:
+            if "isn't connected yet" in str(e):
+                return  # materials-scraper login not set up — nothing to fall back to
+            report["errors"].append(f"{section.display_name} materials (scrape login): {e}")
+            return
+
+        try:
+            existing = await supabase.select(
+                "documents", columns="metadata",
+                filters={"user_id": eq(user_id), "course_id": eq(course_id),
+                         "external_source": eq(self.name)},
+            ) or []
+            known_names = {
+                str((row.get("metadata") or {}).get("material_name") or "").strip().lower()
+                for row in existing
+            } - {""}
+
+            items = await scraper.walk_materials(section.id, known_names=known_names)
+            for item in items:
+                await self._ingest_scraped_material(
+                    user_id=user_id, course_id=course_id, section=section,
+                    item=item, report=report,
+                )
+        except SchoologyScraperAuthError as e:
+            report["errors"].append(f"{section.display_name} materials (scrape login): {e}")
+        except Exception as e:  # noqa: BLE001
+            report["errors"].append(f"{section.display_name} materials (scrape): {e}")
+        finally:
+            await scraper.aclose()
+
+    async def _ingest_scraped_material(
+        self, *, user_id: str, course_id: str, section: SchoologySection,
+        item: MaterialLink, report: dict[str, Any],
+    ) -> None:
+        """Record one new scraped item as searchable knowledge. Unlike the API
+        path, there's no confirmed way yet to download a scraped item's
+        actual file bytes (that needs a real leaf-item page's HTML, not yet
+        seen) — the name, folder, and the item's own Schoology link are
+        recorded so it's findable and not silently dropped, the same
+        graceful fallback `_ingest_link` already uses for a link it can't
+        download."""
+        title = f"{item.folder_path + ' · ' if item.folder_path else ''}{item.name}"
+        external_id = f"scrape:{section.id}:{_normalize_name(item.name)}"
+        if await self._ingest_text(
+            user_id=user_id, course_id=course_id, external_id=external_id,
+            title=title, text=f"{title}\n{item.href}", doc_type="other",
+            extra_meta={
+                "material_name": item.name, "folder": item.folder_path or None,
+                "material_type": item.material_type or None, "source_url": item.href,
+            },
+        ):
+            report["documents"] += 1

@@ -407,7 +407,8 @@ def test_debug_fetch_returns_raw_responses_for_first_academic_section(fake_db, m
     events/folder) returns 200 with an empty collection — the classic
     signature of a district-restricted student API key that can list
     sections but isn't granted content read access. debug_fetch must surface
-    the raw response verbatim so that's diagnosable without server logs."""
+    the raw response verbatim so that's diagnosable without server logs.
+    With no query, it probes just the first academic section found."""
     provider = SchoologyProvider()
 
     async def _fake_load(self, user_id):
@@ -421,10 +422,46 @@ def test_debug_fetch_returns_raw_responses_for_first_academic_section(fake_db, m
 
     result = asyncio.run(provider.debug_fetch(USER_ID))
 
-    assert result["probed_section"] == {"id": SECTION_ID, "name": "AP Biology"}
-    assert result["raw_assignments"] == ASSIGNMENTS
-    assert result["raw_events"] == EVENTS
-    assert result["raw_folder_root"] == FOLDER_ROOT
+    assert len(result["probed"]) == 1
+    probed = result["probed"][0]
+    assert probed["section"] == {"id": SECTION_ID, "name": "AP Biology"}
+    assert probed["raw_assignments"] == ASSIGNMENTS
+    assert probed["raw_events"] == EVENTS
+    assert probed["raw_folder_root"] == FOLDER_ROOT
+
+
+def test_debug_fetch_query_narrows_by_case_insensitive_name_match(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    async def _fake_client(self, integration):
+        return _mock_client()
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+
+    result = asyncio.run(provider.debug_fetch(USER_ID, query="biology"))
+    assert len(result["probed"]) == 1
+    assert result["probed"][0]["section"]["name"] == "AP Biology"
+
+
+def test_debug_fetch_query_with_no_match_lists_available_sections(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    async def _fake_client(self, integration):
+        return _mock_client()
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+
+    result = asyncio.run(provider.debug_fetch(USER_ID, query="Chemistry"))
+    assert "probed" not in result
+    assert result["available_sections"] == ["AP Biology"]
 
 
 def test_sync_is_idempotent(fake_db, monkeypatch):

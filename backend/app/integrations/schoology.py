@@ -121,19 +121,27 @@ class SchoologyProvider(IntegrationProvider):
         finally:
             await client.aclose()
 
-    async def debug_fetch(self, user_id: str) -> dict[str, Any]:
-        """Fetch one connected academic section's raw assignments/events/
-        folder-root response from Schoology, verbatim — a self-serve way to
-        see exactly what the API key can and can't see. Some districts issue
-        student API keys that can list sections (roster-level access) but are
-        denied read access to assignments/materials content; that shows up as
-        every content endpoint returning `200 OK` with an empty collection,
-        with no error anywhere for a sync to report. This surfaces the raw
-        response so that's confirmable without server log access — if
-        `raw_assignments`/`raw_events`/`raw_folder_root` come back essentially
-        empty here even though the section clearly has content when browsing
-        schoology.com directly, that's a district-side API permission the
-        student needs their Schoology admin to grant, not an Atlas bug."""
+    async def debug_fetch(self, user_id: str, query: str | None = None) -> dict[str, Any]:
+        """Fetch one or more connected academic sections' raw assignments/
+        events/folder-root responses from Schoology, verbatim — a self-serve
+        way to see exactly what the API key can and can't see. Some districts
+        issue student API keys that can list sections (roster-level access)
+        but are denied read access to assignments/materials content; that
+        shows up as every content endpoint returning `200 OK` with an empty
+        collection, with no error anywhere for a sync to report. This
+        surfaces the raw response so that's confirmable without server log
+        access — if `raw_assignments`/`raw_events`/`raw_folder_root` come back
+        essentially empty here even though the section clearly has content
+        when browsing schoology.com directly, that's a district-side API
+        permission the student needs their Schoology admin to grant, not an
+        Atlas bug.
+
+        `query` narrows which section(s) to probe by a case-insensitive
+        substring of the display name (e.g. "AP Physics") — every matching
+        section is probed (a class split into a main + prep-lab section both
+        match), since which one is "the" section isn't always obvious from
+        outside Schoology. With no query, probes just the first academic
+        section found, matching the original single-section behavior."""
         integration = await self._load_integration(user_id)
         client = await self._client(integration)
         try:
@@ -146,16 +154,29 @@ class SchoologyProvider(IntegrationProvider):
             ]
             if not academic:
                 return {"sections_found": len(sections), "note": "No academic sections to probe."}
-            s = academic[0]
-            raw_assignments = await client.get_raw(f"/sections/{s.id}/assignments?with_attachments=1&limit=200")
-            raw_events = await client.get_raw(f"/sections/{s.id}/events?limit=200")
-            raw_folder_root = await client.get_raw(f"/sections/{s.id}/folder/0")
-            return {
-                "probed_section": {"id": s.id, "name": s.display_name},
-                "raw_assignments": raw_assignments,
-                "raw_events": raw_events,
-                "raw_folder_root": raw_folder_root,
-            }
+
+            if query:
+                q = query.strip().lower()
+                matches = [s for s in academic if q in s.display_name.lower()]
+                if not matches:
+                    return {
+                        "note": f"No section matched {query!r}.",
+                        "available_sections": [s.display_name for s in academic],
+                    }
+            else:
+                matches = [academic[0]]
+
+            probed = []
+            for s in matches:
+                probed.append({
+                    "section": {"id": s.id, "name": s.display_name},
+                    "raw_assignments": await client.get_raw(
+                        f"/sections/{s.id}/assignments?with_attachments=1&limit=200"
+                    ),
+                    "raw_events": await client.get_raw(f"/sections/{s.id}/events?limit=200"),
+                    "raw_folder_root": await client.get_raw(f"/sections/{s.id}/folder/0"),
+                })
+            return {"probed": probed}
         finally:
             await client.aclose()
 

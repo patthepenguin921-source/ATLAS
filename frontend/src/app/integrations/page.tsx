@@ -53,12 +53,17 @@ interface DebugScrapeResult {
   sample_row_html: string[];
 }
 
-interface SchoologyDebugResult {
-  probed_section?: { id: string; name: string };
+interface SchoologyProbedSection {
+  section: { id: string; name: string };
   raw_assignments?: unknown;
   raw_events?: unknown;
   raw_folder_root?: unknown;
+}
+
+interface SchoologyDebugResult {
+  probed?: SchoologyProbedSection[];
   sections_found?: number;
+  available_sections?: string[];
   note?: string;
 }
 
@@ -88,6 +93,7 @@ export default function IntegrationsPage() {
   const [schoologyDebugging, setSchoologyDebugging] = useState(false);
   const [schoologyDebugResult, setSchoologyDebugResult] = useState<SchoologyDebugResult | null>(null);
   const [schoologyDebugError, setSchoologyDebugError] = useState<string | null>(null);
+  const [schoologyDebugQuery, setSchoologyDebugQuery] = useState("");
 
   // Schoology (API key / OAuth 1.0a) connect state
   const [schoologyOpen, setSchoologyOpen] = useState(false);
@@ -254,7 +260,11 @@ export default function IntegrationsPage() {
     setSchoologyDebugError(null);
     setSchoologyDebugResult(null);
     try {
-      const result = await apiGet<SchoologyDebugResult>("/integrations/schoology/debug-fetch");
+      const q = schoologyDebugQuery.trim();
+      const path = q
+        ? `/integrations/schoology/debug-fetch?q=${encodeURIComponent(q)}`
+        : "/integrations/schoology/debug-fetch";
+      const result = await apiGet<SchoologyDebugResult>(path);
       setSchoologyDebugResult(result);
     } catch (err: any) {
       setSchoologyDebugError(err.message ?? "Could not fetch from Schoology.");
@@ -424,6 +434,13 @@ export default function IntegrationsPage() {
                     >
                       {syncingProvider === "schoology" ? "Syncing…" : "Sync now"}
                     </button>
+                    <input
+                      className="input w-32 text-xs"
+                      placeholder="AP Physics…"
+                      value={schoologyDebugQuery}
+                      onChange={(e) => setSchoologyDebugQuery(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && debugFetchSchoology()}
+                    />
                     <button className="btn-ghost" disabled={schoologyDebugging} onClick={debugFetchSchoology}>
                       {schoologyDebugging ? "Fetching…" : "Debug fetch"}
                     </button>
@@ -447,27 +464,35 @@ export default function IntegrationsPage() {
             <div className="card mt-4 text-sm text-atlas-bad">{schoologyDebugError}</div>
           )}
           {schoologyDebugResult && (
-            <div className="card mt-4 text-xs space-y-1.5">
-              <div className="font-medium text-sm mb-1">Raw Schoology response (one course)</div>
+            <div className="card mt-4 text-xs space-y-3">
+              <div className="font-medium text-sm">Raw Schoology response</div>
               {schoologyDebugResult.note ? (
-                <div className="text-atlas-muted">{schoologyDebugResult.note}</div>
+                <div className="text-atlas-muted">
+                  {schoologyDebugResult.note}
+                  {schoologyDebugResult.available_sections && schoologyDebugResult.available_sections.length > 0 && (
+                    <>
+                      {" "}Try one of: {schoologyDebugResult.available_sections.join(", ")}
+                    </>
+                  )}
+                </div>
               ) : (
                 <>
-                  <div>
-                    <span className="text-atlas-muted">Probed: </span>
-                    {schoologyDebugResult.probed_section?.name} ({schoologyDebugResult.probed_section?.id})
-                  </div>
                   <div className="text-atlas-muted">
                     If these come back empty even though this course clearly has content when you browse
                     schoology.com yourself, your district hasn&apos;t granted this API key read access to
                     assignments/materials — ask your school&apos;s Schoology admin to enable that for your key.
                   </div>
-                  {(["raw_assignments", "raw_events", "raw_folder_root"] as const).map((key) => (
-                    <div key={key}>
-                      <div className="text-atlas-muted">{key}:</div>
-                      <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-60 overflow-auto">
-                        {JSON.stringify(schoologyDebugResult[key], null, 2)}
-                      </pre>
+                  {schoologyDebugResult.probed?.map((p) => (
+                    <div key={p.section.id} className="space-y-1.5 border-t border-atlas-border pt-3 first:border-0 first:pt-0">
+                      <div className="font-medium">{p.section.name} ({p.section.id})</div>
+                      {(["raw_assignments", "raw_events", "raw_folder_root"] as const).map((key) => (
+                        <div key={key}>
+                          <div className="text-atlas-muted">{key}:</div>
+                          <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-60 overflow-auto">
+                            {JSON.stringify(p[key], null, 2)}
+                          </pre>
+                        </div>
+                      ))}
                     </div>
                   ))}
                 </>

@@ -368,7 +368,7 @@ class SchoologyProvider(IntegrationProvider):
         `schoology_scraper.parse_materials_page`'s classification be
         confirmed against a real account before `sync()` is trusted to rely
         on it (see `_sync_scraped_materials`)."""
-        sections, _uid, early = await self._probe_sections(user_id, query)
+        sections, uid, early = await self._probe_sections(user_id, query)
         if early is not None:
             return early
 
@@ -376,7 +376,7 @@ class SchoologyProvider(IntegrationProvider):
         try:
             probed = []
             for s in sections:
-                items = await scraper.walk_materials(s["id"])
+                items = await scraper.walk_materials(s["id"], student_uid=uid)
                 probed.append({
                     "section": {"id": s["id"], "name": s["name"]},
                     "items": [
@@ -736,7 +736,7 @@ class SchoologyProvider(IntegrationProvider):
         # for whatever courses a *previous* API-connected sync already
         # linked, instead of syncing nothing at all.
         if not self._has_api_key(integration):
-            await self._sync_materials_only(user_id, report)
+            await self._sync_materials_only(user_id, integration, report)
             return report
 
         config = integration.get("config") or {}
@@ -787,19 +787,27 @@ class SchoologyProvider(IntegrationProvider):
 
                 await self._sync_section(
                     client=client, user_id=user_id, course_id=course_id, section=section,
-                    monday=monday, sunday=sunday, google_token=google_token, report=report,
+                    monday=monday, sunday=sunday, google_token=google_token,
+                    student_uid=uid, report=report,
                 )
 
             return report
         finally:
             await client.aclose()
 
-    async def _sync_materials_only(self, user_id: str, report: dict[str, Any]) -> None:
+    async def _sync_materials_only(self, user_id: str, integration: dict[str, Any], report: dict[str, Any]) -> None:
         """No API key on file — refresh materials via the login-scraper
         session for whatever courses Atlas already knows a Schoology section
         id for (`metadata.schoology_section_id`, set the first time a course
         was synced with an API key). New courses can't be discovered this
-        way — that needs the API (`sync`'s normal path) at least once."""
+        way — that needs the API (`sync`'s normal path) at least once. There's
+        also no `student_uid` available here (that comes from the API), so
+        the app.schoology.com parent-preview fallback in `walk_materials`
+        never engages for a fully login-only account — a currently
+        unavoidable gap, same category as not being able to discover new
+        courses without the API."""
+        config = integration.get("config") or {}
+        google_token = config.get("google_access_token")
         rows = await supabase.select(
             "courses", columns="id,name,metadata", filters={"user_id": eq(user_id)},
         ) or []
@@ -822,14 +830,15 @@ class SchoologyProvider(IntegrationProvider):
                 start_time="", end_time="", location="", active=True,
             )
             await self._sync_scraped_materials(
-                user_id=user_id, course_id=course_id, section=section, report=report,
+                user_id=user_id, course_id=course_id, section=section,
+                report=report, google_token=google_token,
             )
             report["courses"] += 1
 
     async def _sync_section(
         self, *, client: SchoologyClient, user_id: str, course_id: str,
         section: SchoologySection, monday: date, sunday: date,
-        google_token: str | None, report: dict[str, Any],
+        google_token: str | None, student_uid: str | None = None, report: dict[str, Any],
     ) -> None:
         sid = section.id
 
@@ -878,6 +887,7 @@ class SchoologyProvider(IntegrationProvider):
         #    where the API is the only way to reach materials.
         await self._sync_scraped_materials(
             user_id=user_id, course_id=course_id, section=section, report=report,
+            google_token=google_token, student_uid=student_uid,
         )
 
     async def _import_assignment(
@@ -922,7 +932,8 @@ class SchoologyProvider(IntegrationProvider):
 
     # ---- material ingestion: always via the login-scraper session ----
     async def _sync_scraped_materials(
-        self, *, user_id: str, course_id: str, section: SchoologySection, report: dict[str, Any],
+        self, *, user_id: str, course_id: str, section: SchoologySection,
+        report: dict[str, Any], google_token: str | None = None, student_uid: str | None = None,
     ) -> None:
         """Materials via the login-scraper session (`schoology_scraper.py`) —
         the only materials path now (see the call site in `_sync_section`;
@@ -934,7 +945,10 @@ class SchoologyProvider(IntegrationProvider):
         walk_materials` is handed every name already recorded for this
         course and only returns what's new — a rescan that finds "a" and "b"
         where a prior scan already recorded "a" only needs to add "b" (per
-        `walk_materials`'s `known_names`)."""
+        `walk_materials`'s `known_names`). `student_uid`, when known, also
+        walks the app.schoology.com parent-preview URL — a parent account's
+        real materials can live only there, not the district subdomain (see
+        `walk_materials`'s docstring)."""
         try:
             scraper = await self._scraper_client(user_id)
         except RuntimeError as e:
@@ -954,11 +968,13 @@ class SchoologyProvider(IntegrationProvider):
                 for row in existing
             } - {""}
 
-            items = await scraper.walk_materials(section.id, known_names=known_names)
+            items = await scraper.walk_materials(
+                section.id, known_names=known_names, student_uid=student_uid,
+            )
             for item in items:
                 await self._ingest_scraped_material(
                     user_id=user_id, course_id=course_id, section=section,
-                    item=item, report=report,
+                    item=item, scraper=scraper, google_token=google_token, report=report,
                 )
         except SchoologyScraperAuthError as e:
             report["errors"].append(f"{section.display_name} materials (scrape login): {e}")
@@ -967,25 +983,93 @@ class SchoologyProvider(IntegrationProvider):
         finally:
             await scraper.aclose()
 
+    # Schoology's own accessibility-text type prefixes that mean "this
+    # item's href is (probably) a direct file download" — see
+    # schoology_scraper.py's `_KNOWN_TYPE_PREFIXES`. Unconfirmed against a
+    # real non-folder item yet, so `download_file`'s content-type check is
+    # the real guard: if the href actually leads to an HTML detail page
+    # instead, `_ingest_scraped_material` falls back to a reference rather
+    # than trusting this label blindly.
+    _SCRAPED_FILE_TYPES = frozenset({"file", "document"})
+
     async def _ingest_scraped_material(
         self, *, user_id: str, course_id: str, section: SchoologySection,
-        item: MaterialLink, report: dict[str, Any],
+        item: MaterialLink, scraper: SchoologyScraperClient,
+        google_token: str | None, report: dict[str, Any],
     ) -> None:
-        """Record one new scraped item as searchable knowledge. Unlike the API
-        path, there's no confirmed way yet to download a scraped item's
-        actual file bytes (that needs a real leaf-item page's HTML, not yet
-        seen) — the name, folder, and the item's own Schoology link are
-        recorded so it's findable and not silently dropped, the same
-        graceful fallback `_ingest_link` already uses for a link it can't
-        download."""
+        """Download and record one new scraped item as real, searchable
+        content — not just a link reference:
+          - A Google Drive/Docs/Slides/Sheets link is downloaded through the
+            existing Google Drive path (same as the API path's
+            `_ingest_link`) when a Google token is available; without one
+            it's recorded as a reference and flagged for auth, same
+            fallback.
+          - Anything Schoology itself labeled a "File"/"Document" (see
+            `MaterialLink.material_type`) is fetched through the
+            authenticated scraper session and ingested like any other
+            document. If that GET actually returns an HTML page instead of
+            a real file — the href led to an intermediate detail page, not
+            a direct download — it falls back to a reference rather than
+            ingesting the raw HTML or silently dropping the item.
+          - Everything else (a Schoology page/discussion, a plain external
+            link) is recorded as a searchable reference.
+        `material_name` is always set in metadata, whichever branch is
+        taken — `_sync_scraped_materials` reads it back to build the
+        already-known set for the next scan's dedupe."""
         title = f"{item.folder_path + ' · ' if item.folder_path else ''}{item.name}"
         external_id = f"scrape:{section.id}:{_normalize_name(item.name)}"
+        base_meta = {
+            "material_name": item.name, "folder": item.folder_path or None,
+            "material_type": item.material_type or None, "source_url": item.href,
+        }
+
+        if is_google_url(item.href):
+            ref = parse_google_url(item.href)
+            if ref and google_token:
+                try:
+                    content, filename, content_type = await download_google_file(
+                        ref, google_token, name=title,
+                    )
+                    if await self._ingest_file(
+                        user_id=user_id, course_id=course_id, external_id=external_id,
+                        title=title, content=content, filename=filename,
+                        content_type=content_type, doc_type="other",
+                        extra_meta={**base_meta, "google_file_id": ref.file_id},
+                    ):
+                        report["documents"] += 1
+                    return
+                except Exception as e:  # noqa: BLE001
+                    report["errors"].append(f"{section.display_name} · {item.name}: {e}")
+                    # fall through to storing the link below
+            elif ref:
+                if await self._ingest_text(
+                    user_id=user_id, course_id=course_id, external_id=external_id,
+                    title=title, text=f"{title}\n{item.href}", doc_type="other",
+                    extra_meta={**base_meta, "needs_google_auth": True},
+                ):
+                    report["documents"] += 1
+                return
+
+        elif (item.material_type or "").lower() in self._SCRAPED_FILE_TYPES:
+            try:
+                downloaded = await scraper.download_file(item.href)
+            except Exception as e:  # noqa: BLE001
+                downloaded = None
+                report["errors"].append(f"{section.display_name} · {item.name}: {e}")
+            if downloaded:
+                content, content_type = downloaded
+                if await self._ingest_file(
+                    user_id=user_id, course_id=course_id, external_id=external_id,
+                    title=title, content=content, filename=item.name,
+                    content_type=content_type, doc_type="other", extra_meta=base_meta,
+                ):
+                    report["documents"] += 1
+                return
+            # Not actually a direct file (or the download failed) — fall
+            # through to a plain reference below instead of dropping it.
+
         if await self._ingest_text(
             user_id=user_id, course_id=course_id, external_id=external_id,
-            title=title, text=f"{title}\n{item.href}", doc_type="other",
-            extra_meta={
-                "material_name": item.name, "folder": item.folder_path or None,
-                "material_type": item.material_type or None, "source_url": item.href,
-            },
+            title=title, text=f"{title}\n{item.href}", doc_type="other", extra_meta=base_meta,
         ):
             report["documents"] += 1

@@ -203,7 +203,11 @@ async def connect_schoology(
     if not body.username.strip() or not body.password:
         raise HTTPException(400, "Username and password are required.")
 
-    config: dict[str, Any] = {"auth_mode": "scraper", "domain": domain}
+    # Username isn't actually secret (usually just an email) — kept in
+    # `config` too, not just inside the encrypted `secret_ref`, so the
+    # connect form can show what's already saved instead of forcing a blank
+    # re-entry of everything on every edit.
+    config: dict[str, Any] = {"auth_mode": "scraper", "domain": domain, "username": body.username.strip()}
     secret_ref = merge_scraper_credentials("", body.username.strip(), body.password)
 
     if body.consumer_key and body.consumer_secret:

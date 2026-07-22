@@ -342,6 +342,7 @@ class SchoologyScraperClient:
 
     async def walk_materials(
         self, section_id: str, *, known_names: set[str] | None = None,
+        student_uid: str | None = None,
     ) -> list[MaterialLink]:
         """Depth-first walk of a section's materials page and every folder
         inside it, returning only real, new leaf items — folders are never
@@ -352,6 +353,17 @@ class SchoologyScraperClient:
         pulled for this course on a previous scan; anything matching is
         skipped, so a re-scan only returns what's actually new. Pass
         `None`/empty on a first scan (or to force a full re-pull).
+
+        `student_uid` additionally walks the app.schoology.com parent-preview
+        URL (`/course/{id}/preview/{student_uid}/parent`) — a parent
+        account's real materials often live there instead of the district
+        subdomain's own `/materials` page (confirmed against a real account;
+        see `debug_materials_page`'s docstring — the district URL alone can
+        come back with nothing to walk for a parent account, which looked
+        exactly like "no materials" rather than "wrong URL"). Pass it
+        whenever it's known (e.g. from `SchoologyClient.current_user_id()`).
+        A failed app-domain login there is swallowed — whatever the district
+        walk already found still stands.
 
         Items are matched by name rather than a stable Schoology id — the
         scraped HTML doesn't expose one for a bare item the way the API's
@@ -364,9 +376,9 @@ class SchoologyScraperClient:
         if not self._logged_in:
             await self.login()
         known = {n.strip().lower() for n in (known_names or set()) if n and n.strip()}
-        base_url = f"{self._base}/course/{section_id}/materials"
 
         found: list[MaterialLink] = []
+        seen_names: set[str] = set()
         visited: set[str] = set()
 
         async def _walk(url: str, folder_path: str, depth: int) -> None:
@@ -385,12 +397,41 @@ class SchoologyScraperClient:
                     child_path = f"{folder_path}/{link.name}" if folder_path else link.name
                     await _walk(resolved_href, child_path, depth + 1)
                     continue
-                if link.name.strip().lower() in known:
+                name_key = link.name.strip().lower()
+                if name_key in known or name_key in seen_names:
                     continue
+                seen_names.add(name_key)
                 found.append(MaterialLink(
                     name=link.name, href=resolved_href, kind=link.kind,
                     material_type=link.material_type, folder_path=folder_path,
                 ))
 
-        await _walk(base_url, "", 0)
+        await _walk(f"{self._base}/course/{section_id}/materials", "", 0)
+
+        if student_uid:
+            try:
+                await self._login_app_domain()
+                await _walk(
+                    f"{_APP_DOMAIN}/course/{section_id}/preview/{student_uid}/parent", "", 0,
+                )
+            except SchoologyScraperAuthError:
+                pass  # district-subdomain results (if any) still stand
+
         return found
+
+    async def download_file(self, url: str) -> tuple[bytes, str] | None:
+        """Fetch a materials-page item's href (already an absolute URL —
+        `walk_materials` resolves relative ones) through the authenticated
+        session, and return `(content, content_type)` if the response is an
+        actual file — not `text/html`, which means the href led to an
+        intermediate detail page rather than a direct download. Returns
+        `None` in that case so the caller can fall back to recording a
+        reference instead of ingesting a raw HTML page as if it were a
+        document."""
+        if not self._logged_in:
+            await self.login()
+        r = await self._client.get(url)
+        content_type = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if not content_type or content_type == "text/html":
+            return None
+        return r.content, content_type

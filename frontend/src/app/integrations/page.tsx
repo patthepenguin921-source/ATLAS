@@ -12,7 +12,7 @@ interface Integration {
   last_synced_at?: string | null;
   last_error?: string | null;
   enabled: boolean;
-  config?: { auth_mode?: "password" | "cookie" };
+  config?: { auth_mode?: "password" | "cookie"; domain?: string; username?: string };
 }
 
 interface SyncResult {
@@ -137,7 +137,17 @@ export default function IntegrationsPage() {
   }
 
   function openSchoologyModal() {
-    setSchoologyForm({ domain: "", username: "", password: "", consumer_key: "", consumer_secret: "" });
+    // Domain and username aren't secret (an email is fine to show back) and
+    // the backend now returns them in `config`, so editing starts from what's
+    // actually saved instead of a blank slate — only password/API-key secret
+    // stay blank (never sent back from the backend, only encrypted at rest).
+    setSchoologyForm({
+      domain: schoology?.config?.domain ?? "",
+      username: schoology?.config?.username ?? "",
+      password: "",
+      consumer_key: "",
+      consumer_secret: "",
+    });
     setShowApiKeyAdvanced(false);
     setVerifyResult(null);
     setVerifyError(null);

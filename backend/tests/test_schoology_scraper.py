@@ -455,3 +455,152 @@ def test_walk_materials_skips_already_known_names_on_a_rescan():
             await client.aclose()
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# walk_materials(student_uid=...) — a parent account's real materials can
+# live only on the app.schoology.com preview URL, not the district
+# subdomain (see debug_materials_page's docstring); student_uid must make
+# walk_materials check both, merging whatever each one finds.
+# ---------------------------------------------------------------------------
+APP_PREVIEW_MATERIALS_PAGE = """
+<html><body>
+<a href="/materials/link/900">Link. Extra Credit Article</a>
+</body></html>
+"""
+
+
+def _walk_handler_with_app_domain(request: httpx.Request) -> httpx.Response:
+    if request.url.host == "app.schoology.com":
+        if request.url.path == "/login" and request.method == "GET":
+            return httpx.Response(200, text=APP_LOGIN_PAGE)
+        if request.url.path == "/login" and request.method == "POST":
+            return httpx.Response(200, text=APP_DASHBOARD_PAGE)
+        if request.url.path == "/course/8435659601/preview/23381548/parent":
+            return httpx.Response(200, text=APP_PREVIEW_MATERIALS_PAGE)
+        return httpx.Response(404, text="not found")
+    return _walk_handler(request)
+
+
+def test_walk_materials_with_student_uid_also_walks_app_domain_preview():
+    async def run():
+        transport = httpx.MockTransport(_walk_handler_with_app_domain)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            items = await client.walk_materials("8435659601", student_uid="23381548")
+            names = {i.name for i in items}
+            # Both the district subdomain's own materials and the app-domain
+            # preview's materials show up, merged into one result.
+            assert "Syllabus.pdf" in names
+            assert "Extra Credit Article" in names
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_walk_materials_without_student_uid_never_touches_app_domain():
+    async def run():
+        calls = {"app_domain_hit": False}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "app.schoology.com":
+                calls["app_domain_hit"] = True
+                return httpx.Response(404)
+            return _walk_handler(request)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            await client.walk_materials("8435659601")
+            assert calls["app_domain_hit"] is False
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_walk_materials_with_student_uid_survives_app_domain_login_failure():
+    """The district-subdomain results must still stand even if the
+    app-domain login fails for some reason (e.g. the account only exists on
+    one of the two)."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "app.schoology.com":
+                if request.url.path == "/login" and request.method == "GET":
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)
+                if request.url.path == "/login" and request.method == "POST":
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)  # always "fails"
+                return httpx.Response(404)
+            return _walk_handler(request)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            items = await client.walk_materials("8435659601", student_uid="23381548")
+            assert {i.name for i in items} == {"Syllabus.pdf", "Extra Resource"}
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# download_file — the download must confirm the response is an actual file
+# (by content-type) rather than trusting Schoology's own "File." label,
+# since an unconfirmed href could just as easily lead to an intermediate
+# HTML detail page instead of a direct download.
+# ---------------------------------------------------------------------------
+def test_download_file_returns_content_for_a_real_file():
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/attachment/download/1":
+                return httpx.Response(
+                    200, content=b"%PDF-1.4 fake bytes", headers={"content-type": "application/pdf"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.download_file(f"{BASE_URL}/attachment/download/1")
+            assert result is not None
+            content, content_type = result
+            assert content == b"%PDF-1.4 fake bytes"
+            assert content_type == "application/pdf"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_download_file_returns_none_for_an_html_detail_page():
+    """A href labeled "File." by Schoology but that actually leads to an
+    intermediate HTML detail page (not a direct download) must not be
+    mistaken for the document itself."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/materials/file-detail/1":
+                return httpx.Response(
+                    200, text="<html><body>Some detail page</body></html>",
+                    headers={"content-type": "text/html; charset=utf-8"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.download_file(f"{BASE_URL}/materials/file-detail/1")
+            assert result is None
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())

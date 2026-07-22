@@ -759,15 +759,25 @@ class _FakeScraperClient:
     in test_schoology_scraper.py; this only exercises how the provider wires
     its result into `documents`."""
 
-    def __init__(self, items: list[MaterialLink]):
+    def __init__(self, items: list[MaterialLink], *, files: dict[str, tuple[bytes, str]] | None = None):
         self._items = items
+        self._files = files or {}
         self.known_names_calls: list[set[str] | None] = []
+        self.student_uid_calls: list[str | None] = []
         self.closed = False
 
-    async def walk_materials(self, section_id, *, known_names=None):
+    async def walk_materials(self, section_id, *, known_names=None, student_uid=None):
         self.known_names_calls.append(known_names)
+        self.student_uid_calls.append(student_uid)
         known = {n.strip().lower() for n in (known_names or set())}
         return [i for i in self._items if i.name.strip().lower() not in known]
+
+    async def download_file(self, url):
+        """Mirrors the real client: None means "not actually a direct file"
+        (e.g. an HTML detail page) — the default here, so a test only needs
+        to populate `files` for the specific hrefs it wants treated as a
+        real downloadable file."""
+        return self._files.get(url)
 
     async def aclose(self):
         self.closed = True
@@ -801,6 +811,98 @@ def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypa
     assert by_name["Syllabus.pdf"]["metadata"]["folder"] == "Unit 1"
     assert by_name["Syllabus.pdf"]["metadata"]["material_type"] == "File"
     assert by_name["Syllabus.pdf"]["metadata"]["source_url"] == "/attachment/download/1"
+    # "Notes" isn't labeled File/Document, so no download was attempted for
+    # it — it's a plain reference either way.
+    assert by_name["Notes"].get("mime_type") is None
+
+
+def test_sync_scraped_materials_downloads_real_files(fake_db, monkeypatch):
+    """A "File."-labeled item whose href actually resolves to a real file —
+    confirmed by content-type, not just trusting Schoology's own label — is
+    downloaded through the scraper session and ingested as a real document,
+    not just a link stub."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                       kind="item", material_type="File", folder_path="Unit 1")],
+        files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+    ))
+
+    assert report["documents"] == 1
+    assert report["errors"] == []
+    doc = fake_db.tables["documents"][0]
+    assert doc["mime_type"] == "application/pdf"
+    assert doc["size_bytes"] == len(b"%PDF-1.4 fake pdf bytes")
+    assert doc["metadata"]["material_name"] == "Syllabus.pdf"
+
+
+def test_sync_scraped_materials_downloads_google_links_with_token(fake_db, monkeypatch):
+    """A "Link."-labeled item pointing at Google Drive/Docs/Slides is routed
+    through the existing Google download path, same as the API path."""
+    import app.integrations.schoology as schoology_module
+
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Slides", href="https://docs.google.com/presentation/d/ABC123/edit",
+                     kind="item", material_type="Link", folder_path="Unit 1"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    async def _fake_download_google_file(ref, token, name=None):
+        assert token == "tok123"
+        return (
+            b"fake slides bytes", "Slides.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+    monkeypatch.setattr(schoology_module, "download_google_file", _fake_download_google_file)
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        report=report, google_token="tok123",
+    ))
+
+    assert report["documents"] == 1
+    doc = fake_db.tables["documents"][0]
+    assert doc["metadata"]["google_file_id"] == "ABC123"
+    assert doc["metadata"]["material_name"] == "Slides"
+
+
+def test_sync_scraped_materials_google_link_without_token_is_flagged(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Slides", href="https://docs.google.com/presentation/d/ABC123/edit",
+                     kind="item", material_type="Link", folder_path="Unit 1"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+    ))
+
+    assert report["documents"] == 1
+    doc = fake_db.tables["documents"][0]
+    assert doc["metadata"]["needs_google_auth"] is True
+    assert doc["metadata"]["material_name"] == "Slides"
 
 
 def test_sync_scraped_materials_rescan_only_adds_whats_new(fake_db, monkeypatch):

@@ -289,6 +289,33 @@ class SchoologyProvider(IntegrationProvider):
         there's nothing to probe or the query matched nothing, `early_result`
         is set and the other two should be ignored."""
         integration = await self._load_integration(user_id)
+
+        # Fast path: when the request is for (or defaults to) one of the
+        # confirmed-real courses, course_mapping.KNOWN_SECTIONS already has
+        # everything needed — id, name, and the exact materials_url — with
+        # no API call, DB lookup, or login-session discovery required to
+        # find it. Skipping straight to it also matters operationally: each
+        # of the discovery fallbacks below (`_scraper_client` calls
+        # `client.login()`, and `list_courses()` additionally logs into
+        # app.schoology.com) is a *separate* login POST to Schoology, so the
+        # slow path can rack up 3-4 logins in a single debug call. Enough
+        # repeated automated logins in a short window is exactly the kind of
+        # pattern that trips a site's own bot/abuse detection, which then
+        # serves a challenge page instead of the normal login form — that
+        # looks identical to "this district enforces SSO", even though
+        # nothing about the account or district actually changed.
+        known_matches = [
+            k for k in course_mapping.KNOWN_SECTIONS
+            if not query or query.strip().lower() in k["name"].lower()
+        ]
+        if known_matches:
+            sections = [
+                {"id": k["id"], "name": k["name"], "materials_url": k.get("materials_url")}
+                for k in known_matches
+            ]
+            uid = next((k["student_uid"] for k in known_matches if k.get("student_uid")), None)
+            return sections, uid, None
+
         uid: str | None = None
         sections: list[dict[str, str]] = []
         if self._has_api_key(integration):

@@ -1369,3 +1369,49 @@ def test_debug_walk_materials_hits_only_the_exact_known_url(fake_db, monkeypatch
         "https://app.schoology.com/course/known-1/preview/42/parent"
     )
     assert result["probed"][0]["items"][0]["name"] == "Notes"
+
+
+def test_debug_walk_materials_known_sections_skip_discovery_logins(fake_db, monkeypatch):
+    """When the request is (or defaults to) known courses,
+    `_probe_sections` must not spin up any extra scraper client/login just
+    to discover section ids or a student uid — course_mapping.KNOWN_SECTIONS
+    already has everything needed. Regression: each extra discovery login is
+    a real Schoology login POST, and several of them in a short window (the
+    old behavior could rack up 3-4 per debug click) is exactly the kind of
+    pattern that trips a site's own bot/abuse detection — which then serves
+    a challenge page instead of the login form, indistinguishable from "this
+    district enforces SSO" even though nothing about the account changed."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", (
+        {"id": "known-1", "name": "Known Course", "student_uid": None,
+         "materials_url": "https://app.schoology.com/course/known-1/materials"},
+    ))
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+    # An unrelated already-linked course with no persisted uid would
+    # previously have triggered an extra "discover the uid" scraper login
+    # before this ever got to walking anything.
+    fake_db.tables["courses"][0]["metadata"] = {"schoology_section_id": SECTION_ID}
+
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File"),
+    ])
+    scraper_client_calls = 0
+
+    async def _fake_scraper_client(self, user_id):
+        nonlocal scraper_client_calls
+        scraper_client_calls += 1
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    # Only the one scraper client used for the actual walk — no separate
+    # discovery/uid-lookup login beforehand.
+    assert scraper_client_calls == 1
+    assert result["probed"][0]["items"][0]["name"] == "Notes"

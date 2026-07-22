@@ -595,6 +595,45 @@ def test_walk_known_url_only_requests_the_given_url():
     asyncio.run(run())
 
 
+def test_walk_known_url_survives_app_domain_login_failure():
+    """A failed app.schoology.com login (e.g. it's temporarily serving a
+    challenge page instead of the login form) must not raise out of
+    `walk_known_url` — the caller's own district-subdomain login already
+    succeeded, so this should report an empty result via `trace`, the same
+    way `walk_materials`/`debug_materials_page` treat that failure as
+    non-fatal. Regression: this used to propagate and crash the entire
+    debug-walk-materials request for every course in the batch, not just
+    the one whose materials happen to live on the app domain."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "app.schoology.com":
+                if request.url.path == "/login" and request.method == "GET":
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)
+                if request.url.path == "/login" and request.method == "POST":
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)  # always "fails"
+                return httpx.Response(404)
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            trace: list[dict] = []
+            items = await client.walk_known_url(
+                "https://app.schoology.com/course/8435659601/preview/23381548/parent",
+                trace=trace,
+            )
+            assert items == []
+            assert trace and "error" in trace[0]
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_walk_materials_with_student_uid_survives_app_domain_login_failure():
     """The district-subdomain results must still stand even if the
     app-domain login fails for some reason (e.g. the account only exists on

@@ -1415,3 +1415,48 @@ def test_debug_walk_materials_known_sections_skip_discovery_logins(fake_db, monk
     # discovery/uid-lookup login beforehand.
     assert scraper_client_calls == 1
     assert result["probed"][0]["items"][0]["name"] == "Notes"
+
+
+def test_debug_walk_materials_one_course_failing_does_not_blank_the_others(fake_db, monkeypatch):
+    """One course's walk raising (a network blip, an app-domain login
+    failure, …) must not blank out every other course's real results —
+    regression for an unhandled exception in the per-course loop crashing
+    the whole debug-walk-materials request instead of just reporting that
+    one course's error and returning the rest."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", (
+        {"id": "known-1", "name": "Known Course One", "student_uid": None,
+         "materials_url": "https://app.schoology.com/course/known-1/materials"},
+        {"id": "known-2", "name": "Known Course Two", "student_uid": None,
+         "materials_url": "https://app.schoology.com/course/known-2/materials"},
+    ))
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+    fake_db.tables["courses"] = []
+
+    class _FlakyScraperClient(_FakeScraperClient):
+        async def walk_known_url(self, start_url, *, known_names=None, trace=None):
+            if "known-1" in start_url:
+                raise RuntimeError("connection reset")
+            return await super().walk_known_url(start_url, known_names=known_names, trace=trace)
+
+    scraper = _FlakyScraperClient([
+        MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    by_id = {p["section"]["id"]: p for p in result["probed"]}
+    assert by_id["known-1"]["error"] == "connection reset"
+    assert by_id["known-1"]["items"] == []
+    assert by_id["known-2"].get("error") is None
+    assert by_id["known-2"]["items"][0]["name"] == "Notes"

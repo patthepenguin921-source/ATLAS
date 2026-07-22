@@ -487,13 +487,24 @@ class SchoologyProvider(IntegrationProvider):
             for s in sections:
                 trace: list[dict[str, Any]] = []
                 materials_url = s.get("materials_url")
-                if materials_url:
-                    # A confirmed-real course (course_mapping.KNOWN_SECTIONS)
-                    # — walk exactly that URL and nothing else, instead of
-                    # guessing across every candidate shape.
-                    items = await scraper.walk_known_url(materials_url, trace=trace)
-                else:
-                    items = await scraper.walk_materials(s["id"], student_uid=uid, trace=trace)
+                error: str | None = None
+                try:
+                    if materials_url:
+                        # A confirmed-real course (course_mapping.
+                        # KNOWN_SECTIONS) — walk exactly that URL and
+                        # nothing else, instead of guessing across every
+                        # candidate shape.
+                        items = await scraper.walk_known_url(materials_url, trace=trace)
+                    else:
+                        items = await scraper.walk_materials(s["id"], student_uid=uid, trace=trace)
+                except Exception as e:  # noqa: BLE001
+                    # One course's walk failing (a network blip, an
+                    # unexpected page shape, …) must not blank out every
+                    # other course's real results — report the error for
+                    # just this one and keep going, the same resilience the
+                    # per-course sync loop already has.
+                    items = []
+                    error = str(e)
                 probed.append({
                     "section": {"id": s["id"], "name": s["name"]},
                     # The exact URL walked, when it's a confirmed course
@@ -511,6 +522,7 @@ class SchoologyProvider(IntegrationProvider):
                     # wall) — so an empty `items` list is diagnosable instead
                     # of just blank.
                     "walk_trace": trace,
+                    **({"error": error} if error else {}),
                 })
             return {"probed": probed}
         finally:

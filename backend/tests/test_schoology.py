@@ -811,6 +811,7 @@ def test_sync_login_only_discovers_courses_and_pulls_materials(fake_db, monkeypa
     "AP Biology" reconciles onto the existing PowerSchool course (no dupe);
     the new "AP US History" course is created and linked."""
     provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
 
     async def _fake_load(self, user_id):
         return {"secret_ref": "x", "config": {}}
@@ -1061,6 +1062,7 @@ def test_sync_falls_back_to_scraper_only_when_api_materials_are_empty(fake_db, m
 # ---------------------------------------------------------------------------
 def test_sync_with_no_api_key_refreshes_materials_for_already_linked_courses(fake_db, monkeypatch):
     provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
 
     async def _fake_load(self, user_id):
         return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
@@ -1093,15 +1095,11 @@ def test_sync_with_no_api_key_refreshes_materials_for_already_linked_courses(fak
 
 
 def test_sync_with_no_api_key_and_no_discoverable_courses_reports_helpful_error(fake_db, monkeypatch):
-    """No API key, nothing linked, and the login session discovers no courses
-    either (empty account, or a parent whose courses live on app.schoology.com)
-    — report a clear message instead of silently doing nothing. Unlike the
-    debug tools (see `test_debug_walk_materials_falls_back_to_known_sections_
-    when_login_discovers_none`), the real automated sync deliberately does
-    NOT fall back to `course_mapping.KNOWN_SECTIONS` — that table is only a
-    diagnostic aid for confirming discovery against confirmed-real links, not
-    a substitute for actually fixing discovery for every account's sync."""
+    """No API key, nothing linked, the login session discovers no courses,
+    and there are no confirmed-real courses on file either — report a clear
+    message instead of silently doing nothing."""
     provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
 
     async def _fake_load(self, user_id):
         return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
@@ -1121,6 +1119,46 @@ def test_sync_with_no_api_key_and_no_discoverable_courses_reports_helpful_error(
     assert len(report["errors"]) == 1
     assert "No Schoology courses found" in report["errors"][0]
     assert fake_db.tables["documents"] == []
+
+
+def test_sync_falls_back_to_known_sections_when_discovery_finds_nothing(fake_db, monkeypatch):
+    """When the login-session course-list crawl comes back empty (the
+    reported "still not pulling any links" symptom), the real sync — not
+    just the debug tools — now falls back to course_mapping.KNOWN_SECTIONS,
+    walking each confirmed course's exact materials_url via walk_known_url
+    rather than reporting a bare "no courses found" error."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", (
+        {"id": "known-1", "name": "Known Course", "student_uid": None,
+         "materials_url": "https://app.schoology.com/course/known-1/materials"},
+    ))
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                      kind="item", material_type="File", folder_path="Unit 1")],
+        files={"/attachment/download/1": (b"%PDF-1.4 bytes", "application/pdf")},
+        courses=[],  # discovery finds nothing
+    )
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report = asyncio.run(provider.sync(USER_ID))
+
+    assert report["errors"] == []
+    assert report["courses"] == 1
+    assert report["documents"] == 1
+    assert scraper.known_url_calls == ["https://app.schoology.com/course/known-1/materials"]
+    courses = fake_db.tables["courses"]
+    assert any(c["name"] == "Known Course" for c in courses)
 
 
 # ---------------------------------------------------------------------------

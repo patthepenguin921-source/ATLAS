@@ -1123,6 +1123,9 @@ def test_debug_walk_materials_uses_persisted_student_uid_for_parent_course(fake_
     parent-view preview URL is used instead of the empty plain /materials
     page (the reported "0 of N links" case)."""
     provider = SchoologyProvider()
+    # Isolate from the real course_mapping.KNOWN_SECTIONS table — this test
+    # is about the persisted-uid plumbing, not the known-sections fallback.
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
 
     async def _fake_load(self, user_id):
         return {"secret_ref": "x", "config": {"domain": "https://app.schoology.com"}}
@@ -1152,6 +1155,7 @@ def test_debug_walk_materials_uses_persisted_student_uid_for_parent_course(fake_
 
 def test_debug_walk_materials_falls_back_to_linked_courses_without_api_key(fake_db, monkeypatch):
     provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
 
     async def _fake_load(self, user_id):
         return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
@@ -1181,6 +1185,7 @@ def test_debug_walk_materials_falls_back_when_api_key_is_rejected(fake_db, monke
     it entirely, not just materials) must not hard-fail the debug tool —
     fall back to linked courses exactly like the no-key case."""
     provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
 
     async def _fake_load(self, user_id):
         return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
@@ -1213,6 +1218,7 @@ def test_debug_walk_materials_discovers_courses_from_login_without_api_key(fake_
     straight from the login session and probe them, rather than dead-ending
     on "connect an API key first"."""
     provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
 
     async def _fake_load(self, user_id):
         return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
@@ -1276,3 +1282,40 @@ def test_debug_walk_materials_falls_back_to_known_sections_when_login_discovers_
     assert result["probed"][0]["section"] == {"id": "known-1", "name": "Known Course"}
     assert result["probed"][0]["items"][0]["name"] == "Notes"
     assert scraper.student_uid_calls == ["999"]
+
+
+def test_debug_walk_materials_defaults_to_probing_every_known_section(fake_db, monkeypatch):
+    """With no query, every confirmed-real course (course_mapping.
+    KNOWN_SECTIONS) is probed — not just an arbitrary "first" section that
+    discovery/linking happened to surface. Regression for "the debug is not
+    using the correct links": defaulting to sections[0] could land on an
+    unrelated already-linked course instead of showing the confirmed ones,
+    since a query has to be typed to reach any specific course by name."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", (
+        {"id": "known-1", "name": "Known Course One", "student_uid": None},
+        {"id": "known-2", "name": "Known Course Two", "student_uid": None},
+    ))
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+    # An unrelated already-linked course would previously have been picked as
+    # "the first section" ahead of either known one.
+    fake_db.tables["courses"][0]["metadata"] = {"schoology_section_id": SECTION_ID}
+
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    ids = {p["section"]["id"] for p in result["probed"]}
+    assert ids == {"known-1", "known-2"}

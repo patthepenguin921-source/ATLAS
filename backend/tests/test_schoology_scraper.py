@@ -533,13 +533,22 @@ def test_walk_materials_with_student_uid_also_walks_app_domain_preview():
     asyncio.run(run())
 
 
-def test_walk_materials_without_student_uid_never_touches_app_domain():
+def test_walk_materials_without_student_uid_never_hits_parent_preview():
+    """Without a student uid there's no parent to preview, so the per-student
+    parent-view URL must never be requested. The app-domain *materials* page
+    may still be probed (courses can live on app.schoology.com even for a
+    non-parent account), so that's no longer forbidden — only the
+    `/preview/{uid}/parent` shape is."""
     async def run():
-        calls = {"app_domain_hit": False}
+        requested_paths: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
+            requested_paths.append(str(request.url))
             if request.url.host == "app.schoology.com":
-                calls["app_domain_hit"] = True
+                if request.url.path == "/login" and request.method == "GET":
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)
+                if request.url.path == "/login" and request.method == "POST":
+                    return httpx.Response(200, text=APP_DASHBOARD_PAGE)
                 return httpx.Response(404)
             return _walk_handler(request)
 
@@ -547,7 +556,7 @@ def test_walk_materials_without_student_uid_never_touches_app_domain():
         client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
         try:
             await client.walk_materials("8435659601")
-            assert calls["app_domain_hit"] is False
+            assert not any("/preview/" in u for u in requested_paths)
         finally:
             await client.aclose()
 
@@ -714,6 +723,49 @@ def test_list_courses_also_discovers_parent_courses_on_app_domain():
             by_id = {c["id"]: c["name"] for c in await client.list_courses()}
             assert by_id["8435659601"] == "AP Biology: Section 2"  # district
             assert by_id["5550001"] == "Parent-only Course"  # app domain
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_list_courses_extracts_student_uid_from_parent_preview_links():
+    """A parent account's course links are per-student preview URLs
+    (/course/{id}/preview/{student_uid}/parent). list_courses must pull the
+    student uid out so the materials walk can reach the parent-view pages."""
+    parent_home = """
+    <html><body>
+      <a href="/course/8435659601/preview/23381548/parent">AP Biology: Section 2</a>
+      <a href="/course/8435650700/materials">DE Entrprnrshp: Section 901</a>
+    </body></html>
+    """
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "app.schoology.com":
+                if request.url.path == "/login" and request.method == "GET":
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)
+                if request.url.path == "/login" and request.method == "POST":
+                    return httpx.Response(200, text=APP_DASHBOARD_PAGE)
+                if request.url.path == "/home":
+                    return httpx.Response(200, text=parent_home)
+                return httpx.Response(404)
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            return httpx.Response(404)  # district has no course list here
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            courses = await client.list_courses()
+            by_id = {c["id"]: c for c in courses}
+            assert by_id["8435659601"]["name"] == "AP Biology: Section 2"
+            assert by_id["8435659601"]["student_uid"] == "23381548"
+            # A direct /materials course (no preview) carries no student uid.
+            assert by_id["8435650700"]["name"] == "DE Entrprnrshp: Section 901"
+            assert by_id["8435650700"]["student_uid"] is None
         finally:
             await client.aclose()
 

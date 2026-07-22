@@ -329,6 +329,10 @@ class SchoologyProvider(IntegrationProvider):
                     await scraper.aclose()
             except Exception as e:  # noqa: BLE001
                 return [], None, {"note": f"Could not discover courses from the Schoology login: {e}"}
+            # A parent account's course links carry the student's user id —
+            # capture it so the materials walk can reach the parent-view
+            # pages (a parent's real materials live only there).
+            uid = next((c.get("student_uid") for c in discovered if c.get("student_uid")), None)
             sections = [
                 {"id": c["id"], "name": c["name"]}
                 for c in discovered
@@ -824,25 +828,25 @@ class SchoologyProvider(IntegrationProvider):
 
     async def _sync_materials_only(self, user_id: str, integration: dict[str, Any], report: dict[str, Any]) -> None:
         """No API key on file — refresh materials via the login-scraper
-        session for whatever courses Atlas already knows a Schoology section
-        id for (`metadata.schoology_section_id`, set the first time a course
-        was synced with an API key). New courses can't be discovered this
-        way — that needs the API (`sync`'s normal path) at least once. There's
-        also no `student_uid` available here (that comes from the API), so
-        the app.schoology.com parent-preview fallback in `walk_materials`
-        never engages for a fully login-only account — a currently
-        unavoidable gap, same category as not being able to discover new
-        courses without the API."""
+        session. Uses whatever courses Atlas already linked a Schoology
+        section id for (`metadata.schoology_section_id`) and, when nothing is
+        linked, discovers the enrolled courses straight from the login
+        session (`_discover_and_link_sections`) so a fully login-only account
+        works without ever needing the API. For a parent account the walk
+        also needs the student's user id (to reach the parent-view materials
+        pages) — that's carried on each course's `metadata.schoology_student_uid`,
+        captured during discovery."""
         config = integration.get("config") or {}
         google_token = config.get("google_access_token")
         rows = await supabase.select(
             "courses", columns="id,name,metadata", filters={"user_id": eq(user_id)},
         ) or []
         linked = [
-            (r["id"], r["name"], (r.get("metadata") or {}).get("schoology_section_id"))
+            (r["id"], r["name"], (r.get("metadata") or {}).get("schoology_section_id"),
+             (r.get("metadata") or {}).get("schoology_student_uid"))
             for r in rows
         ]
-        linked = [(cid, name, sid) for cid, name, sid in linked if sid]
+        linked = [(cid, name, sid, uid) for cid, name, sid, uid in linked if sid]
         if not linked:
             # Nothing linked from a prior API sync — discover the enrolled
             # courses straight from the login session and create/link them
@@ -863,7 +867,7 @@ class SchoologyProvider(IntegrationProvider):
                 "is enrolled in courses."
             )
             return
-        for course_id, name, section_id in linked:
+        for course_id, name, section_id, student_uid in linked:
             section = SchoologySection(
                 id=section_id, course_id=section_id, course_title=name, section_title="",
                 course_code="", section_code="", grading_periods=[], meeting_days=[],
@@ -871,30 +875,34 @@ class SchoologyProvider(IntegrationProvider):
             )
             await self._sync_scraped_materials(
                 user_id=user_id, course_id=course_id, section=section,
-                report=report, google_token=google_token,
+                report=report, google_token=google_token, student_uid=student_uid,
             )
             report["courses"] += 1
 
     async def _discover_and_link_sections(
         self, user_id: str, report: dict[str, Any],
-    ) -> list[tuple[str, str, str]]:
+    ) -> list[tuple[str, str, str, str | None]]:
         """Discover enrolled courses from the login session (no API key) and
         reconcile each into an Atlas course row — reusing the same
         name-matching/creation path (`_resolve_course`) the API sync uses, so
         a Schoology section still links to an existing PowerSchool/manual
         course instead of duplicating it, and `metadata.schoology_section_id`
-        gets set for next time. Returns `(course_id, name, section_id)` for
-        every academic course found; clubs are routed to their own table and
-        excluded blocks skipped, matching `sync()`'s behavior."""
+        gets set for next time. A parent account's course links also carry the
+        student's user id; it's persisted as `metadata.schoology_student_uid`
+        and returned so the materials walk can reach the parent-view pages.
+        Returns `(course_id, name, section_id, student_uid)` for every
+        academic course found; clubs go to their own table, excluded blocks
+        are skipped — matching `sync()`'s behavior."""
         scraper = await self._scraper_client(user_id)
         try:
             discovered = await scraper.list_courses()
         finally:
             await scraper.aclose()
 
-        linked: list[tuple[str, str, str]] = []
+        linked: list[tuple[str, str, str, str | None]] = []
         for c in discovered:
             name, sid = c["name"], c["id"]
+            student_uid = c.get("student_uid")
             if course_mapping.is_excluded(name):
                 report["excluded"] += 1
                 continue
@@ -912,11 +920,30 @@ class SchoologyProvider(IntegrationProvider):
                 continue
             try:
                 course_id = await self._resolve_course(user_id, section, {})
+                if student_uid:
+                    # Persist the student uid so later materials-only syncs
+                    # (which re-read from the DB, not discovery) keep reaching
+                    # the parent-view pages.
+                    await self._merge_course_metadata(
+                        course_id, {"schoology_student_uid": student_uid}
+                    )
             except Exception as e:  # noqa: BLE001
                 report["errors"].append(f"{name}: {e}")
                 continue
-            linked.append((course_id, name, sid))
+            linked.append((course_id, name, sid, student_uid))
         return linked
+
+    async def _merge_course_metadata(self, course_id: str, extra: dict[str, Any]) -> None:
+        """Best-effort shallow-merge into a course's metadata JSON, preserving
+        whatever's already there. Never lets a metadata write break a sync."""
+        try:
+            rows = await supabase.select(
+                "courses", columns="metadata", filters={"id": eq(course_id)}, limit=1,
+            )
+            meta = {**((rows[0].get("metadata") if rows else None) or {}), **extra}
+            await supabase.update("courses", {"metadata": meta}, filters={"id": eq(course_id)})
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _sync_section(
         self, *, client: SchoologyClient, user_id: str, course_id: str,

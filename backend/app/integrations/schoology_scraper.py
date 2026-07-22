@@ -467,30 +467,22 @@ class SchoologyScraperClient:
                 results[name] = {"requested_url": url, "error": str(e)}
         return results
 
-    async def walk_materials(
-        self, section_id: str, *, known_names: set[str] | None = None,
-        student_uid: str | None = None, trace: list[dict[str, Any]] | None = None,
+    async def _walk_materials_tree(
+        self, start_url: str, *, known_names: set[str] | None = None,
+        trace: list[dict[str, Any]] | None = None,
     ) -> list[MaterialLink]:
-        """Depth-first walk of a section's materials page and every folder
-        inside it, returning only real, new leaf items — folders are never
-        returned themselves, only recursed into (`parse_materials_page`
-        strips Schoology's page chrome from each page's raw link dump first).
+        """Depth-first walk of one materials page and every real folder
+        inside it, starting from `start_url` exactly and nothing else — the
+        recursive core shared by `walk_materials` (which tries several
+        candidate starting URLs when the right one isn't known) and
+        `walk_known_url` (which is handed the one already-confirmed URL and
+        never guesses at any other). Folders are never returned themselves,
+        only recursed into (`parse_materials_page` strips Schoology's page
+        chrome from each page's raw link dump first).
 
         `known_names` is the set of item names (case-insensitive) already
         pulled for this course on a previous scan; anything matching is
-        skipped, so a re-scan only returns what's actually new. Pass
-        `None`/empty on a first scan (or to force a full re-pull).
-
-        `student_uid` additionally walks the app.schoology.com parent-preview
-        URL (`/course/{id}/preview/{student_uid}/parent`) — a parent
-        account's real materials often live there instead of the district
-        subdomain's own `/materials` page (confirmed against a real account;
-        see `debug_materials_page`'s docstring — the district URL alone can
-        come back with nothing to walk for a parent account, which looked
-        exactly like "no materials" rather than "wrong URL"). Pass it
-        whenever it's known (e.g. from `SchoologyClient.current_user_id()`).
-        A failed app-domain login there is swallowed — whatever the district
-        walk already found still stands.
+        skipped, so a re-scan only returns what's actually new.
 
         Items are matched by name rather than a stable Schoology id — the
         scraped HTML doesn't expose one for a bare item the way the API's
@@ -500,8 +492,6 @@ class SchoologyScraperClient:
         `folder_path`, but not by the name-only dedupe), are known
         limitations of this path.
         """
-        if not self._logged_in:
-            await self.login()
         known = {n.strip().lower() for n in (known_names or set()) if n and n.strip()}
 
         found: list[MaterialLink] = []
@@ -569,17 +559,77 @@ class SchoologyScraperClient:
                     material_type=link.material_type, folder_path=folder_path,
                 ))
 
-        await _walk(f"{self._base}/course/{section_id}/materials", "", 0)
+        await _walk(start_url, "", 0)
+        return found
+
+    async def walk_known_url(
+        self, start_url: str, *, known_names: set[str] | None = None,
+        trace: list[dict[str, Any]] | None = None,
+    ) -> list[MaterialLink]:
+        """Depth-first walk of exactly `start_url` and nothing else — no
+        guessing at alternate candidate shapes (district subdomain vs
+        app.schoology.com, `/materials` vs `/preview/{uid}/parent`) the way
+        `walk_materials` does. For use with a course whose real materials
+        page is already confirmed (see `course_mapping.KNOWN_SECTIONS`) —
+        the caller already knows which single URL is correct and wants only
+        that one requested, not every candidate Schoology could plausibly
+        use. Logs into app.schoology.com first when `start_url` is on that
+        domain (the district-subdomain login alone doesn't carry a session
+        there — see this module's docstring)."""
+        if not self._logged_in:
+            await self.login()
+        if start_url.startswith(_APP_DOMAIN):
+            await self._login_app_domain()
+        return await self._walk_materials_tree(start_url, known_names=known_names, trace=trace)
+
+    async def walk_materials(
+        self, section_id: str, *, known_names: set[str] | None = None,
+        student_uid: str | None = None, trace: list[dict[str, Any]] | None = None,
+    ) -> list[MaterialLink]:
+        """Depth-first walk of a section's materials page and every folder
+        inside it, returning only real, new leaf items, by trying several
+        candidate starting URLs in turn — unlike `walk_known_url`, the
+        caller doesn't already know which one is right for this course.
+
+        `known_names` is the set of item names (case-insensitive) already
+        pulled for this course on a previous scan; anything matching is
+        skipped, so a re-scan only returns what's actually new. Pass
+        `None`/empty on a first scan (or to force a full re-pull).
+
+        `student_uid` additionally walks the app.schoology.com parent-preview
+        URL (`/course/{id}/preview/{student_uid}/parent`) — a parent
+        account's real materials often live there instead of the district
+        subdomain's own `/materials` page (confirmed against a real account;
+        see `debug_materials_page`'s docstring — the district URL alone can
+        come back with nothing to walk for a parent account, which looked
+        exactly like "no materials" rather than "wrong URL"). Pass it
+        whenever it's known (e.g. from `SchoologyClient.current_user_id()`).
+        A failed app-domain login there is swallowed — whatever the district
+        walk already found still stands.
+        """
+        if not self._logged_in:
+            await self.login()
+
+        found = await self._walk_materials_tree(
+            f"{self._base}/course/{section_id}/materials",
+            known_names=known_names, trace=trace,
+        )
+        # Names already found by the district walk are threaded into the
+        # app-domain walk's own known-names set so the same item isn't
+        # duplicated if it shows up on both — matching the single shared
+        # dedupe set this used before being split into two
+        # `_walk_materials_tree` calls.
+        seen = set(known_names or set()) | {i.name.strip().lower() for i in found}
 
         # A parent account reaches a course through app.schoology.com, and its
         # real materials hang off the per-student parent-view URL, not the
         # district `/materials` page (which comes back empty — the reported
         # symptom). Load the parent-view landing first (that's what puts the
         # session into the child's context), then walk the app-domain
-        # materials page and the landing itself; the landing's own "Materials"
-        # tab link is treated as a folder (see _FOLDER_HREF_PATTERNS) so it's
-        # followed if the direct URL guess is wrong. A failed app-domain login
-        # is swallowed — whatever the district walk found still stands.
+        # materials page — the landing's own "Materials" tab link is treated
+        # as a folder (see _FOLDER_HREF_PATTERNS) so it's followed if the
+        # direct URL guess is wrong. A failed app-domain login is swallowed —
+        # whatever the district walk already found still stands.
         try:
             await self._login_app_domain()
             if student_uid:
@@ -589,10 +639,16 @@ class SchoologyScraperClient:
                 # tab link. Then walk the materials page directly, now that
                 # the context is set — the plain /materials URL comes back
                 # empty without it (the reported "0 of N links" symptom).
-                await _walk(
-                    f"{_APP_DOMAIN}/course/{section_id}/preview/{student_uid}/parent", "", 0,
+                preview_found = await self._walk_materials_tree(
+                    f"{_APP_DOMAIN}/course/{section_id}/preview/{student_uid}/parent",
+                    known_names=seen, trace=trace,
                 )
-            await _walk(f"{_APP_DOMAIN}/course/{section_id}/materials", "", 0)
+                found += preview_found
+                seen |= {i.name.strip().lower() for i in preview_found}
+            found += await self._walk_materials_tree(
+                f"{_APP_DOMAIN}/course/{section_id}/materials",
+                known_names=seen, trace=trace,
+            )
         except SchoologyScraperAuthError:
             pass
 

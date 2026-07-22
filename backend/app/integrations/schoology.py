@@ -459,9 +459,21 @@ class SchoologyProvider(IntegrationProvider):
             probed = []
             for s in sections:
                 trace: list[dict[str, Any]] = []
-                items = await scraper.walk_materials(s["id"], student_uid=uid, trace=trace)
+                materials_url = s.get("materials_url")
+                if materials_url:
+                    # A confirmed-real course (course_mapping.KNOWN_SECTIONS)
+                    # — walk exactly that URL and nothing else, instead of
+                    # guessing across every candidate shape.
+                    items = await scraper.walk_known_url(materials_url, trace=trace)
+                else:
+                    items = await scraper.walk_materials(s["id"], student_uid=uid, trace=trace)
                 probed.append({
                     "section": {"id": s["id"], "name": s["name"]},
+                    # The exact URL walked, when it's a confirmed course
+                    # (course_mapping.KNOWN_SECTIONS) — so it's visible on
+                    # screen that this is really hitting the given link,
+                    # not a guess, whether or not it found any items.
+                    "materials_url": materials_url,
                     "items": [
                         {"name": i.name, "type": i.material_type or None,
                          "folder": i.folder_path or None, "href": i.href}

@@ -769,6 +769,7 @@ class _FakeScraperClient:
         self._courses = courses or []
         self.known_names_calls: list[set[str] | None] = []
         self.student_uid_calls: list[str | None] = []
+        self.known_url_calls: list[str] = []
         self.closed = False
 
     async def walk_materials(self, section_id, *, known_names=None, student_uid=None, trace=None):
@@ -776,6 +777,16 @@ class _FakeScraperClient:
         self.student_uid_calls.append(student_uid)
         if trace is not None:
             trace.append({"requested_url": f"/course/{section_id}/materials", "parsed_count": len(self._items)})
+        known = {n.strip().lower() for n in (known_names or set())}
+        return [i for i in self._items if i.name.strip().lower() not in known]
+
+    async def walk_known_url(self, start_url, *, known_names=None, trace=None):
+        """Mirrors the real `walk_known_url`: hits exactly `start_url` and
+        nothing else — no district/app-domain or /materials-vs-/preview
+        guessing the way `walk_materials` does."""
+        self.known_url_calls.append(start_url)
+        if trace is not None:
+            trace.append({"requested_url": start_url, "parsed_count": len(self._items)})
         known = {n.strip().lower() for n in (known_names or set())}
         return [i for i in self._items if i.name.strip().lower() not in known]
 
@@ -1319,3 +1330,42 @@ def test_debug_walk_materials_defaults_to_probing_every_known_section(fake_db, m
 
     ids = {p["section"]["id"] for p in result["probed"]}
     assert ids == {"known-1", "known-2"}
+
+
+def test_debug_walk_materials_hits_only_the_exact_known_url(fake_db, monkeypatch):
+    """A confirmed-real course (course_mapping.KNOWN_SECTIONS with a
+    materials_url) must be walked via `walk_known_url` against exactly that
+    URL — never the multi-candidate `walk_materials` guessing across
+    district/app-domain and /materials-vs-/preview shapes. Regression for
+    "it should only look at those links, not any of the other ones"."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", (
+        {"id": "known-1", "name": "Known Course", "student_uid": "42",
+         "materials_url": "https://app.schoology.com/course/known-1/preview/42/parent"},
+    ))
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+    fake_db.tables["courses"] = []
+
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File")],
+        courses=[],
+    )
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    assert scraper.known_url_calls == ["https://app.schoology.com/course/known-1/preview/42/parent"]
+    assert scraper.known_names_calls == []  # walk_materials (the guessing path) was never called
+    assert result["probed"][0]["materials_url"] == (
+        "https://app.schoology.com/course/known-1/preview/42/parent"
+    )
+    assert result["probed"][0]["items"][0]["name"] == "Notes"

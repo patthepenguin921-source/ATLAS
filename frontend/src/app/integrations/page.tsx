@@ -65,30 +65,6 @@ interface SchoologyDebugResult {
   note?: string;
 }
 
-interface SchoologyMaterialsPageCandidate {
-  requested_url: string;
-  final_url?: string;
-  status_code?: number;
-  title?: string | null;
-  link_count?: number;
-  links?: { text: string; href: string | null }[];
-  body_html_snippet?: string | null;
-  error?: string;
-}
-
-interface SchoologyMaterialsProbedSection {
-  section: { id: string; name: string };
-  // Keyed by candidate name, e.g. "district_materials", "app_preview_parent"
-  materials_page: Record<string, SchoologyMaterialsPageCandidate>;
-}
-
-interface SchoologyMaterialsDebugResult {
-  probed?: SchoologyMaterialsProbedSection[];
-  sections_found?: number;
-  available_sections?: string[];
-  note?: string;
-}
-
 const STATUS_TONE: Record<string, "good" | "warn" | "bad" | "default"> = {
   success: "good",
   running: "warn",
@@ -117,26 +93,22 @@ export default function IntegrationsPage() {
   const [schoologyDebugError, setSchoologyDebugError] = useState<string | null>(null);
   const [schoologyDebugQuery, setSchoologyDebugQuery] = useState("");
 
-  // Materials access (browser-login scraper) — for districts that block the
-  // API key from reading course materials/folders (Courses realm).
-  const [materialsForm, setMaterialsForm] = useState({ username: "", password: "" });
-  const [materialsConnecting, setMaterialsConnecting] = useState(false);
-  const [materialsError, setMaterialsError] = useState<string | null>(null);
-  const [materialsConnected, setMaterialsConnected] = useState(false);
-  const [materialsDebugging, setMaterialsDebugging] = useState(false);
-  const [materialsDebugResult, setMaterialsDebugResult] = useState<SchoologyMaterialsDebugResult | null>(null);
-  const [materialsDebugError, setMaterialsDebugError] = useState<string | null>(null);
-  const [materialsDebugQuery, setMaterialsDebugQuery] = useState("");
-
-  // Schoology (API key / OAuth 1.0a) connect state
+  // Schoology connect state — a single login (username + password, the same
+  // credentials used in a browser) is the only required credential. A
+  // personal API key is an optional "Advanced" extra that additionally
+  // unlocks assignments/events sync (there's no scraper for those yet, only
+  // for materials).
   const [schoologyOpen, setSchoologyOpen] = useState(false);
   const [schoologyConnecting, setSchoologyConnecting] = useState(false);
   const [schoologyError, setSchoologyError] = useState<string | null>(null);
   const [schoologyForm, setSchoologyForm] = useState({
     domain: "",
+    username: "",
+    password: "",
     consumer_key: "",
     consumer_secret: "",
   });
+  const [showApiKeyAdvanced, setShowApiKeyAdvanced] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<SchoologyVerifyResult | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
@@ -159,7 +131,8 @@ export default function IntegrationsPage() {
   }
 
   function openSchoologyModal() {
-    setSchoologyForm({ domain: "", consumer_key: "", consumer_secret: "" });
+    setSchoologyForm({ domain: "", username: "", password: "", consumer_key: "", consumer_secret: "" });
+    setShowApiKeyAdvanced(false);
     setVerifyResult(null);
     setVerifyError(null);
     setSchoologyError(null);
@@ -173,9 +146,11 @@ export default function IntegrationsPage() {
     setVerifyResult(null);
     try {
       const result = await apiPost<SchoologyVerifyResult>("/integrations/schoology/verify", {
+        domain: schoologyForm.domain,
+        username: schoologyForm.username,
+        password: schoologyForm.password,
         consumer_key: schoologyForm.consumer_key,
         consumer_secret: schoologyForm.consumer_secret,
-        domain: schoologyForm.domain || undefined,
       });
       setVerifyResult(result);
     } catch (err: any) {
@@ -192,9 +167,12 @@ export default function IntegrationsPage() {
     setLastResult(null);
     try {
       const result = await apiPost<SyncResult>("/integrations/schoology/connect", {
-        consumer_key: schoologyForm.consumer_key,
-        consumer_secret: schoologyForm.consumer_secret,
-        domain: schoologyForm.domain || undefined,
+        domain: schoologyForm.domain,
+        username: schoologyForm.username,
+        password: schoologyForm.password,
+        ...(schoologyForm.consumer_key.trim() && schoologyForm.consumer_secret.trim()
+          ? { consumer_key: schoologyForm.consumer_key, consumer_secret: schoologyForm.consumer_secret }
+          : {}),
       });
       setLastResult(result);
       closeSchoologyModal();
@@ -303,42 +281,6 @@ export default function IntegrationsPage() {
       setSchoologyDebugError(err.message ?? "Could not fetch from Schoology.");
     } finally {
       setSchoologyDebugging(false);
-    }
-  }
-
-  async function connectSchoologyMaterials(e: React.FormEvent) {
-    e.preventDefault();
-    setMaterialsConnecting(true);
-    setMaterialsError(null);
-    try {
-      await apiPost("/integrations/schoology/connect-materials", {
-        username: materialsForm.username,
-        password: materialsForm.password,
-      });
-      setMaterialsConnected(true);
-      setMaterialsForm({ username: "", password: "" });
-    } catch (err: any) {
-      setMaterialsError(err.message ?? "Login failed.");
-    } finally {
-      setMaterialsConnecting(false);
-    }
-  }
-
-  async function debugScrapeMaterials() {
-    setMaterialsDebugging(true);
-    setMaterialsDebugError(null);
-    setMaterialsDebugResult(null);
-    try {
-      const q = materialsDebugQuery.trim();
-      const path = q
-        ? `/integrations/schoology/debug-scrape-materials?q=${encodeURIComponent(q)}`
-        : "/integrations/schoology/debug-scrape-materials";
-      const result = await apiGet<SchoologyMaterialsDebugResult>(path);
-      setMaterialsDebugResult(result);
-    } catch (err: any) {
-      setMaterialsDebugError(err.message ?? "Could not fetch the materials page.");
-    } finally {
-      setMaterialsDebugging(false);
     }
   }
 
@@ -487,7 +429,7 @@ export default function IntegrationsPage() {
                     ? schoology.last_synced_at
                       ? `Last synced ${new Date(schoology.last_synced_at).toLocaleString()}`
                       : "Connected — not yet synced"
-                    : "Auto-import your week-at-a-glance, assignments, and every course folder's files, slideshows, and links. Grades stay in PowerSchool."}
+                    : "Auto-import your courses and every course folder's files, slideshows, and links using your Schoology login. Add an optional API key to also sync assignments and your week-at-a-glance. Grades stay in PowerSchool."}
                 </div>
                 {schoology?.last_error && (
                   <div className="text-sm text-atlas-bad mt-1">{schoology.last_error}</div>
@@ -514,7 +456,7 @@ export default function IntegrationsPage() {
                       {schoologyDebugging ? "Fetching…" : "Debug fetch"}
                     </button>
                     <button className="btn-ghost" onClick={openSchoologyModal}>
-                      Edit key
+                      Edit login
                     </button>
                     <button className="btn-ghost" onClick={() => disconnect("schoology")}>
                       Disconnect
@@ -573,103 +515,6 @@ export default function IntegrationsPage() {
                     </div>
                   ))}
                 </>
-              )}
-            </div>
-          )}
-
-          {schoology && (
-            <div className="card mt-4">
-              <div className="font-medium flex items-center gap-2">
-                Materials access
-                {materialsConnected && <Badge tone="good">connected</Badge>}
-              </div>
-              <p className="text-sm text-atlas-muted mt-1">
-                Some districts let the API key list your courses but block it from reading course
-                materials/folders. If your synced materials always come back empty, log in below with
-                your normal Schoology username and password — this reads materials the same way your
-                own browser does, separately from the API key above. Only used for materials;
-                assignments/events keep coming from the API key.
-              </p>
-              <form onSubmit={connectSchoologyMaterials} className="mt-3 flex flex-wrap items-end gap-2">
-                <div>
-                  <label className="label">Username / email</label>
-                  <input
-                    className="input"
-                    required
-                    value={materialsForm.username}
-                    onChange={(e) => setMaterialsForm({ ...materialsForm, username: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label className="label">Password</label>
-                  <input
-                    className="input"
-                    type="password"
-                    required
-                    value={materialsForm.password}
-                    onChange={(e) => setMaterialsForm({ ...materialsForm, password: e.target.value })}
-                  />
-                </div>
-                <button className="btn-primary" disabled={materialsConnecting}>
-                  {materialsConnecting ? "Signing in…" : "Save & verify"}
-                </button>
-              </form>
-              {materialsError && <div className="text-sm text-atlas-bad mt-2">{materialsError}</div>}
-              {materialsConnected && (
-                <div className="text-sm text-atlas-good mt-2">✓ Login works — materials access saved.</div>
-              )}
-
-              <div className="flex items-center gap-2 mt-3">
-                <input
-                  className="input w-32 text-xs"
-                  placeholder="AP Physics…"
-                  value={materialsDebugQuery}
-                  onChange={(e) => setMaterialsDebugQuery(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && debugScrapeMaterials()}
-                />
-                <button className="btn-ghost" disabled={materialsDebugging} onClick={debugScrapeMaterials}>
-                  {materialsDebugging ? "Fetching…" : "Debug scrape materials"}
-                </button>
-              </div>
-              {materialsDebugError && (
-                <div className="text-sm text-atlas-bad mt-2">{materialsDebugError}</div>
-              )}
-              {materialsDebugResult && (
-                <div className="mt-3 text-xs space-y-3">
-                  {materialsDebugResult.note ? (
-                    <div className="text-atlas-muted">
-                      {materialsDebugResult.note}
-                      {materialsDebugResult.available_sections && materialsDebugResult.available_sections.length > 0 && (
-                        <> Try one of: {materialsDebugResult.available_sections.join(", ")}</>
-                      )}
-                    </div>
-                  ) : (
-                    materialsDebugResult.probed?.map((p) => (
-                      <div key={p.section.id} className="space-y-2 border-t border-atlas-border pt-3 first:border-0 first:pt-0">
-                        <div className="font-medium">{p.section.name} ({p.section.id})</div>
-                        {Object.entries(p.materials_page).map(([candidate, page]) => (
-                          <div key={candidate} className="space-y-1 bg-atlas-panel2 p-2 rounded">
-                            <div className="font-medium">{candidate}</div>
-                            {page.error ? (
-                              <div className="text-atlas-bad">{page.error}</div>
-                            ) : (
-                              <>
-                                <div>
-                                  <span className="text-atlas-muted">Fetched: </span>
-                                  {page.final_url} ({page.status_code}) — {page.title}
-                                </div>
-                                <div className="text-atlas-muted">{page.link_count} links found</div>
-                                <pre className="whitespace-pre-wrap break-all bg-atlas-bg p-2 rounded max-h-60 overflow-auto">
-                                  {JSON.stringify(page.links, null, 2)}
-                                </pre>
-                              </>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    ))
-                  )}
-                </div>
               )}
             </div>
           )}
@@ -865,7 +710,7 @@ export default function IntegrationsPage() {
       <Modal
         open={schoologyOpen}
         onClose={closeSchoologyModal}
-        title={schoology ? "Update Schoology API key" : "Connect Schoology"}
+        title={schoology ? "Update Schoology login" : "Connect Schoology"}
         footer={
           <>
             <button className="btn-ghost" onClick={closeSchoologyModal}>Cancel</button>
@@ -876,29 +721,11 @@ export default function IntegrationsPage() {
         }
       >
         <form id="schoology-connect-form" onSubmit={connectSchoology} className="space-y-3">
-          <div className="text-sm text-atlas-muted space-y-1">
-            <p>
-              Generate a personal API key on your Schoology site — this is issued instantly by
-              Schoology itself (not your district) and doesn't need anyone's approval:
-            </p>
-            <ol className="list-decimal list-inside space-y-0.5">
-              <li>
-                Go to{" "}
-                <b>
-                  {schoologyForm.domain
-                    ? `${schoologyForm.domain.replace(/\/$/, "")}/api`
-                    : "your-schoology-site/api"}
-                </b>{" "}
-                (e.g. https://lexington1.schoology.com/api).
-              </li>
-              <li>Click <b>Request API credentials</b>.</li>
-              <li>Copy the <b>Key</b> and <b>Secret</b> and paste them below.</li>
-            </ol>
-            <p>
-              Your secret is stored encrypted and only used to read your courses, calendar, and
-              materials. Grades are never touched — those stay in PowerSchool.
-            </p>
-          </div>
+          <p className="text-sm text-atlas-muted">
+            Atlas logs in the same way you do on the Schoology website, to read your courses and
+            course materials (files, slideshows, links). Your password is stored encrypted. Grades
+            are never touched — those stay in PowerSchool.
+          </p>
 
           {schoologyError && <div className="text-sm text-atlas-bad">{schoologyError}</div>}
 
@@ -906,47 +733,88 @@ export default function IntegrationsPage() {
             <label className="label">Schoology web address</label>
             <input
               className="input"
+              required
               placeholder="https://lexington1.schoology.com"
               value={schoologyForm.domain}
               onChange={(e) => setSchoologyForm({ ...schoologyForm, domain: e.target.value })}
             />
           </div>
           <div>
-            <label className="label">Consumer key</label>
+            <label className="label">Username / email</label>
             <input
-              className="input font-mono text-xs"
+              className="input"
               required
-              value={schoologyForm.consumer_key}
-              onChange={(e) => setSchoologyForm({ ...schoologyForm, consumer_key: e.target.value })}
+              value={schoologyForm.username}
+              onChange={(e) => setSchoologyForm({ ...schoologyForm, username: e.target.value })}
             />
           </div>
           <div>
-            <label className="label">Consumer secret</label>
+            <label className="label">Password</label>
             <input
-              className="input font-mono text-xs"
+              className="input"
               type="password"
               required
-              value={schoologyForm.consumer_secret}
-              onChange={(e) => setSchoologyForm({ ...schoologyForm, consumer_secret: e.target.value })}
+              value={schoologyForm.password}
+              onChange={(e) => setSchoologyForm({ ...schoologyForm, password: e.target.value })}
             />
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              className="btn-ghost"
-              disabled={verifying || !schoologyForm.consumer_key.trim() || !schoologyForm.consumer_secret.trim()}
-              onClick={verifySchoology}
-            >
-              {verifying ? "Checking…" : "Test key"}
-            </button>
-            {verifyResult && (
-              <span className="text-sm text-atlas-good">
-                ✓ Works — found {verifyResult.section_count} courses
-              </span>
-            )}
-            {verifyError && <span className="text-sm text-atlas-bad">{verifyError}</span>}
-          </div>
+          <button
+            type="button"
+            className="text-sm text-atlas-accent underline"
+            onClick={() => setShowApiKeyAdvanced((v) => !v)}
+          >
+            {showApiKeyAdvanced ? "Hide" : "Show"} advanced: optional API key
+          </button>
+
+          {showApiKeyAdvanced && (
+            <div className="space-y-3 rounded-lg bg-atlas-panel2 p-3">
+              <p className="text-sm text-atlas-muted">
+                Optional. A personal API key additionally unlocks assignments and week-at-a-glance
+                sync (the login above can't read those yet — only courses and materials). Generate
+                one at{" "}
+                <b>
+                  {schoologyForm.domain
+                    ? `${schoologyForm.domain.replace(/\/$/, "")}/api`
+                    : "your-schoology-site/api"}
+                </b>{" "}
+                → <b>Request API credentials</b>.
+              </p>
+              <div>
+                <label className="label">Consumer key</label>
+                <input
+                  className="input font-mono text-xs"
+                  value={schoologyForm.consumer_key}
+                  onChange={(e) => setSchoologyForm({ ...schoologyForm, consumer_key: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="label">Consumer secret</label>
+                <input
+                  className="input font-mono text-xs"
+                  type="password"
+                  value={schoologyForm.consumer_secret}
+                  onChange={(e) => setSchoologyForm({ ...schoologyForm, consumer_secret: e.target.value })}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  disabled={verifying || !schoologyForm.consumer_key.trim() || !schoologyForm.consumer_secret.trim()}
+                  onClick={verifySchoology}
+                >
+                  {verifying ? "Checking…" : "Test key"}
+                </button>
+                {verifyResult && (
+                  <span className="text-sm text-atlas-good">
+                    ✓ Works — found {verifyResult.section_count} courses
+                  </span>
+                )}
+                {verifyError && <span className="text-sm text-atlas-bad">{verifyError}</span>}
+              </div>
+            </div>
+          )}
         </form>
       </Modal>
     </AppShell>

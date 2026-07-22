@@ -127,13 +127,25 @@ class SchoologyProvider(IntegrationProvider):
         )
         if not rows or not rows[0].get("secret_ref"):
             raise RuntimeError(
-                "Schoology isn't connected yet — add your API key and secret first "
-                "(generate them at your Schoology site's /api page)."
+                "Schoology isn't connected yet — add your Schoology login first."
             )
         return rows[0]
 
+    def _has_api_key(self, integration: dict[str, Any]) -> bool:
+        """Whether an optional personal API key was saved alongside the
+        (always-required) login — see `SchoologyConnectRequest`'s docstring.
+        Most accounts won't have one; the login alone drives courses and
+        materials, this only gates the extra assignments/events sync."""
+        creds = decrypt_json(integration["secret_ref"]) if integration.get("secret_ref") else {}
+        return bool(creds.get("consumer_key") and creds.get("consumer_secret"))
+
     async def _client(self, integration: dict[str, Any]) -> SchoologyClient:
-        creds = decrypt_json(integration["secret_ref"])
+        creds = decrypt_json(integration["secret_ref"]) if integration.get("secret_ref") else {}
+        if not creds.get("consumer_key") or not creds.get("consumer_secret"):
+            raise RuntimeError(
+                "No Schoology API key on file — add one under \"Advanced\" when connecting "
+                "to enable assignments/events sync."
+            )
         config = integration.get("config") or {}
         api_base = config.get("api_base") or "https://api.schoology.com/v1"
         return SchoologyClient(
@@ -693,13 +705,25 @@ class SchoologyProvider(IntegrationProvider):
     # ---- main sync ----
     async def sync(self, user_id: str) -> dict[str, Any]:
         integration = await self._load_integration(user_id)
-        config = integration.get("config") or {}
-        google_token = config.get("google_access_token")  # optional, for Drive downloads
-        client = await self._client(integration)
         report: dict[str, Any] = {
             "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
             "documents": 0, "links": 0, "announcements": 0, "errors": [],
         }
+
+        # The login (username/password) is the only required credential now;
+        # the API key is an optional extra (see `SchoologyConnectRequest`).
+        # Without it there's no way yet to discover courses or read
+        # assignments/events — no scraper exists for those, only for
+        # materials (`schoology_scraper.py`) — so this refreshes materials
+        # for whatever courses a *previous* API-connected sync already
+        # linked, instead of syncing nothing at all.
+        if not self._has_api_key(integration):
+            await self._sync_materials_only(user_id, report)
+            return report
+
+        config = integration.get("config") or {}
+        google_token = config.get("google_access_token")  # optional, for Drive downloads
+        client = await self._client(integration)
         try:
             uid = await client.current_user_id()
             sections = await client.get_sections(uid)
@@ -751,6 +775,38 @@ class SchoologyProvider(IntegrationProvider):
             return report
         finally:
             await client.aclose()
+
+    async def _sync_materials_only(self, user_id: str, report: dict[str, Any]) -> None:
+        """No API key on file — refresh materials via the login-scraper
+        session for whatever courses Atlas already knows a Schoology section
+        id for (`metadata.schoology_section_id`, set the first time a course
+        was synced with an API key). New courses can't be discovered this
+        way — that needs the API (`sync`'s normal path) at least once."""
+        rows = await supabase.select(
+            "courses", columns="id,name,metadata", filters={"user_id": eq(user_id)},
+        ) or []
+        linked = [
+            (r["id"], r["name"], (r.get("metadata") or {}).get("schoology_section_id"))
+            for r in rows
+        ]
+        linked = [(cid, name, sid) for cid, name, sid in linked if sid]
+        if not linked:
+            report["errors"].append(
+                "No Schoology courses are linked yet — connect with an API key once "
+                "(under \"Advanced\") to discover your courses, then materials-only "
+                "syncs can keep them updated afterward."
+            )
+            return
+        for course_id, name, section_id in linked:
+            section = SchoologySection(
+                id=section_id, course_id=section_id, course_title=name, section_title="",
+                course_code="", section_code="", grading_periods=[], meeting_days=[],
+                start_time="", end_time="", location="", active=True,
+            )
+            await self._sync_scraped_materials(
+                user_id=user_id, course_id=course_id, section=section, report=report,
+            )
+            report["courses"] += 1
 
     async def _sync_section(
         self, *, client: SchoologyClient, user_id: str, course_id: str,

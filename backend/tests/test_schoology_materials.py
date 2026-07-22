@@ -130,14 +130,24 @@ def test_verify_materials_login_bad_credentials_raises(crypto_key, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Router: POST /integrations/schoology/connect-materials
+# Router: POST /integrations/schoology/connect — the single connect step.
+# Username + password (the login session) is required; a personal API key is
+# an optional extra that additionally unlocks assignments/events sync. There
+# used to be a separate `/connect-materials` step that required an API key
+# to already be connected first — that's gone, this is the only step now.
 # ---------------------------------------------------------------------------
 class _FakeSupabase:
-    def __init__(self, rows: list[dict[str, Any]]):
-        self.rows = rows
+    def __init__(self, rows: list[dict[str, Any]] | None = None):
+        self.rows = rows or []
+        self.inserted: dict[str, Any] | None = None
         self.updated: dict[str, Any] | None = None
 
     async def select(self, table, *, columns="*", filters=None, order=None, limit=None, single=False):
+        return self.rows
+
+    async def insert(self, table, row, *, upsert=False, on_conflict=None):
+        self.inserted = dict(row)
+        self.rows = [{**row, "id": (self.rows[0]["id"] if self.rows else "int-1")}]
         return self.rows
 
     async def update(self, table, patch, *, filters):
@@ -147,55 +157,136 @@ class _FakeSupabase:
         return self.rows
 
 
-def test_connect_materials_requires_existing_api_key_integration(monkeypatch):
-    import app.routers.integrations as integrations_router
-
-    fake = _FakeSupabase(rows=[])
-    monkeypatch.setattr(integrations_router.supabase, "select", fake.select)
-    # Auth dependency override so this test doesn't need a real Supabase JWT.
+def _override_user():
     from app.core.security import CurrentUser, get_current_user
 
     app.dependency_overrides[get_current_user] = lambda: CurrentUser(id=USER_ID)
+    return get_current_user
+
+
+def test_connect_requires_domain(monkeypatch):
+    import app.routers.integrations as integrations_router
+
+    fake = _FakeSupabase()
+    monkeypatch.setattr(integrations_router.supabase, "select", fake.select)
+    monkeypatch.setattr(integrations_router.supabase, "insert", fake.insert)
+    get_current_user = _override_user()
     try:
         r = client.post(
-            "/api/v1/integrations/schoology/connect-materials",
-            json={"username": "student@example.com", "password": "hunter2", "domain": "https://d.schoology.com"},
+            "/api/v1/integrations/schoology/connect",
+            json={"domain": "", "username": "student@example.com", "password": "hunter2"},
         )
         assert r.status_code == 400
-        assert "Connect your Schoology API key first" in r.json()["detail"]
+        assert "web address" in r.json()["detail"]
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
 
-def test_connect_materials_merges_and_verifies(crypto_key, monkeypatch):
+def test_connect_with_login_only_stores_scraper_credentials_and_syncs(crypto_key, monkeypatch):
+    """The common case: no API key at all — just the login. Must not require
+    (or expect) a pre-existing integration row the way the old two-step flow
+    did."""
     import app.routers.integrations as integrations_router
 
-    row = {
-        "id": "int-1", "secret_ref": encrypt_api_key("ckey", "csecret"),
-        "config": {"auth_mode": "api_key", "domain": "https://d.schoology.com"},
-    }
-    fake = _FakeSupabase(rows=[row])
+    fake = _FakeSupabase()
     monkeypatch.setattr(integrations_router.supabase, "select", fake.select)
+    monkeypatch.setattr(integrations_router.supabase, "insert", fake.insert)
     monkeypatch.setattr(integrations_router.supabase, "update", fake.update)
 
-    async def _fake_verify(self, user_id):
+    async def _fake_verify_login(self, user_id):
         return {"status": "success"}
 
-    monkeypatch.setattr(SchoologyProvider, "verify_materials_login", _fake_verify)
+    async def _fake_sync(self, user_id):
+        return {"courses": 1, "documents": 2, "errors": []}
 
-    from app.core.security import CurrentUser, get_current_user
+    monkeypatch.setattr(SchoologyProvider, "verify_materials_login", _fake_verify_login)
+    monkeypatch.setattr(SchoologyProvider, "sync", _fake_sync)
 
-    app.dependency_overrides[get_current_user] = lambda: CurrentUser(id=USER_ID)
+    get_current_user = _override_user()
     try:
         r = client.post(
-            "/api/v1/integrations/schoology/connect-materials",
-            json={"username": "student@example.com", "password": "hunter2"},
+            "/api/v1/integrations/schoology/connect",
+            json={
+                "domain": "https://d.schoology.com",
+                "username": "student@example.com", "password": "hunter2",
+            },
         )
         assert r.status_code == 201
-        assert r.json() == {"status": "success"}
-        # The API key must survive the merge — not be wiped out.
-        merged_creds = decrypt_json(fake.updated["secret_ref"])
-        assert merged_creds["consumer_key"] == "ckey"
-        assert merged_creds["schoology_username"] == "student@example.com"
+        body = r.json()
+        assert body["status"] == "success"
+        assert body["courses"] == 1
+
+        creds = decrypt_json(fake.inserted["secret_ref"])
+        assert creds == {"schoology_username": "student@example.com", "schoology_password": "hunter2"}
+        assert fake.inserted["config"]["auth_mode"] == "scraper"
+        assert fake.inserted["config"]["domain"] == "https://d.schoology.com"
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_connect_with_optional_api_key_verifies_and_merges_credentials(crypto_key, monkeypatch):
+    import app.routers.integrations as integrations_router
+
+    fake = _FakeSupabase()
+    monkeypatch.setattr(integrations_router.supabase, "select", fake.select)
+    monkeypatch.setattr(integrations_router.supabase, "insert", fake.insert)
+    monkeypatch.setattr(integrations_router.supabase, "update", fake.update)
+
+    async def _fake_api_verify(self, consumer_key, consumer_secret, api_base):
+        return {"api_uid": "123", "section_count": 4}
+
+    async def _fake_verify_login(self, user_id):
+        return {"status": "success"}
+
+    async def _fake_sync(self, user_id):
+        return {"courses": 4, "errors": []}
+
+    monkeypatch.setattr(SchoologyProvider, "verify", _fake_api_verify)
+    monkeypatch.setattr(SchoologyProvider, "verify_materials_login", _fake_verify_login)
+    monkeypatch.setattr(SchoologyProvider, "sync", _fake_sync)
+
+    get_current_user = _override_user()
+    try:
+        r = client.post(
+            "/api/v1/integrations/schoology/connect",
+            json={
+                "domain": "https://d.schoology.com",
+                "username": "student@example.com", "password": "hunter2",
+                "consumer_key": "ckey", "consumer_secret": "csecret",
+            },
+        )
+        assert r.status_code == 201
+        creds = decrypt_json(fake.inserted["secret_ref"])
+        assert creds == {
+            "consumer_key": "ckey", "consumer_secret": "csecret",
+            "schoology_username": "student@example.com", "schoology_password": "hunter2",
+        }
+        assert fake.inserted["config"]["auth_mode"] == "api_key+scraper"
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_connect_bad_login_raises_401_without_saving_a_broken_row(crypto_key, monkeypatch):
+    import app.routers.integrations as integrations_router
+
+    fake = _FakeSupabase()
+    monkeypatch.setattr(integrations_router.supabase, "select", fake.select)
+    monkeypatch.setattr(integrations_router.supabase, "insert", fake.insert)
+
+    async def _fake_verify_login_fails(self, user_id):
+        raise SchoologyScraperAuthError("Schoology login failed — check your username and password.")
+
+    monkeypatch.setattr(SchoologyProvider, "verify_materials_login", _fake_verify_login_fails)
+
+    get_current_user = _override_user()
+    try:
+        r = client.post(
+            "/api/v1/integrations/schoology/connect",
+            json={
+                "domain": "https://d.schoology.com",
+                "username": "student@example.com", "password": "wrong",
+            },
+        )
+        assert r.status_code == 401
     finally:
         app.dependency_overrides.pop(get_current_user, None)

@@ -60,15 +60,46 @@ interface SchoologyMaterialItem {
   href: string;
 }
 
+interface SchoologyWalkStep {
+  requested_url: string;
+  final_url?: string;
+  status_code?: number;
+  depth?: number;
+  raw_link_count?: number;
+  parsed_count?: number;
+  looks_like_login?: boolean;
+  folders?: string[];
+  items?: string[];
+}
+
 interface SchoologyProbedSection {
   section: { id: string; name: string };
   items: SchoologyMaterialItem[];
+  walk_trace?: SchoologyWalkStep[];
 }
 
 interface SchoologyDebugResult {
   probed?: SchoologyProbedSection[];
   available_sections?: string[];
   note?: string;
+}
+
+// Turn a raw materials walk trace into one plain-language sentence explaining
+// why a course came back with no items — the difference between "the session
+// bounced to a login page", "the page loaded but had nothing on it", and "the
+// page couldn't be reached" is invisible from an empty list alone.
+function diagnoseWalk(trace: SchoologyWalkStep[]): string {
+  if (trace.some((s) => s.looks_like_login)) {
+    return "The Schoology session was bounced to a login page while loading this course — the login may not have full access to it (e.g. a parent account whose materials live elsewhere), or the session expired.";
+  }
+  if (trace.some((s) => s.status_code && s.status_code >= 400)) {
+    const bad = trace.find((s) => s.status_code && s.status_code >= 400)!;
+    return `This course's materials page couldn't be reached (HTTP ${bad.status_code}). The course id may not be visible to this login.`;
+  }
+  if (trace.every((s) => (s.raw_link_count ?? 0) === 0)) {
+    return "The materials page loaded but contained no links at all — its contents are likely loaded dynamically (JavaScript), which the login scraper can't see yet.";
+  }
+  return "The materials page loaded but nothing on it was recognized as a folder, file, or link — it may be genuinely empty, or use a layout we don't parse yet.";
 }
 
 const STATUS_TONE: Record<string, "good" | "warn" | "bad" | "default"> = {
@@ -513,7 +544,31 @@ export default function IntegrationsPage() {
                     <div key={p.section.id} className="space-y-1.5 border-t border-atlas-border pt-3 first:border-0 first:pt-0">
                       <div className="font-medium">{p.section.name}</div>
                       {p.items.length === 0 ? (
-                        <div className="text-atlas-muted">No items found.</div>
+                        <>
+                          <div className="text-atlas-muted">No items found.</div>
+                          {p.walk_trace && p.walk_trace.length > 0 && (
+                            <div className="mt-1.5 space-y-1">
+                              <div className="text-atlas-muted">
+                                {diagnoseWalk(p.walk_trace)}
+                              </div>
+                              <details>
+                                <summary className="cursor-pointer text-atlas-muted">
+                                  Pages checked ({p.walk_trace.length})
+                                </summary>
+                                <ul className="mt-1 space-y-1 font-mono text-[11px] leading-tight">
+                                  {p.walk_trace.map((step, i) => (
+                                    <li key={i} className="break-all text-atlas-muted">
+                                      [{step.status_code ?? "?"}]
+                                      {step.looks_like_login ? " ⚠ login-wall" : ""}{" "}
+                                      {step.parsed_count ?? 0} of {step.raw_link_count ?? 0} links ·{" "}
+                                      {step.final_url ?? step.requested_url}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </details>
+                            </div>
+                          )}
+                        </>
                       ) : (
                         <ul className="space-y-1">
                           {p.items.map((item, i) => (

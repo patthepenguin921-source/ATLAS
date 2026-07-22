@@ -575,11 +575,22 @@ class SchoologyScraperClient:
         that one requested, not every candidate Schoology could plausibly
         use. Logs into app.schoology.com first when `start_url` is on that
         domain (the district-subdomain login alone doesn't carry a session
-        there — see this module's docstring)."""
+        there — see this module's docstring). A failed app-domain login is
+        reported through `trace` (when supplied) rather than raised — the
+        caller's district-subdomain login already succeeded (that's how it
+        got this far), so this shouldn't blow up the whole request the way
+        letting the exception propagate would; it's no different from
+        `walk_materials`/`debug_materials_page` treating that failure as
+        "this candidate is unreachable" rather than fatal."""
         if not self._logged_in:
             await self.login()
         if start_url.startswith(_APP_DOMAIN):
-            await self._login_app_domain()
+            try:
+                await self._login_app_domain()
+            except SchoologyScraperAuthError as e:
+                if trace is not None:
+                    trace.append({"requested_url": start_url, "error": str(e)})
+                return []
         return await self._walk_materials_tree(start_url, known_names=known_names, trace=trace)
 
     async def walk_materials(

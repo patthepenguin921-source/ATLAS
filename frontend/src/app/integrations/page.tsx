@@ -82,6 +82,7 @@ interface SchoologyProbedSection {
   materials_url?: string | null;
   items: SchoologyMaterialItem[];
   walk_trace?: SchoologyWalkStep[];
+  error?: string | null;
 }
 
 interface SchoologyDebugResult {
@@ -559,6 +560,9 @@ export default function IntegrationsPage() {
                             {p.materials_url}
                           </a>
                         </div>
+                      )}
+                      {p.error && (
+                        <div className="text-atlas-bad">Couldn&apos;t reach this course: {p.error}</div>
                       )}
                       {p.items.length === 0 ? (
                         <>

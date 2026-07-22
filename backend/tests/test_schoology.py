@@ -21,7 +21,7 @@ import httpx
 import pytest
 
 from app.core.supabase_client import supabase
-from app.integrations import google_files
+from app.integrations import course_mapping, google_files
 from app.integrations.schoology import (
     SchoologyProvider,
     _map_category,
@@ -1084,7 +1084,12 @@ def test_sync_with_no_api_key_refreshes_materials_for_already_linked_courses(fak
 def test_sync_with_no_api_key_and_no_discoverable_courses_reports_helpful_error(fake_db, monkeypatch):
     """No API key, nothing linked, and the login session discovers no courses
     either (empty account, or a parent whose courses live on app.schoology.com)
-    — report a clear message instead of silently doing nothing."""
+    — report a clear message instead of silently doing nothing. Unlike the
+    debug tools (see `test_debug_walk_materials_falls_back_to_known_sections_
+    when_login_discovers_none`), the real automated sync deliberately does
+    NOT fall back to `course_mapping.KNOWN_SECTIONS` — that table is only a
+    diagnostic aid for confirming discovery against confirmed-real links, not
+    a substitute for actually fixing discovery for every account's sync."""
     provider = SchoologyProvider()
 
     async def _fake_load(self, user_id):
@@ -1235,8 +1240,18 @@ def test_debug_walk_materials_discovers_courses_from_login_without_api_key(fake_
     assert "walk_trace" in result["probed"][0]
 
 
-def test_debug_walk_materials_reports_note_when_login_discovers_no_courses(fake_db, monkeypatch):
+def test_debug_walk_materials_falls_back_to_known_sections_when_login_discovers_none(
+    fake_db, monkeypatch,
+):
+    """When the login session discovers no courses at all, the confirmed
+    known course links (course_mapping.KNOWN_SECTIONS) are probed instead of
+    just reporting "no courses found" — the debug screen must always be able
+    to show these courses' real materials-page links, even when discovery
+    itself is broken."""
     provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", (
+        {"id": "known-1", "name": "Known Course", "student_uid": "999"},
+    ))
 
     async def _fake_load(self, user_id):
         return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
@@ -1245,12 +1260,19 @@ def test_debug_walk_materials_reports_note_when_login_discovers_no_courses(fake_
     monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
     fake_db.tables["courses"] = []
 
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File")],
+        courses=[],
+    )
+
     async def _fake_scraper_client(self, user_id):
-        return _FakeScraperClient([], courses=[])
+        return scraper
 
     monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
 
     result = asyncio.run(provider.debug_walk_materials(USER_ID))
 
-    assert "note" in result
-    assert "No Schoology courses found" in result["note"]
+    assert "note" not in result
+    assert result["probed"][0]["section"] == {"id": "known-1", "name": "Known Course"}
+    assert result["probed"][0]["items"][0]["name"] == "Notes"
+    assert scraper.student_uid_calls == ["999"]

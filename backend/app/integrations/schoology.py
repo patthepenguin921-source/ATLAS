@@ -368,13 +368,29 @@ class SchoologyProvider(IntegrationProvider):
                 if not course_mapping.is_excluded(c["name"])
                 and not course_mapping.is_club(c["name"])
             ]
-            if not sections:
-                return [], None, {
-                    "note": "No Schoology courses found for this login. If you use a parent "
-                            "account, its courses may live on app.schoology.com — otherwise "
-                            "check the account is enrolled in courses.",
-                    "discovered_raw": [c["name"] for c in discovered],
-                }
+
+        # Merge in the confirmed-real course links (course_mapping.
+        # KNOWN_SECTIONS) no matter how `sections` above was populated — the
+        # API listing, the DB's already-linked courses, and a fresh
+        # login-session discovery have each, at different times, come back
+        # incomplete or empty for this account even though every one of
+        # these courses is reachable directly by URL (the reported "still
+        # not pulling any links or the correct information"). A section
+        # already found above is left as-is; a known one missing from it is
+        # added, and a missing `uid` is backfilled — so the debug tools can
+        # always reach these courses' real materials pages regardless of
+        # whether discovery itself is working. Deliberately scoped to the
+        # debug probe only, not `_discover_and_link_sections` (the automated
+        # sync) — this table is a diagnostic aid for confirming discovery
+        # against confirmed-real links, not a substitute for fixing
+        # discovery itself for every account's real sync.
+        sections, uid = course_mapping.merge_known_sections(sections, uid)
+        if not sections:
+            return [], None, {
+                "note": "No Schoology courses found for this login. If you use a parent "
+                        "account, its courses may live on app.schoology.com — otherwise "
+                        "check the account is enrolled in courses.",
+            }
 
         if query:
             q = query.strip().lower()

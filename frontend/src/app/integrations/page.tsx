@@ -53,14 +53,20 @@ interface DebugScrapeResult {
   sample_row_html: string[];
 }
 
+interface SchoologyMaterialItem {
+  name: string;
+  type: string | null;
+  folder: string | null;
+  href: string;
+}
+
 interface SchoologyProbedSection {
-  section: { id: string; name: string; course_id?: string };
-  [rawKey: string]: unknown;
+  section: { id: string; name: string };
+  items: SchoologyMaterialItem[];
 }
 
 interface SchoologyDebugResult {
   probed?: SchoologyProbedSection[];
-  sections_found?: number;
   available_sections?: string[];
   note?: string;
 }
@@ -273,8 +279,8 @@ export default function IntegrationsPage() {
     try {
       const q = schoologyDebugQuery.trim();
       const path = q
-        ? `/integrations/schoology/debug-fetch?q=${encodeURIComponent(q)}`
-        : "/integrations/schoology/debug-fetch";
+        ? `/integrations/schoology/debug-walk-materials?q=${encodeURIComponent(q)}`
+        : "/integrations/schoology/debug-walk-materials";
       const result = await apiGet<SchoologyDebugResult>(path);
       setSchoologyDebugResult(result);
     } catch (err: any) {
@@ -453,7 +459,7 @@ export default function IntegrationsPage() {
                       onKeyDown={(e) => e.key === "Enter" && debugFetchSchoology()}
                     />
                     <button className="btn-ghost" disabled={schoologyDebugging} onClick={debugFetchSchoology}>
-                      {schoologyDebugging ? "Fetching…" : "Debug fetch"}
+                      {schoologyDebugging ? "Fetching…" : "Debug materials"}
                     </button>
                     <button className="btn-ghost" onClick={openSchoologyModal}>
                       Edit login
@@ -476,7 +482,7 @@ export default function IntegrationsPage() {
           )}
           {schoologyDebugResult && (
             <div className="card mt-4 text-xs space-y-3">
-              <div className="font-medium text-sm">Raw Schoology response</div>
+              <div className="font-medium text-sm">Materials found via login</div>
               {schoologyDebugResult.note ? (
                 <div className="text-atlas-muted">
                   {schoologyDebugResult.note}
@@ -489,29 +495,25 @@ export default function IntegrationsPage() {
               ) : (
                 <>
                   <div className="text-atlas-muted">
-                    An empty raw_assignments/raw_events is normal if this teacher never creates
-                    graded Assignment/Event objects in Schoology. The raw_folder_* keys are what
-                    matter — the real folder listing is whichever one contains a
-                    &quot;folder-item&quot; array. An &quot;error&quot; key means that specific endpoint was
-                    rejected; a section-shaped object (course_title, section_title, etc, no
-                    folder-item key) means that endpoint returned the wrong resource.
+                    Walks each course's materials via your Schoology login (not the API key) and
+                    lists every real folder/file/link found, with Schoology's page navigation
+                    filtered out.
                   </div>
                   {schoologyDebugResult.probed?.map((p) => (
                     <div key={p.section.id} className="space-y-1.5 border-t border-atlas-border pt-3 first:border-0 first:pt-0">
-                      <div className="font-medium">
-                        {p.section.name} (section {p.section.id}
-                        {p.section.course_id ? `, course ${p.section.course_id}` : ""})
-                      </div>
-                      {Object.entries(p)
-                        .filter(([key]) => key !== "section")
-                        .map(([key, value]) => (
-                          <div key={key}>
-                            <div className="text-atlas-muted">{key}:</div>
-                            <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-60 overflow-auto">
-                              {JSON.stringify(value, null, 2)}
-                            </pre>
-                          </div>
-                        ))}
+                      <div className="font-medium">{p.section.name}</div>
+                      {p.items.length === 0 ? (
+                        <div className="text-atlas-muted">No items found.</div>
+                      ) : (
+                        <ul className="space-y-1">
+                          {p.items.map((item, i) => (
+                            <li key={i} className="flex flex-wrap items-baseline gap-x-2">
+                              <span>{item.folder ? `${item.folder} · ` : ""}{item.name}</span>
+                              {item.type && <span className="text-atlas-muted">({item.type})</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   ))}
                 </>

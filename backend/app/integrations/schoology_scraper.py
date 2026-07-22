@@ -48,6 +48,15 @@ _LOGIN_PATH = "/login"
 _APP_DOMAIN = "https://app.schoology.com"
 _MAX_MATERIALS_DEPTH = 8
 
+# The course-profile link every enrolled course shows in the web UI's course
+# list — its text is the course name. Matched exactly (no sub-path) so it's
+# the name link, not a `/course/{id}/updates` etc. nav link.
+_COURSE_PROFILE_HREF = re.compile(r"^/course/(\d+)$")
+# Pages in the authenticated web UI that carry the enrolled-course list.
+# Tried in order and unioned — different Schoology versions surface it on
+# different ones, so probing several is more robust than betting on one.
+_COURSE_LIST_PATHS = ("/home", "/courses", "/course/index")
+
 # Links that show up on every course's materials page regardless of what the
 # course actually contains — site chrome (skip-link, course nav tabs,
 # third-party app launchers, the materials-type filter sidebar, admin/export
@@ -322,6 +331,54 @@ class SchoologyScraperClient:
         self._raise_if_login_failed(result_soup)
         self._app_logged_in = True
 
+    async def list_courses(self) -> list[dict[str, str]]:
+        """Discover the logged-in user's enrolled courses — `{"id", "name"}`
+        per course — straight from the authenticated web UI, no API key
+        required. This is what makes a login-only account usable at all:
+        materials can only be walked once each section's id is known, and
+        without the API there was previously no way to learn them, so a
+        login-only account had nothing to sync and the debug tools had
+        nothing to probe. Collects every `/course/{section_id}` profile link
+        across the pages that carry the course list, pairing each with its
+        link text as the course name (first non-empty wins per id)."""
+        if not self._logged_in:
+            await self.login()
+        found: dict[str, str] = {}
+
+        def _collect(base: str, html: str) -> None:
+            soup = BeautifulSoup(html, "html.parser")
+            for a in soup.find_all("a", href=True):
+                m = _COURSE_PROFILE_HREF.match(a["href"].strip())
+                if not m:
+                    continue
+                name = a.get_text(" ", strip=True)
+                if name:
+                    found.setdefault(m.group(1), name)
+
+        for path in _COURSE_LIST_PATHS:
+            try:
+                r = await self._client.get(f"{self._base}{path}")
+            except Exception:  # noqa: BLE001
+                continue
+            _collect(self._base, r.text)
+
+        # Parent accounts' courses can live only on app.schoology.com (a
+        # separate session — see this module's docstring). Best-effort: log
+        # in there and read the same course-list pages; a failure here just
+        # leaves whatever the district subdomain already found.
+        try:
+            await self._login_app_domain()
+            for path in _COURSE_LIST_PATHS:
+                try:
+                    r = await self._client.get(f"{_APP_DOMAIN}{path}")
+                except Exception:  # noqa: BLE001
+                    continue
+                _collect(_APP_DOMAIN, r.text)
+        except SchoologyScraperAuthError:
+            pass
+
+        return [{"id": sid, "name": name} for sid, name in found.items()]
+
     async def _describe_page(self, url: str) -> dict[str, Any]:
         r = await self._client.get(url)
         soup = BeautifulSoup(r.text, "html.parser")
@@ -383,7 +440,7 @@ class SchoologyScraperClient:
 
     async def walk_materials(
         self, section_id: str, *, known_names: set[str] | None = None,
-        student_uid: str | None = None,
+        student_uid: str | None = None, trace: list[dict[str, Any]] | None = None,
     ) -> list[MaterialLink]:
         """Depth-first walk of a section's materials page and every folder
         inside it, returning only real, new leaf items — folders are never
@@ -432,7 +489,24 @@ class SchoologyScraperClient:
                 {"text": a.get_text(" ", strip=True), "href": a.get("href")}
                 for a in soup.find_all("a", href=True)
             ]
-            for link in parse_materials_page(raw_links):
+            parsed = parse_materials_page(raw_links)
+            if trace is not None:
+                # Surface why a walk came back empty: a session bounced to the
+                # login page, or a real materials page that genuinely parsed
+                # to zero content links, look identical in the final result
+                # (nothing) but mean completely different things.
+                trace.append({
+                    "requested_url": url,
+                    "final_url": str(r.url),
+                    "status_code": r.status_code,
+                    "depth": depth,
+                    "raw_link_count": len(raw_links),
+                    "parsed_count": len(parsed),
+                    "looks_like_login": self._find_login_form(soup) is not None,
+                    "folders": [p.name for p in parsed if p.kind == "folder"],
+                    "items": [p.name for p in parsed if p.kind == "item"],
+                })
+            for link in parsed:
                 resolved_href = urljoin(url, link.href)
                 if link.kind == "folder":
                     child_path = f"{folder_path}/{link.name}" if folder_path else link.name

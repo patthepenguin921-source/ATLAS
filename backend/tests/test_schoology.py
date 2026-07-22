@@ -759,18 +759,28 @@ class _FakeScraperClient:
     in test_schoology_scraper.py; this only exercises how the provider wires
     its result into `documents`."""
 
-    def __init__(self, items: list[MaterialLink], *, files: dict[str, tuple[bytes, str]] | None = None):
+    def __init__(
+        self, items: list[MaterialLink], *,
+        files: dict[str, tuple[bytes, str]] | None = None,
+        courses: list[dict[str, str]] | None = None,
+    ):
         self._items = items
         self._files = files or {}
+        self._courses = courses or []
         self.known_names_calls: list[set[str] | None] = []
         self.student_uid_calls: list[str | None] = []
         self.closed = False
 
-    async def walk_materials(self, section_id, *, known_names=None, student_uid=None):
+    async def walk_materials(self, section_id, *, known_names=None, student_uid=None, trace=None):
         self.known_names_calls.append(known_names)
         self.student_uid_calls.append(student_uid)
+        if trace is not None:
+            trace.append({"requested_url": f"/course/{section_id}/materials", "parsed_count": len(self._items)})
         known = {n.strip().lower() for n in (known_names or set())}
         return [i for i in self._items if i.name.strip().lower() not in known]
+
+    async def list_courses(self):
+        return list(self._courses)
 
     async def download_file(self, url):
         """Mirrors the real client: None means "not actually a direct file"
@@ -781,6 +791,50 @@ class _FakeScraperClient:
 
     async def aclose(self):
         self.closed = True
+
+
+def test_sync_login_only_discovers_courses_and_pulls_materials(fake_db, monkeypatch):
+    """A login-only account (no API key, no prior API-linked courses) must
+    discover its courses straight from the login session and pull each
+    course's materials — the reported "nothing shows / nothing pulls" case.
+    "AP Biology" reconciles onto the existing PowerSchool course (no dupe);
+    the new "AP US History" course is created and linked."""
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                      kind="item", material_type="File", folder_path="Unit 1")],
+        files={"/attachment/download/1": (b"%PDF-1.4 bytes", "application/pdf")},
+        courses=[
+            {"id": "sec-bio", "name": "AP Biology"},
+            {"id": "sec-hist", "name": "AP US History"},
+        ],
+    )
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report = asyncio.run(provider.sync(USER_ID))
+
+    assert report["errors"] == []
+    assert report["courses"] == 2
+    courses = fake_db.tables["courses"]
+    names = {c["name"] for c in courses}
+    # Existing PowerSchool "AP Biology" reused (not duplicated) + new history course.
+    assert names == {"AP Biology", "AP US History"}
+    bio = next(c for c in courses if c["name"] == "AP Biology")
+    assert bio["metadata"]["schoology_section_id"] == "sec-bio"
+    # Materials were actually pulled for the discovered courses.
+    docs = fake_db.tables["documents"]
+    assert any("Syllabus.pdf" in d["title"] for d in docs)
 
 
 def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypatch):
@@ -1027,7 +1081,10 @@ def test_sync_with_no_api_key_refreshes_materials_for_already_linked_courses(fak
     assert {d["metadata"]["material_name"] for d in docs} == {"Notes"}
 
 
-def test_sync_with_no_api_key_and_no_linked_courses_reports_helpful_error(fake_db, monkeypatch):
+def test_sync_with_no_api_key_and_no_discoverable_courses_reports_helpful_error(fake_db, monkeypatch):
+    """No API key, nothing linked, and the login session discovers no courses
+    either (empty account, or a parent whose courses live on app.schoology.com)
+    — report a clear message instead of silently doing nothing."""
     provider = SchoologyProvider()
 
     async def _fake_load(self, user_id):
@@ -1037,11 +1094,16 @@ def test_sync_with_no_api_key_and_no_linked_courses_reports_helpful_error(fake_d
     monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
     # BIO_COURSE (seeded by fake_db) has empty metadata — no linked section id.
 
+    async def _fake_scraper_client(self, user_id):
+        return _FakeScraperClient([], courses=[])  # discovers no courses
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
     report = asyncio.run(provider.sync(USER_ID))
 
     assert report["courses"] == 0
     assert len(report["errors"]) == 1
-    assert "API key" in report["errors"][0]
+    assert "No Schoology courses found" in report["errors"][0]
     assert fake_db.tables["documents"] == []
 
 
@@ -1108,16 +1170,54 @@ def test_debug_walk_materials_falls_back_when_api_key_is_rejected(fake_db, monke
     assert result["probed"][0]["section"] == {"id": SECTION_ID, "name": "AP Biology"}
 
 
-def test_debug_walk_materials_with_no_linked_courses_reports_helpful_note(fake_db, monkeypatch):
+def test_debug_walk_materials_discovers_courses_from_login_without_api_key(fake_db, monkeypatch):
+    """No API key and nothing linked: the debug tool must discover courses
+    straight from the login session and probe them, rather than dead-ending
+    on "connect an API key first"."""
     provider = SchoologyProvider()
 
     async def _fake_load(self, user_id):
-        return {"secret_ref": "x", "config": {}}
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
 
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+    # No course carries a schoology_section_id, so discovery is the only path.
+    fake_db.tables["courses"] = []
+
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File")],
+        courses=[{"id": "sec-42", "name": "AP Physics"}],
+    )
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    assert result["probed"][0]["section"] == {"id": "sec-42", "name": "AP Physics"}
+    assert result["probed"][0]["items"][0]["name"] == "Notes"
+    # The walk trace is included so an empty probe would be diagnosable.
+    assert "walk_trace" in result["probed"][0]
+
+
+def test_debug_walk_materials_reports_note_when_login_discovers_no_courses(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+    fake_db.tables["courses"] = []
+
+    async def _fake_scraper_client(self, user_id):
+        return _FakeScraperClient([], courses=[])
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
 
     result = asyncio.run(provider.debug_walk_materials(USER_ID))
 
     assert "note" in result
-    assert "API key" in result["note"]
+    assert "No Schoology courses found" in result["note"]

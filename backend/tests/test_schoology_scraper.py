@@ -640,6 +640,107 @@ def test_download_file_returns_none_for_an_html_detail_page():
     asyncio.run(run())
 
 
+HOME_COURSE_LIST_PAGE = """
+<html><body>
+  <nav>
+    <a href="/course/8435659601">AP Biology: Section 2</a>
+    <a href="/course/8435659601/updates">Updates</a>
+    <a href="/course/7654321000">AP US History</a>
+    <a href="/user/131510895"></a>
+    <a href="/course/9999999999"></a>  <!-- icon link, no text: skipped -->
+  </nav>
+</body></html>
+"""
+
+
+def test_list_courses_discovers_enrolled_sections_login_only():
+    """A login-only account (no API key) must still be able to discover its
+    courses — section id + name — straight from the web UI, or nothing can
+    be synced/probed. Only the exact /course/{id} profile link supplies the
+    name; sub-path nav links and text-less icon links are ignored."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/home":
+                return httpx.Response(200, text=HOME_COURSE_LIST_PAGE)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            courses = await client.list_courses()
+            by_id = {c["id"]: c["name"] for c in courses}
+            assert by_id == {
+                "8435659601": "AP Biology: Section 2",
+                "7654321000": "AP US History",
+            }
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_list_courses_also_discovers_parent_courses_on_app_domain():
+    """A parent account's courses can live only on app.schoology.com — the
+    course list must merge what both domains expose."""
+    app_home = """
+    <html><body><a href="/course/5550001">Parent-only Course</a></body></html>
+    """
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "app.schoology.com":
+                if request.url.path == "/login" and request.method == "GET":
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)
+                if request.url.path == "/login" and request.method == "POST":
+                    return httpx.Response(200, text=APP_DASHBOARD_PAGE)
+                if request.url.path == "/home":
+                    return httpx.Response(200, text=app_home)
+                return httpx.Response(404)
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/home":
+                return httpx.Response(200, text=HOME_COURSE_LIST_PAGE)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            by_id = {c["id"]: c["name"] for c in await client.list_courses()}
+            assert by_id["8435659601"] == "AP Biology: Section 2"  # district
+            assert by_id["5550001"] == "Parent-only Course"  # app domain
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_walk_materials_trace_records_each_visited_page():
+    """The optional trace must explain an otherwise-blank walk: each visited
+    page's url, status, link counts, and whether it hit a login wall."""
+    async def run():
+        transport = httpx.MockTransport(_walk_handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            trace: list[dict] = []
+            await client.walk_materials("8435659601", trace=trace)
+            assert trace, "trace should not be empty"
+            root = trace[0]
+            assert root["requested_url"].endswith("/course/8435659601/materials")
+            assert root["status_code"] == 200
+            assert root["looks_like_login"] is False
+            assert "Syllabus and Other Important Documents" in root["folders"]
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_download_file_follows_detail_page_to_real_attachment():
     """The common Schoology case: a material link opens an HTML viewer/detail
     page that embeds the real file, rather than downloading it directly. The

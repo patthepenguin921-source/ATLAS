@@ -316,10 +316,31 @@ class SchoologyProvider(IntegrationProvider):
                 {"id": (r.get("metadata") or {}).get("schoology_section_id"), "name": r["name"]}
                 for r in rows if (r.get("metadata") or {}).get("schoology_section_id")
             ]
+
+        if not sections:
+            # Login-only account with nothing linked yet: discover the
+            # enrolled courses straight from the web session so the debug
+            # tools (and sync) work without ever needing an API key.
+            try:
+                scraper = await self._scraper_client(user_id)
+                try:
+                    discovered = await scraper.list_courses()
+                finally:
+                    await scraper.aclose()
+            except Exception as e:  # noqa: BLE001
+                return [], None, {"note": f"Could not discover courses from the Schoology login: {e}"}
+            sections = [
+                {"id": c["id"], "name": c["name"]}
+                for c in discovered
+                if not course_mapping.is_excluded(c["name"])
+                and not course_mapping.is_club(c["name"])
+            ]
             if not sections:
                 return [], None, {
-                    "note": "No Schoology courses to probe yet — connect with an API key once "
-                            "(under \"Advanced\") to discover your courses, or sync at least once first.",
+                    "note": "No Schoology courses found for this login. If you use a parent "
+                            "account, its courses may live on app.schoology.com — otherwise "
+                            "check the account is enrolled in courses.",
+                    "discovered_raw": [c["name"] for c in discovered],
                 }
 
         if query:
@@ -376,7 +397,8 @@ class SchoologyProvider(IntegrationProvider):
         try:
             probed = []
             for s in sections:
-                items = await scraper.walk_materials(s["id"], student_uid=uid)
+                trace: list[dict[str, Any]] = []
+                items = await scraper.walk_materials(s["id"], student_uid=uid, trace=trace)
                 probed.append({
                     "section": {"id": s["id"], "name": s["name"]},
                     "items": [
@@ -384,6 +406,11 @@ class SchoologyProvider(IntegrationProvider):
                          "folder": i.folder_path or None, "href": i.href}
                         for i in items
                     ],
+                    # Every page the walk actually visited (url, status, how
+                    # many links it saw / parsed, whether it hit a login
+                    # wall) — so an empty `items` list is diagnosable instead
+                    # of just blank.
+                    "walk_trace": trace,
                 })
             return {"probed": probed}
         finally:
@@ -817,10 +844,23 @@ class SchoologyProvider(IntegrationProvider):
         ]
         linked = [(cid, name, sid) for cid, name, sid in linked if sid]
         if not linked:
+            # Nothing linked from a prior API sync — discover the enrolled
+            # courses straight from the login session and create/link them
+            # here, so a login-only account (the common case now) actually
+            # pulls materials instead of reporting "nothing linked yet".
+            try:
+                linked = await self._discover_and_link_sections(user_id, report)
+            except SchoologyScraperAuthError as e:
+                report["errors"].append(f"Schoology materials (scrape login): {e}")
+                return
+            except RuntimeError as e:
+                report["errors"].append(str(e))
+                return
+        if not linked:
             report["errors"].append(
-                "No Schoology courses are linked yet — connect with an API key once "
-                "(under \"Advanced\") to discover your courses, then materials-only "
-                "syncs can keep them updated afterward."
+                "No Schoology courses found for this login. If this is a parent account, "
+                "its courses may live on app.schoology.com; otherwise confirm the account "
+                "is enrolled in courses."
             )
             return
         for course_id, name, section_id in linked:
@@ -834,6 +874,49 @@ class SchoologyProvider(IntegrationProvider):
                 report=report, google_token=google_token,
             )
             report["courses"] += 1
+
+    async def _discover_and_link_sections(
+        self, user_id: str, report: dict[str, Any],
+    ) -> list[tuple[str, str, str]]:
+        """Discover enrolled courses from the login session (no API key) and
+        reconcile each into an Atlas course row — reusing the same
+        name-matching/creation path (`_resolve_course`) the API sync uses, so
+        a Schoology section still links to an existing PowerSchool/manual
+        course instead of duplicating it, and `metadata.schoology_section_id`
+        gets set for next time. Returns `(course_id, name, section_id)` for
+        every academic course found; clubs are routed to their own table and
+        excluded blocks skipped, matching `sync()`'s behavior."""
+        scraper = await self._scraper_client(user_id)
+        try:
+            discovered = await scraper.list_courses()
+        finally:
+            await scraper.aclose()
+
+        linked: list[tuple[str, str, str]] = []
+        for c in discovered:
+            name, sid = c["name"], c["id"]
+            if course_mapping.is_excluded(name):
+                report["excluded"] += 1
+                continue
+            section = SchoologySection(
+                id=sid, course_id=sid, course_title=name, section_title="",
+                course_code="", section_code="", grading_periods=[], meeting_days=[],
+                start_time="", end_time="", location="", active=True,
+            )
+            if course_mapping.is_club(name):
+                try:
+                    await self._resolve_club(user_id, section)
+                    report["clubs"] += 1
+                except Exception as e:  # noqa: BLE001
+                    report["errors"].append(f"{name} (club): {e}")
+                continue
+            try:
+                course_id = await self._resolve_course(user_id, section, {})
+            except Exception as e:  # noqa: BLE001
+                report["errors"].append(f"{name}: {e}")
+                continue
+            linked.append((course_id, name, sid))
+        return linked
 
     async def _sync_section(
         self, *, client: SchoologyClient, user_id: str, course_id: str,

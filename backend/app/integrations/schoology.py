@@ -316,6 +316,35 @@ class SchoologyProvider(IntegrationProvider):
                 {"id": (r.get("metadata") or {}).get("schoology_section_id"), "name": r["name"]}
                 for r in rows if (r.get("metadata") or {}).get("schoology_section_id")
             ]
+            # A parent account's student uid was persisted on the course
+            # during discovery — read it back so the walk hits the parent-view
+            # preview URL, not the (empty) plain /materials page. Without this,
+            # an already-linked parent course fell back to /materials and came
+            # back with nothing.
+            if not uid:
+                uid = next(
+                    (
+                        (r.get("metadata") or {}).get("schoology_student_uid")
+                        for r in rows
+                        if (r.get("metadata") or {}).get("schoology_student_uid")
+                    ),
+                    None,
+                )
+            # Still no uid (e.g. courses linked before parent support existed,
+            # so the uid was never stored) — discover it straight from the
+            # login session so the probe can still reach the parent pages.
+            if not uid:
+                try:
+                    scraper = await self._scraper_client(user_id)
+                    try:
+                        discovered = await scraper.list_courses()
+                    finally:
+                        await scraper.aclose()
+                    uid = next(
+                        (c.get("student_uid") for c in discovered if c.get("student_uid")), None
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
         if not sections:
             # Login-only account with nothing linked yet: discover the
@@ -838,28 +867,34 @@ class SchoologyProvider(IntegrationProvider):
         captured during discovery."""
         config = integration.get("config") or {}
         google_token = config.get("google_access_token")
-        rows = await supabase.select(
-            "courses", columns="id,name,metadata", filters={"user_id": eq(user_id)},
-        ) or []
-        linked = [
-            (r["id"], r["name"], (r.get("metadata") or {}).get("schoology_section_id"),
-             (r.get("metadata") or {}).get("schoology_student_uid"))
-            for r in rows
-        ]
-        linked = [(cid, name, sid, uid) for cid, name, sid, uid in linked if sid]
+        # Discover from the login session every sync — it's the source of
+        # truth for section ids, names, and (for a parent account) the
+        # student uid, and it reconciles/links each course while backfilling
+        # metadata.schoology_student_uid. Running it unconditionally is what
+        # gives an already-linked parent course (linked before parent support
+        # existed, so with no student uid stored) its uid — without which the
+        # walk falls back to the empty plain /materials page.
+        try:
+            linked = await self._discover_and_link_sections(user_id, report)
+        except SchoologyScraperAuthError as e:
+            report["errors"].append(f"Schoology materials (scrape login): {e}")
+            linked = []
+        except RuntimeError as e:
+            report["errors"].append(str(e))
+            linked = []
+
         if not linked:
-            # Nothing linked from a prior API sync — discover the enrolled
-            # courses straight from the login session and create/link them
-            # here, so a login-only account (the common case now) actually
-            # pulls materials instead of reporting "nothing linked yet".
-            try:
-                linked = await self._discover_and_link_sections(user_id, report)
-            except SchoologyScraperAuthError as e:
-                report["errors"].append(f"Schoology materials (scrape login): {e}")
-                return
-            except RuntimeError as e:
-                report["errors"].append(str(e))
-                return
+            # Discovery found nothing (or the login failed) — fall back to
+            # whatever a prior sync already linked so those still refresh.
+            rows = await supabase.select(
+                "courses", columns="id,name,metadata", filters={"user_id": eq(user_id)},
+            ) or []
+            linked = [
+                (r["id"], r["name"], (r.get("metadata") or {}).get("schoology_section_id"),
+                 (r.get("metadata") or {}).get("schoology_student_uid"))
+                for r in rows
+            ]
+            linked = [(cid, name, sid, uid) for cid, name, sid, uid in linked if sid]
         if not linked:
             report["errors"].append(
                 "No Schoology courses found for this login. If this is a parent account, "

@@ -1112,6 +1112,39 @@ def test_sync_with_no_api_key_and_no_discoverable_courses_reports_helpful_error(
 # these used to hard-require the API just to discover which sections to
 # probe, so a rejected/absent key broke the debug tool too, not just sync().
 # ---------------------------------------------------------------------------
+def test_debug_walk_materials_uses_persisted_student_uid_for_parent_course(fake_db, monkeypatch):
+    """An already-linked parent course carries its student uid in metadata;
+    the debug walk must read it back and pass it to walk_materials so the
+    parent-view preview URL is used instead of the empty plain /materials
+    page (the reported "0 of N links" case)."""
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://app.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+
+    fake_db.tables["courses"][0]["metadata"] = {
+        "schoology_section_id": SECTION_ID, "schoology_student_uid": "23381548",
+    }
+
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    assert result["probed"][0]["items"][0]["name"] == "Notes"
+    # The persisted student uid was threaded into the walk.
+    assert scraper.student_uid_calls == ["23381548"]
+
+
 def test_debug_walk_materials_falls_back_to_linked_courses_without_api_key(fake_db, monkeypatch):
     provider = SchoologyProvider()
 

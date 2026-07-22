@@ -108,30 +108,22 @@ class PowerSchoolConnectSessionRequest(BaseModel):
 
 
 class SchoologyConnectRequest(BaseModel):
-    """Schoology two-legged OAuth 1.0a: a personal consumer key + secret the
-    student generates at ``<their-domain>/api``. The REST host is always
-    api.schoology.com/v1; ``domain`` is stored only for display/deep-links."""
+    """Schoology connect: username + password — the same login used in a
+    browser — reads courses and materials the same way the student's own
+    authenticated web session does. A personal consumer key + secret
+    (generated at ``<domain>/api``) is optional; when supplied it
+    additionally unlocks assignments/events sync, which the login session
+    alone can't read yet (no scraper for those, only for materials — see
+    ``schoology_scraper.py``). The REST host is always api.schoology.com/v1;
+    ``api_base`` only overrides it if ever needed."""
 
-    consumer_key: str
-    consumer_secret: str
-    domain: Optional[str] = None            # e.g. https://lexington1.schoology.com
-    api_base: Optional[str] = None          # override the default REST host if ever needed
-    display_name: Optional[str] = None
-
-
-class SchoologyConnectMaterialsRequest(BaseModel):
-    """Some districts restrict a personal API key to roster-level access only
-    (Sections realm: assignments/events) and deny it Courses-realm access
-    entirely — including course materials/folders. This logs in with the
-    student's own Schoology username + password instead (the same login they
-    already use in a browser) so materials can be read from the authenticated
-    web session, which isn't subject to that API-key restriction. Merges into
-    the same integration row as the API key rather than replacing it — both
-    auth methods are used for different parts of the sync."""
-
+    domain: str                             # e.g. https://lexington1.schoology.com
     username: str
     password: str
-    domain: Optional[str] = None            # required if not already set via the API-key connect
+    consumer_key: Optional[str] = None
+    consumer_secret: Optional[str] = None
+    api_base: Optional[str] = None
+    display_name: Optional[str] = None
 
 
 # ---- Generic ----

@@ -7,6 +7,7 @@ Automation (n8n) can also call these endpoints on a schedule.
 from __future__ import annotations
 
 import hmac
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -28,7 +29,6 @@ from app.schemas import (
     GenericBody,
     PowerSchoolConnectRequest,
     PowerSchoolConnectSessionRequest,
-    SchoologyConnectMaterialsRequest,
     SchoologyConnectRequest,
 )
 
@@ -167,9 +167,13 @@ def _schoology_api_base(body: SchoologyConnectRequest) -> str:
 async def verify_schoology(
     body: SchoologyConnectRequest, user: CurrentUser = Depends(get_current_user)
 ):
-    """Check a Schoology API key + secret without saving them — lets the connect
-    screen confirm the credentials work (and show how many courses were found)
-    before committing."""
+    """Check a Schoology API key + secret without saving them — lets the
+    connect screen's optional "Advanced" section confirm the key works (and
+    show how many courses were found) before committing. Only relevant when
+    the caller is actually filling in the optional key; username/password
+    are unused here."""
+    if not body.consumer_key or not body.consumer_secret:
+        raise HTTPException(400, "Enter both the consumer key and secret to test them.")
     provider: SchoologyProvider = PROVIDERS["schoology"]  # type: ignore[assignment]
     try:
         return await provider.verify(
@@ -185,57 +189,56 @@ async def verify_schoology(
 async def connect_schoology(
     body: SchoologyConnectRequest, user: CurrentUser = Depends(get_current_user)
 ):
-    """Save the Schoology API key + secret (encrypted) and run a first sync so
-    the student sees right away whether it works."""
-    config: dict[str, str] = {"auth_mode": "api_key", "api_base": _schoology_api_base(body)}
-    if body.domain:
-        config["domain"] = body.domain.strip().rstrip("/")
+    """Save the Schoology login (username + password — the same credentials
+    used in a browser) and run a first sync immediately, so problems surface
+    right away instead of on the next scheduled run. This is the only
+    connect step now — it used to require a personal API key first and a
+    separate materials-access login after; the login here reads courses and
+    materials on its own. An API key is optional (an "Advanced" field): when
+    supplied and valid, it additionally unlocks assignments/events sync,
+    which the login session alone can't read yet."""
+    domain = body.domain.strip().rstrip("/")
+    if not domain:
+        raise HTTPException(400, "Missing Schoology web address (e.g. https://yourdistrict.schoology.com).")
+    if not body.username.strip() or not body.password:
+        raise HTTPException(400, "Username and password are required.")
+
+    config: dict[str, Any] = {"auth_mode": "scraper", "domain": domain}
+    secret_ref = merge_scraper_credentials("", body.username.strip(), body.password)
+
+    if body.consumer_key and body.consumer_secret:
+        api_base = _schoology_api_base(body)
+        provider: SchoologyProvider = PROVIDERS["schoology"]  # type: ignore[assignment]
+        try:
+            await provider.verify(body.consumer_key.strip(), body.consumer_secret.strip(), api_base)
+        except SchoologyAuthError as e:
+            raise HTTPException(401, f"API key: {e}") from e
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"Could not reach Schoology: {e}") from e
+        secret_ref = merge_scraper_credentials(
+            encrypt_api_key(body.consumer_key.strip(), body.consumer_secret.strip()),
+            body.username.strip(), body.password,
+        )
+        config["auth_mode"] = "api_key+scraper"
+        config["api_base"] = api_base
+
     row = {
         "user_id": user.id,
         "provider": "schoology",
         "display_name": body.display_name or "Schoology",
         "config": config,
-        "secret_ref": encrypt_api_key(body.consumer_key.strip(), body.consumer_secret.strip()),
+        "secret_ref": secret_ref,
         "enabled": True,
     }
     await supabase.insert("integrations", row, upsert=True, on_conflict="user_id,provider")
-    return await run_sync("schoology", user.id)
 
-
-@router.post("/schoology/connect-materials", status_code=201)
-async def connect_schoology_materials(
-    body: SchoologyConnectMaterialsRequest, user: CurrentUser = Depends(get_current_user)
-):
-    """Save Schoology login credentials used only to read course materials —
-    for districts whose personal API key is denied Courses-realm access
-    (assignments/events still come from the API key, unaffected). Merges into
-    the same `integrations` row as the API key rather than replacing it; the
-    API key must already be connected first (`/schoology/connect`)."""
-    rows = await supabase.select(
-        "integrations", filters={"user_id": eq(user.id), "provider": eq("schoology")}, limit=1,
-    )
-    if not rows:
-        raise HTTPException(
-            400, "Connect your Schoology API key first (Schoology → Connect) before adding materials access."
-        )
-    integration = rows[0]
-    config = dict(integration.get("config") or {})
-    if body.domain:
-        config["domain"] = body.domain.strip().rstrip("/")
-    if not config.get("domain"):
-        raise HTTPException(400, "Missing Schoology web address (e.g. https://yourdistrict.schoology.com).")
-    patch = {
-        "config": config,
-        "secret_ref": merge_scraper_credentials(
-            integration.get("secret_ref") or "", body.username.strip(), body.password
-        ),
-    }
-    await supabase.update("integrations", patch, filters={"id": eq(integration["id"])})
     provider: SchoologyProvider = PROVIDERS["schoology"]  # type: ignore[assignment]
     try:
-        return await provider.verify_materials_login(user.id)
+        await provider.verify_materials_login(user.id)
     except SchoologyScraperAuthError as e:
         raise HTTPException(401, str(e)) from e
+
+    return await run_sync("schoology", user.id)
 
 
 @router.get("/schoology/debug-scrape-materials")

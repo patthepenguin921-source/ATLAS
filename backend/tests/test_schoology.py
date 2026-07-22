@@ -372,6 +372,7 @@ def test_sync_reconciles_course_and_imports_without_grades(fake_db, monkeypatch)
         return _mock_client()
 
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
     report = asyncio.run(provider.sync(USER_ID))
 
@@ -428,6 +429,7 @@ def test_debug_fetch_returns_raw_responses_for_first_academic_section(fake_db, m
 
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
     result = asyncio.run(provider.debug_fetch(USER_ID))
 
@@ -461,6 +463,7 @@ def test_debug_fetch_query_narrows_by_case_insensitive_name_match(fake_db, monke
 
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
     result = asyncio.run(provider.debug_fetch(USER_ID, query="biology"))
     assert len(result["probed"]) == 1
@@ -478,6 +481,7 @@ def test_debug_fetch_query_with_no_match_lists_available_sections(fake_db, monke
 
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
     result = asyncio.run(provider.debug_fetch(USER_ID, query="Chemistry"))
     assert "probed" not in result
@@ -495,6 +499,7 @@ def test_sync_is_idempotent(fake_db, monkeypatch):
 
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
     asyncio.run(provider.sync(USER_ID))
     n_assign = len(fake_db.tables["assignments"])
@@ -520,6 +525,7 @@ def test_sync_flips_course_inactive_when_section_grading_period_ends(fake_db, mo
         return _mock_client()
 
     monkeypatch.setattr(SchoologyProvider, "_client", _active_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
     asyncio.run(provider.sync(USER_ID))
     assert fake_db.tables["courses"][0]["is_active"] is True
 
@@ -537,6 +543,7 @@ def test_sync_flips_course_inactive_when_section_grading_period_ends(fake_db, mo
         return SchoologyClient("ckey", "csecret", transport=httpx.MockTransport(_ended_handler))
 
     monkeypatch.setattr(SchoologyProvider, "_client", _ended_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
     asyncio.run(provider.sync(USER_ID))
     assert fake_db.tables["courses"][0]["is_active"] is False
 
@@ -558,6 +565,7 @@ def test_sync_survives_is_active_write_failure(fake_db, monkeypatch):
 
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
     real_update = fake_db.update
 
@@ -645,6 +653,7 @@ def test_sync_excludes_lunch_and_ambush_and_routes_clubs_separately(fake_db, mon
 
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
     report = asyncio.run(provider.sync(USER_ID))
 
@@ -672,6 +681,7 @@ def test_sync_merges_lab_and_ap_sections_into_one_grouped_course(fake_db, monkey
 
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
     asyncio.run(provider.sync(USER_ID))
 
@@ -849,6 +859,7 @@ def test_sync_falls_back_to_scraper_only_when_api_materials_are_empty(fake_db, m
 
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
     monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
 
     report = asyncio.run(provider.sync(USER_ID))
@@ -857,3 +868,61 @@ def test_sync_falls_back_to_scraper_only_when_api_materials_are_empty(fake_db, m
     docs = fake_db.tables["documents"]
     names = {d.get("metadata", {}).get("material_name") for d in docs}
     assert "Fallback Item" in names
+
+
+# ---------------------------------------------------------------------------
+# sync() with no API key on file — the common case now that the login is the
+# only required credential (see SchoologyConnectRequest). There's no scraper
+# yet for discovering courses or reading assignments/events, only materials,
+# so this refreshes materials for whatever courses were already linked by a
+# prior API-connected sync instead of syncing nothing.
+# ---------------------------------------------------------------------------
+def test_sync_with_no_api_key_refreshes_materials_for_already_linked_courses(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+
+    # BIO_COURSE (seeded by fake_db) has no schoology_section_id yet — link one,
+    # as a prior API-connected sync would have.
+    fake_db.tables["courses"][0]["metadata"] = {"schoology_section_id": SECTION_ID}
+
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report = asyncio.run(provider.sync(USER_ID))
+
+    assert report["errors"] == []
+    assert report["courses"] == 1
+    # Nothing that needs the API (assignments/events/new-course-discovery) ran.
+    assert report["assignments"] == 0
+    assert report["events"] == 0
+    docs = fake_db.tables["documents"]
+    assert {d["metadata"]["material_name"] for d in docs} == {"Notes"}
+
+
+def test_sync_with_no_api_key_and_no_linked_courses_reports_helpful_error(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+    # BIO_COURSE (seeded by fake_db) has empty metadata — no linked section id.
+
+    report = asyncio.run(provider.sync(USER_ID))
+
+    assert report["courses"] == 0
+    assert len(report["errors"]) == 1
+    assert "API key" in report["errors"][0]
+    assert fake_db.tables["documents"] == []

@@ -563,6 +563,38 @@ def test_walk_materials_without_student_uid_never_hits_parent_preview():
     asyncio.run(run())
 
 
+def test_walk_known_url_only_requests_the_given_url():
+    """Unlike `walk_materials` (which tries several candidate shapes),
+    `walk_known_url` must never guess — only the exact URL it's handed (and
+    whatever folders it links to) gets requested, never the district
+    materials page or the app-domain plain /materials page."""
+    async def run():
+        requested_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested_paths.append(str(request.url))
+            return _walk_handler_with_app_domain(request)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            items = await client.walk_known_url(
+                "https://app.schoology.com/course/8435659601/preview/23381548/parent"
+            )
+            assert {i.name for i in items} == {"Extra Credit Article"}
+            materials_requests = {
+                u for u in requested_paths
+                if "/course/8435659601/materials" in u or "/preview/" in u
+            }
+            assert materials_requests == {
+                "https://app.schoology.com/course/8435659601/preview/23381548/parent"
+            }
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_walk_materials_with_student_uid_survives_app_domain_login_failure():
     """The district-subdomain results must still stand even if the
     app-domain login fails for some reason (e.g. the account only exists on

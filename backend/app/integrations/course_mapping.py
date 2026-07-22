@@ -161,27 +161,37 @@ def infer_course_level(name: str) -> str:
 
 # ---------------------------------------------------------------------
 # Known Schoology course links — confirmed directly from this account's own
-# browser session (course id + display name + the parent-preview student uid
-# where the confirmed link needs one), rather than relied-on discovery.
-# `SchoologyScraperClient.list_courses()`'s crawl of /home, /courses, and
-# /course/index can come back incomplete or empty for a parent account (the
-# reported "still not pulling any links or the correct information") even
-# though every one of these courses is reachable directly by URL. This table
-# is authoritative when discovery is missing (or gets wrong) any of these
-# ids — see `merge_known_sections`. `student_uid` is `None` for the two
-# courses whose confirmed link is a direct `/materials` URL rather than a
-# per-student `/preview/{uid}/parent` one.
+# browser session: course id, display name, the parent-preview student uid
+# where the confirmed link needs one, and (most importantly) `materials_url`
+# — the *exact*, literal URL that link is, verbatim. Nothing here is
+# derived/guessed at: the whole point of this table is that the debug tools
+# (and, via `merge_known_sections`, anything that inherits its `id`) hit only
+# this one URL per course, never any other candidate shape (district
+# subdomain, the other of `/materials` vs `/preview/{uid}/parent`, …) the
+# way undirected discovery does — see `SchoologyScraperClient.
+# walk_known_url`. `student_uid` is `None` for the two courses whose
+# confirmed link is a direct `/materials` URL rather than a per-student
+# `/preview/{uid}/parent` one.
 # ---------------------------------------------------------------------
 KNOWN_SECTIONS: tuple[dict[str, str | None], ...] = (
-    {"id": "8435659601", "name": "AP Biology: Section 2", "student_uid": "23381548"},
-    {"id": "8435669068", "name": "AP Calculus AB: Section 1", "student_uid": "23381548"},
-    {"id": "8435650700", "name": "DE Entrprnrshp: Section 901", "student_uid": None},
-    {"id": "8435650657", "name": "DE Intro Bus: Section 901", "student_uid": None},
-    {"id": "8435659627", "name": "Bio PreLab HN: Section 2", "student_uid": "23381548"},
-    {"id": "8435655035", "name": "Physics 1 H Ext Lab: Section 1", "student_uid": "23381548"},
-    {"id": "8435659618", "name": "AP Physics I: Section 1", "student_uid": "23381548"},
-    {"id": "8435669783", "name": "AP Calculus BC: Section 1", "student_uid": "23381548"},
-    {"id": "8435652619", "name": "AP English Lang: Section 2", "student_uid": "23381548"},
+    {"id": "8435659601", "name": "AP Biology: Section 2", "student_uid": "23381548",
+     "materials_url": "https://app.schoology.com/course/8435659601/preview/23381548/parent"},
+    {"id": "8435669068", "name": "AP Calculus AB: Section 1", "student_uid": "23381548",
+     "materials_url": "https://app.schoology.com/course/8435669068/preview/23381548/parent"},
+    {"id": "8435650700", "name": "DE Entrprnrshp: Section 901", "student_uid": None,
+     "materials_url": "https://app.schoology.com/course/8435650700/materials"},
+    {"id": "8435650657", "name": "DE Intro Bus: Section 901", "student_uid": None,
+     "materials_url": "https://app.schoology.com/course/8435650657/materials"},
+    {"id": "8435659627", "name": "Bio PreLab HN: Section 2", "student_uid": "23381548",
+     "materials_url": "https://app.schoology.com/course/8435659627/preview/23381548/parent"},
+    {"id": "8435655035", "name": "Physics 1 H Ext Lab: Section 1", "student_uid": "23381548",
+     "materials_url": "https://app.schoology.com/course/8435655035/preview/23381548/parent"},
+    {"id": "8435659618", "name": "AP Physics I: Section 1", "student_uid": "23381548",
+     "materials_url": "https://app.schoology.com/course/8435659618/preview/23381548/parent"},
+    {"id": "8435669783", "name": "AP Calculus BC: Section 1", "student_uid": "23381548",
+     "materials_url": "https://app.schoology.com/course/8435669783/preview/23381548/parent"},
+    {"id": "8435652619", "name": "AP English Lang: Section 2", "student_uid": "23381548",
+     "materials_url": "https://app.schoology.com/course/8435652619/preview/23381548/parent"},
 )
 
 
@@ -192,10 +202,12 @@ def merge_known_sections(
     already-linked courses, or a fresh login-session discovery already
     found — each is keyed by section id, with at least `id`/`name`) with
     `KNOWN_SECTIONS`, by section id. A section discovery already found is
-    left as-is; a known one missing from it is added, so a caller (currently
-    just the Schoology debug tools — see `SchoologyProvider._probe_sections`)
-    can always reach these courses' real materials pages regardless of
-    whether discovery itself worked.
+    left as-is (except `materials_url`, backfilled onto it too when its id
+    matches a known one, so a stale/incomplete discovered entry still gets
+    pinned to the exact confirmed URL); a known one missing from it is
+    added, so a caller (currently just the Schoology debug tools — see
+    `SchoologyProvider._probe_sections`) can always reach these courses'
+    real materials pages regardless of whether discovery itself worked.
 
     `student_uid` is backfilled from the first known entry that carries one
     when not already known — the same student uid applies to every course in
@@ -207,6 +219,8 @@ def merge_known_sections(
             entry["name"] = known["name"]
         if known.get("student_uid") and not entry.get("student_uid"):
             entry["student_uid"] = known["student_uid"]
+        if known.get("materials_url") and not entry.get("materials_url"):
+            entry["materials_url"] = known["materials_url"]
     if not student_uid:
         student_uid = next((k["student_uid"] for k in KNOWN_SECTIONS if k.get("student_uid")), None)
     return list(by_id.values()), student_uid

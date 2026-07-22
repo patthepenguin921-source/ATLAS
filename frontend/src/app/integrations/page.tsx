@@ -79,6 +79,7 @@ interface SchoologyWalkStep {
 
 interface SchoologyProbedSection {
   section: { id: string; name: string };
+  materials_url?: string | null;
   items: SchoologyMaterialItem[];
   walk_trace?: SchoologyWalkStep[];
 }
@@ -551,6 +552,14 @@ export default function IntegrationsPage() {
                   {schoologyDebugResult.probed?.map((p) => (
                     <div key={p.section.id} className="space-y-1.5 border-t border-atlas-border pt-3 first:border-0 first:pt-0">
                       <div className="font-medium">{p.section.name}</div>
+                      {p.materials_url && (
+                        <div className="text-atlas-muted break-all">
+                          Walked exactly:{" "}
+                          <a href={p.materials_url} target="_blank" rel="noreferrer" className="underline">
+                            {p.materials_url}
+                          </a>
+                        </div>
+                      )}
                       {p.items.length === 0 ? (
                         <>
                           <div className="text-atlas-muted">No items found.</div>
@@ -595,6 +604,16 @@ export default function IntegrationsPage() {
                             <li key={i} className="flex flex-wrap items-baseline gap-x-2">
                               <span>{item.folder ? `${item.folder} · ` : ""}{item.name}</span>
                               {item.type && <span className="text-atlas-muted">({item.type})</span>}
+                              {item.href && (
+                                <a
+                                  href={item.href}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-atlas-muted break-all underline"
+                                >
+                                  {item.href}
+                                </a>
+                              )}
                             </li>
                           ))}
                         </ul>

@@ -402,7 +402,19 @@ class SchoologyProvider(IntegrationProvider):
                 }
             sections = matches
         else:
-            sections = [sections[0]]
+            # No query: default to every confirmed-real course
+            # (course_mapping.KNOWN_SECTIONS) rather than an arbitrary single
+            # "first" section — with several of these ids already present
+            # (correctly or not) from the API/DB/discovery above, "the first
+            # one found" was never guaranteed to be one of the 9 confirmed
+            # courses, so the debug screen's default view could show an
+            # unrelated (or stale) course instead of the ones actually being
+            # verified. Falls back to the old single-first-section behavior
+            # only when there are no known sections to default to.
+            known_ids = [k["id"] for k in course_mapping.KNOWN_SECTIONS]
+            by_id = {s["id"]: s for s in sections}
+            defaulted = [by_id[kid] for kid in known_ids if kid in by_id]
+            sections = defaulted or [sections[0]]
 
         return sections, uid, None
 

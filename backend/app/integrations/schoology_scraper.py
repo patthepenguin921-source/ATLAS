@@ -564,16 +564,16 @@ class SchoologyScraperClient:
         try:
             await self._login_app_domain()
             if student_uid:
-                preview_url = f"{_APP_DOMAIN}/course/{section_id}/preview/{student_uid}/parent"
-                try:
-                    await self._client.get(preview_url)  # establish child context
-                except Exception:  # noqa: BLE001
-                    pass
-                await _walk(f"{_APP_DOMAIN}/course/{section_id}/materials", "", 0)
-                await _walk(preview_url, "", 0)
-            else:
-                # Non-parent account whose courses still live on the app domain.
-                await _walk(f"{_APP_DOMAIN}/course/{section_id}/materials", "", 0)
+                # The parent-view landing IS the course page for a parent —
+                # walk it first (that GET also puts the session into the
+                # child's context), following its content and its "Materials"
+                # tab link. Then walk the materials page directly, now that
+                # the context is set — the plain /materials URL comes back
+                # empty without it (the reported "0 of N links" symptom).
+                await _walk(
+                    f"{_APP_DOMAIN}/course/{section_id}/preview/{student_uid}/parent", "", 0,
+                )
+            await _walk(f"{_APP_DOMAIN}/course/{section_id}/materials", "", 0)
         except SchoologyScraperAuthError:
             pass
 

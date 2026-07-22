@@ -97,6 +97,40 @@ def test_parse_materials_page_classifies_items_vs_folders():
     assert by_name["Some plain title with no type prefix"].kind == "item"
     assert by_name["Some plain title with no type prefix"].material_type == ""
 
+
+def test_parse_materials_page_classifies_folder_by_href_without_type_prefix():
+    """A district template can render the folder link without the "Folder. "
+    screen-reader prefix landing in the link text. The folder href shape
+    (`?f=<id>` / `/materials/folder/<id>`) must still classify it as a folder
+    so it gets recursed into — otherwise it looks like a leaf item and its
+    contents are never opened (the reported symptom)."""
+    links = [
+        {"text": "Syllabus and Other Important Documents",
+         "href": "/course/8435659601/materials?f=1003379126"},
+        {"text": "Unit 1 Resources", "href": "/course/8435659601/materials/folder/55"},
+    ]
+    parsed = parse_materials_page(links)
+    by_name = {p.name: p for p in parsed}
+    assert by_name["Syllabus and Other Important Documents"].kind == "folder"
+    assert by_name["Unit 1 Resources"].kind == "folder"
+
+
+def test_parse_materials_page_classifies_file_by_href_without_type_prefix():
+    """A bare document link (no "File. " prefix) whose href points at an
+    attachment/document must be tagged a File so the caller downloads it
+    rather than filing a plain reference."""
+    links = [
+        {"text": "Lab handout", "href": "/attachment/12345/download"},
+        {"text": "Reading", "href": "/course/8435659601/materials/document/678"},
+        {"text": "Khan Academy", "href": "https://khanacademy.org/x"},
+    ]
+    by_name = {p.name: p for p in parse_materials_page(links)}
+    assert by_name["Lab handout"].material_type == "File"
+    assert by_name["Reading"].material_type == "File"
+    # A genuine external link is left as a plain item, never mis-tagged File.
+    assert by_name["Khan Academy"].material_type == ""
+
+
 LOGIN_PAGE = """
 <html><body>
 <form id="s-user-login-form" action="/login" method="post">
@@ -600,6 +634,51 @@ def test_download_file_returns_none_for_an_html_detail_page():
         try:
             result = await client.download_file(f"{BASE_URL}/materials/file-detail/1")
             assert result is None
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_download_file_follows_detail_page_to_real_attachment():
+    """The common Schoology case: a material link opens an HTML viewer/detail
+    page that embeds the real file, rather than downloading it directly. The
+    detail page's download link must be followed through to the actual file
+    instead of giving up at the first HTML response (the reported "never
+    downloaded the documents" symptom)."""
+    detail_html = """
+    <html><body>
+      <h1>Lab handout.pdf</h1>
+      <a class="download-button" href="/attachment/9001/download">Download</a>
+      <iframe src="/viewer?doc=9001"></iframe>
+    </body></html>
+    """
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/course/1/materials/document/9001":
+                return httpx.Response(
+                    200, text=detail_html, headers={"content-type": "text/html; charset=utf-8"},
+                )
+            if request.url.path == "/attachment/9001/download":
+                return httpx.Response(
+                    200, content=b"%PDF-1.4 real bytes",
+                    headers={"content-type": "application/pdf"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.download_file(f"{BASE_URL}/course/1/materials/document/9001")
+            assert result is not None
+            content, content_type = result
+            assert content == b"%PDF-1.4 real bytes"
+            assert content_type == "application/pdf"
         finally:
             await client.aclose()
 

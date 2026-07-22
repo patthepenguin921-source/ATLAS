@@ -29,6 +29,7 @@ from app.integrations.schoology import (
     _normalize_name,
 )
 from app.integrations.schoology_client import (
+    SchoologyAuthError,
     SchoologyClient,
     SchoologySection,
     files_of,
@@ -374,6 +375,15 @@ def test_sync_reconciles_course_and_imports_without_grades(fake_db, monkeypatch)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
     monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
+    # Materials always come from the login-scraper session now (never the
+    # API — see _sync_section), regardless of whether an API key is present.
+    async def _fake_scraper_client(self, user_id):
+        return _FakeScraperClient([
+            MaterialLink(name="syllabus.pdf", href="/attachment/download/100", kind="item", material_type="File"),
+        ])
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
     report = asyncio.run(provider.sync(USER_ID))
 
     assert report["errors"] == []
@@ -400,9 +410,7 @@ def test_sync_reconciles_course_and_imports_without_grades(fake_db, monkeypatch)
     kinds = sorted(e["kind"] for e in events)
     assert kinds == ["due", "exam"]
 
-    # Materials + attachments became documents (nested doc's file, the bare
-    # file dropped straight into the folder, the assignment's file, and the
-    # Google link recorded for later download).
+    # Assignment attachments + scraped materials became documents.
     docs = fake_db.tables["documents"]
     titles = {d["title"] for d in docs}
     assert any("Lab handout" in t or "lab.pdf" in t for t in titles)
@@ -566,6 +574,13 @@ def test_sync_survives_is_active_write_failure(fake_db, monkeypatch):
     monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
     monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
     monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
+
+    async def _fake_scraper_client(self, user_id):
+        return _FakeScraperClient([
+            MaterialLink(name="syllabus.pdf", href="/attachment/download/100", kind="item", material_type="File"),
+        ])
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
 
     real_update = fake_db.update
 
@@ -926,3 +941,81 @@ def test_sync_with_no_api_key_and_no_linked_courses_reports_helpful_error(fake_d
     assert len(report["errors"]) == 1
     assert "API key" in report["errors"][0]
     assert fake_db.tables["documents"] == []
+
+
+# ---------------------------------------------------------------------------
+# debug_walk_materials / debug_scrape_materials with no (working) API key —
+# these used to hard-require the API just to discover which sections to
+# probe, so a rejected/absent key broke the debug tool too, not just sync().
+# ---------------------------------------------------------------------------
+def test_debug_walk_materials_falls_back_to_linked_courses_without_api_key(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+
+    fake_db.tables["courses"][0]["metadata"] = {"schoology_section_id": SECTION_ID}
+
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    assert result["probed"][0]["section"] == {"id": SECTION_ID, "name": "AP Biology"}
+    assert result["probed"][0]["items"][0]["name"] == "Notes"
+
+
+def test_debug_walk_materials_falls_back_when_api_key_is_rejected(fake_db, monkeypatch):
+    """An API key that's present but rejected outright (this district blocks
+    it entirely, not just materials) must not hard-fail the debug tool —
+    fall back to linked courses exactly like the no-key case."""
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    async def _fake_client(self, integration):
+        raise SchoologyAuthError("Schoology rejected the API key/secret")
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
+
+    fake_db.tables["courses"][0]["metadata"] = {"schoology_section_id": SECTION_ID}
+
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    assert result["probed"][0]["section"] == {"id": SECTION_ID, "name": "AP Biology"}
+
+
+def test_debug_walk_materials_with_no_linked_courses_reports_helpful_note(fake_db, monkeypatch):
+    provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    assert "note" in result
+    assert "API key" in result["note"]

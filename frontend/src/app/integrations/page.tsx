@@ -65,11 +65,16 @@ interface SchoologyWalkStep {
   final_url?: string;
   status_code?: number;
   depth?: number;
+  title?: string | null;
   raw_link_count?: number;
   parsed_count?: number;
   looks_like_login?: boolean;
+  likely_js_shell?: boolean;
+  script_count?: number;
+  body_text_len?: number;
   folders?: string[];
   items?: string[];
+  sample_links?: { text?: string; href?: string }[];
 }
 
 interface SchoologyProbedSection {
@@ -96,10 +101,13 @@ function diagnoseWalk(trace: SchoologyWalkStep[]): string {
     const bad = trace.find((s) => s.status_code && s.status_code >= 400)!;
     return `This course's materials page couldn't be reached (HTTP ${bad.status_code}). The course id may not be visible to this login.`;
   }
+  if (trace.some((s) => s.likely_js_shell)) {
+    return "The page came back as a JavaScript shell — its real content is rendered in the browser and isn't in the HTML the server can fetch. This needs a different fetch approach (a data endpoint), not a parser tweak.";
+  }
   if (trace.every((s) => (s.raw_link_count ?? 0) === 0)) {
     return "The materials page loaded but contained no links at all — its contents are likely loaded dynamically (JavaScript), which the login scraper can't see yet.";
   }
-  return "The materials page loaded but nothing on it was recognized as a folder, file, or link — it may be genuinely empty, or use a layout we don't parse yet.";
+  return "The materials page loaded but nothing on it was recognized as a folder, file, or link — the raw links below show what the page actually contained.";
 }
 
 const STATUS_TONE: Record<string, "good" | "warn" | "bad" | "default"> = {
@@ -555,13 +563,25 @@ export default function IntegrationsPage() {
                                 <summary className="cursor-pointer text-atlas-muted">
                                   Pages checked ({p.walk_trace.length})
                                 </summary>
-                                <ul className="mt-1 space-y-1 font-mono text-[11px] leading-tight">
+                                <ul className="mt-1 space-y-2 font-mono text-[11px] leading-tight">
                                   {p.walk_trace.map((step, i) => (
                                     <li key={i} className="break-all text-atlas-muted">
-                                      [{step.status_code ?? "?"}]
-                                      {step.looks_like_login ? " ⚠ login-wall" : ""}{" "}
-                                      {step.parsed_count ?? 0} of {step.raw_link_count ?? 0} links ·{" "}
-                                      {step.final_url ?? step.requested_url}
+                                      <div>
+                                        [{step.status_code ?? "?"}]
+                                        {step.looks_like_login ? " ⚠ login-wall" : ""}
+                                        {step.likely_js_shell ? " ⚠ js-shell" : ""}{" "}
+                                        {step.parsed_count ?? 0} of {step.raw_link_count ?? 0} links ·{" "}
+                                        {step.final_url ?? step.requested_url}
+                                      </div>
+                                      {step.sample_links && step.sample_links.length > 0 && (
+                                        <ul className="mt-0.5 ml-3 space-y-0.5 opacity-80">
+                                          {step.sample_links.map((l, j) => (
+                                            <li key={j}>
+                                              {l.text ? `"${l.text}" ` : ""}→ {l.href}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      )}
                                     </li>
                                   ))}
                                 </ul>

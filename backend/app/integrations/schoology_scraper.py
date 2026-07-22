@@ -521,19 +521,38 @@ class SchoologyScraperClient:
             parsed = parse_materials_page(raw_links)
             if trace is not None:
                 # Surface why a walk came back empty: a session bounced to the
-                # login page, or a real materials page that genuinely parsed
-                # to zero content links, look identical in the final result
-                # (nothing) but mean completely different things.
+                # login page, a real materials page that genuinely parsed to
+                # zero content links, and a JavaScript-rendered shell (whose
+                # real content never arrives over plain HTTP) all look
+                # identical in the final result (nothing) but mean completely
+                # different things. `sample_links` and the JS-shell signals
+                # expose which one it actually is — the raw material needed to
+                # write a correct parser (or to know the content is only
+                # reachable via a data endpoint / rendered client-side).
+                body = soup.find("body")
+                body_text_len = len(body.get_text(strip=True)) if body else 0
+                script_count = len(soup.find_all("script"))
                 trace.append({
                     "requested_url": url,
                     "final_url": str(r.url),
                     "status_code": r.status_code,
                     "depth": depth,
+                    "title": (soup.title.string if soup.title else None),
                     "raw_link_count": len(raw_links),
                     "parsed_count": len(parsed),
                     "looks_like_login": self._find_login_form(soup) is not None,
+                    # A page with scripts but almost no visible text/anchors is
+                    # a client-rendered shell — the content isn't in the HTML.
+                    "likely_js_shell": (
+                        body_text_len < 400 and script_count >= 3 and len(raw_links) < 8
+                    ),
+                    "script_count": script_count,
+                    "body_text_len": body_text_len,
                     "folders": [p.name for p in parsed if p.kind == "folder"],
                     "items": [p.name for p in parsed if p.kind == "item"],
+                    # Every anchor on the page, verbatim — so the real page
+                    # structure is visible instead of just a count.
+                    "sample_links": raw_links[:50],
                 })
             for link in parsed:
                 resolved_href = urljoin(url, link.href)

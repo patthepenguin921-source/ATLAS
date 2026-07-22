@@ -109,6 +109,33 @@ _KNOWN_TYPE_PREFIXES = frozenset({
     "assignment", "assessment", "album", "quiz", "test",
 })
 
+# A folder link on a materials page always points at one of these href
+# shapes, whether or not the screen-reader "Folder. " text prefix survived
+# into the link's `get_text()` output. Relying on the text prefix alone was
+# the reported failure mode — "it sees the folder link but never opens it":
+# a district whose template renders that prefix in a separate, non-inlined
+# span (so `get_text` never concatenates it) would leave the folder looking
+# like a plain leaf item, and a leaf item is never recursed into. Matching
+# the href structurally recovers the folder regardless of the a11y text.
+_FOLDER_HREF_PATTERNS = (
+    re.compile(r"[?&]f=\d+"),                        # /course/{id}/materials?f={folder_id}
+    re.compile(r"/course/\d+/materials/folder/\d+"),
+    re.compile(r"/folder/\d+(?:$|[/?])"),
+)
+
+# Hrefs that point at an actual downloadable attachment/document (rather than
+# an external link, a page, or a discussion). Used to recognize a bare
+# document link as a "File" when Schoology's a11y prefix is missing, so it's
+# routed through the download path instead of being filed as a plain
+# reference — the second half of the reported failure ("never downloaded the
+# documents that appeared there").
+_FILE_HREF_PATTERNS = (
+    re.compile(r"/attachment/"),
+    re.compile(r"/course/\d+/materials/document/\d+"),
+    re.compile(r"/system/files/"),
+    re.compile(r"/content/\d+/download"),
+)
+
 
 @dataclass
 class MaterialLink:
@@ -140,6 +167,20 @@ def _classify_link(text: str, href: str) -> MaterialLink | None:
         name = text
         material_type = ""
         kind = "item"
+
+    # Structural (href-based) fallback for when Schoology's a11y text prefix
+    # is absent or unrecognized. A folder href always wins — a folder that
+    # slipped through as a plain item would never be recursed into (the
+    # reported "sees the folder but never opens it"). A bare document link
+    # gets tagged "File" so the caller downloads it instead of just recording
+    # a reference.
+    if kind != "folder" and any(p.search(href) for p in _FOLDER_HREF_PATTERNS):
+        kind = "folder"
+        material_type = material_type or "Folder"
+    elif kind == "item" and not material_type and any(
+        p.search(href) for p in _FILE_HREF_PATTERNS
+    ):
+        material_type = "File"
 
     return MaterialLink(name=name, href=href, kind=kind, material_type=material_type)
 
@@ -422,16 +463,82 @@ class SchoologyScraperClient:
     async def download_file(self, url: str) -> tuple[bytes, str] | None:
         """Fetch a materials-page item's href (already an absolute URL —
         `walk_materials` resolves relative ones) through the authenticated
-        session, and return `(content, content_type)` if the response is an
-        actual file — not `text/html`, which means the href led to an
-        intermediate detail page rather than a direct download. Returns
-        `None` in that case so the caller can fall back to recording a
-        reference instead of ingesting a raw HTML page as if it were a
-        document."""
+        session and return `(content, content_type)` for the underlying file.
+
+        Many Schoology material links don't point at the file directly —
+        they open an HTML *viewer/detail page* that embeds (or links to) the
+        real attachment. That's the reported "it never downloaded the
+        documents": the first response is `text/html`, so a naive check gives
+        up and the file is only ever recorded as a reference. Instead, when
+        the response is HTML, this looks inside it for the actual download URL
+        (a download link/button, or an embedded PDF/doc viewer's source) and
+        follows that — up to a couple of hops — until it reaches a real
+        (non-HTML) file. Only when no downloadable target can be found does it
+        return `None`, so the caller can fall back to a plain reference rather
+        than ingesting a raw HTML page as if it were a document."""
         if not self._logged_in:
             await self.login()
+        return await self._download_following_detail(url, depth=0, seen=set())
+
+    async def _download_following_detail(
+        self, url: str, *, depth: int, seen: set[str],
+    ) -> tuple[bytes, str] | None:
+        if url in seen or depth > 2:
+            return None
+        seen.add(url)
         r = await self._client.get(url)
         content_type = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
-        if not content_type or content_type == "text/html":
+        if content_type and content_type != "text/html":
+            return r.content, content_type
+        if not content_type:
             return None
-        return r.content, content_type
+        # HTML detail/viewer page — dig out the real download target(s) and
+        # follow each in turn until one resolves to an actual file.
+        for candidate in self._extract_download_urls(str(r.url), r.text):
+            result = await self._download_following_detail(
+                candidate, depth=depth + 1, seen=seen,
+            )
+            if result is not None:
+                return result
+        return None
+
+    @staticmethod
+    def _extract_download_urls(page_url: str, html: str) -> list[str]:
+        """Ordered, de-duplicated list of candidate direct-download URLs
+        found on a Schoology file viewer/detail page: explicit download
+        links/buttons first, then embedded viewer sources (the iframe/embed a
+        PDF or Office doc is previewed in). Relative URLs are resolved against
+        the page they were found on; the page itself is never returned."""
+        soup = BeautifulSoup(html, "html.parser")
+        candidates: list[str] = []
+
+        def _add(raw: str | None) -> None:
+            if not raw:
+                return
+            resolved = urljoin(page_url, raw)
+            if resolved != page_url and resolved not in candidates:
+                candidates.append(resolved)
+
+        # Explicit "download" affordances.
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            label = a.get_text(" ", strip=True).lower()
+            if (
+                re.search(r"/attachment/\d+/", href)
+                or "/download" in href.lower()
+                or "download" in (a.get("class") and " ".join(a["class"]).lower() or "")
+                or label in {"download", "download file"}
+            ):
+                _add(href)
+        # Embedded document viewers (PDF/Office preview iframe or <embed>).
+        for tag in soup.find_all(["iframe", "embed", "object"]):
+            src = tag.get("src") or tag.get("data")
+            if src and any(
+                p.search(src) for p in _FILE_HREF_PATTERNS
+            ):
+                _add(src)
+        # Any other attachment-shaped link on the page as a last resort.
+        for a in soup.find_all("a", href=True):
+            if any(p.search(a["href"]) for p in _FILE_HREF_PATTERNS):
+                _add(a["href"])
+        return candidates

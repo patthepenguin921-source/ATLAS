@@ -48,10 +48,19 @@ _LOGIN_PATH = "/login"
 _APP_DOMAIN = "https://app.schoology.com"
 _MAX_MATERIALS_DEPTH = 8
 
-# The course-profile link every enrolled course shows in the web UI's course
-# list — its text is the course name. Matched exactly (no sub-path) so it's
-# the name link, not a `/course/{id}/updates` etc. nav link.
-_COURSE_PROFILE_HREF = re.compile(r"^/course/(\d+)$")
+# The links each enrolled course shows in the web UI's course list. A course
+# can appear as any of these shapes, and which one matters: a **parent**
+# account's course link is a per-student preview URL that carries the
+# student's own user id (`/course/{section_id}/preview/{student_uid}/parent`),
+# and that student id is exactly what's needed to reach the parent-view
+# materials — without it a parent account walks the wrong (empty) pages. Each
+# pattern's first group is the section id; the preview pattern's second group
+# is the student uid.
+_COURSE_LINK_PATTERNS = (
+    re.compile(r"^/course/(\d+)/preview/(\d+)/parent$"),  # parent view: (section_id, student_uid)
+    re.compile(r"^/course/(\d+)/materials$"),             # direct materials: (section_id,)
+    re.compile(r"^/course/(\d+)$"),                       # course profile: (section_id,)
+)
 # Pages in the authenticated web UI that carry the enrolled-course list.
 # Tried in order and unioned — different Schoology versions surface it on
 # different ones, so probing several is more robust than betting on one.
@@ -130,6 +139,12 @@ _FOLDER_HREF_PATTERNS = (
     re.compile(r"[?&]f=\d+"),                        # /course/{id}/materials?f={folder_id}
     re.compile(r"/course/\d+/materials/folder/\d+"),
     re.compile(r"/folder/\d+(?:$|[/?])"),
+    # A bare "Materials" tab link (e.g. on a parent-view course landing page)
+    # is the materials root — recurse into it rather than recording it as a
+    # leaf item. On a real materials page the self-referential "All
+    # Materials" links are already dropped as chrome, and the visited-set
+    # stops a page walking into itself, so this is safe.
+    re.compile(r"/course/\d+/materials$"),
 )
 
 # Hrefs that point at an actual downloadable attachment/document (rather than
@@ -331,36 +346,50 @@ class SchoologyScraperClient:
         self._raise_if_login_failed(result_soup)
         self._app_logged_in = True
 
-    async def list_courses(self) -> list[dict[str, str]]:
-        """Discover the logged-in user's enrolled courses — `{"id", "name"}`
-        per course — straight from the authenticated web UI, no API key
-        required. This is what makes a login-only account usable at all:
-        materials can only be walked once each section's id is known, and
-        without the API there was previously no way to learn them, so a
-        login-only account had nothing to sync and the debug tools had
-        nothing to probe. Collects every `/course/{section_id}` profile link
-        across the pages that carry the course list, pairing each with its
-        link text as the course name (first non-empty wins per id)."""
+    async def list_courses(self) -> list[dict[str, str | None]]:
+        """Discover the logged-in user's enrolled courses straight from the
+        authenticated web UI, no API key required — the thing that makes a
+        login-only account usable at all (materials can only be walked once a
+        section id is known, and without the API there was no way to learn
+        them). Returns one dict per course:
+          - ``id``: the section id.
+          - ``name``: the course display name (the link text).
+          - ``student_uid``: for a **parent** account, the student's user id
+            parsed out of the course's `/course/{id}/preview/{uid}/parent`
+            link — needed to reach the parent-view materials. ``None`` for a
+            normal student account (its links carry no such id).
+        Collects across the district subdomain and app.schoology.com (where a
+        parent's courses live), merging by section id."""
         if not self._logged_in:
             await self.login()
-        found: dict[str, str] = {}
+        found: dict[str, dict[str, str | None]] = {}
 
-        def _collect(base: str, html: str) -> None:
+        def _collect(html: str) -> None:
             soup = BeautifulSoup(html, "html.parser")
             for a in soup.find_all("a", href=True):
-                m = _COURSE_PROFILE_HREF.match(a["href"].strip())
-                if not m:
-                    continue
-                name = a.get_text(" ", strip=True)
-                if name:
-                    found.setdefault(m.group(1), name)
+                href = a["href"].strip()
+                for pat in _COURSE_LINK_PATTERNS:
+                    m = pat.match(href)
+                    if not m:
+                        continue
+                    sid = m.group(1)
+                    uid = m.group(2) if pat.groups >= 2 else None
+                    name = a.get_text(" ", strip=True)
+                    entry = found.setdefault(
+                        sid, {"id": sid, "name": None, "student_uid": None}
+                    )
+                    if name and not entry["name"]:
+                        entry["name"] = name
+                    if uid and not entry["student_uid"]:
+                        entry["student_uid"] = uid
+                    break  # first (most specific) matching pattern wins
 
         for path in _COURSE_LIST_PATHS:
             try:
                 r = await self._client.get(f"{self._base}{path}")
             except Exception:  # noqa: BLE001
                 continue
-            _collect(self._base, r.text)
+            _collect(r.text)
 
         # Parent accounts' courses can live only on app.schoology.com (a
         # separate session — see this module's docstring). Best-effort: log
@@ -373,11 +402,11 @@ class SchoologyScraperClient:
                     r = await self._client.get(f"{_APP_DOMAIN}{path}")
                 except Exception:  # noqa: BLE001
                     continue
-                _collect(_APP_DOMAIN, r.text)
+                _collect(r.text)
         except SchoologyScraperAuthError:
             pass
 
-        return [{"id": sid, "name": name} for sid, name in found.items()]
+        return [e for e in found.values() if e["name"]]
 
     async def _describe_page(self, url: str) -> dict[str, Any]:
         r = await self._client.get(url)
@@ -523,14 +552,30 @@ class SchoologyScraperClient:
 
         await _walk(f"{self._base}/course/{section_id}/materials", "", 0)
 
-        if student_uid:
-            try:
-                await self._login_app_domain()
-                await _walk(
-                    f"{_APP_DOMAIN}/course/{section_id}/preview/{student_uid}/parent", "", 0,
-                )
-            except SchoologyScraperAuthError:
-                pass  # district-subdomain results (if any) still stand
+        # A parent account reaches a course through app.schoology.com, and its
+        # real materials hang off the per-student parent-view URL, not the
+        # district `/materials` page (which comes back empty — the reported
+        # symptom). Load the parent-view landing first (that's what puts the
+        # session into the child's context), then walk the app-domain
+        # materials page and the landing itself; the landing's own "Materials"
+        # tab link is treated as a folder (see _FOLDER_HREF_PATTERNS) so it's
+        # followed if the direct URL guess is wrong. A failed app-domain login
+        # is swallowed — whatever the district walk found still stands.
+        try:
+            await self._login_app_domain()
+            if student_uid:
+                preview_url = f"{_APP_DOMAIN}/course/{section_id}/preview/{student_uid}/parent"
+                try:
+                    await self._client.get(preview_url)  # establish child context
+                except Exception:  # noqa: BLE001
+                    pass
+                await _walk(f"{_APP_DOMAIN}/course/{section_id}/materials", "", 0)
+                await _walk(preview_url, "", 0)
+            else:
+                # Non-parent account whose courses still live on the app domain.
+                await _walk(f"{_APP_DOMAIN}/course/{section_id}/materials", "", 0)
+        except SchoologyScraperAuthError:
+            pass
 
         return found
 

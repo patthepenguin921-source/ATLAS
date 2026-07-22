@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 # ---------------------------------------------------------------------
 # Never imported — non-academic blocks Schoology lists as sections but that
@@ -156,3 +157,56 @@ def infer_course_level(name: str) -> str:
         if pattern.search(name):
             return level
     return "regular"
+
+
+# ---------------------------------------------------------------------
+# Known Schoology course links — confirmed directly from this account's own
+# browser session (course id + display name + the parent-preview student uid
+# where the confirmed link needs one), rather than relied-on discovery.
+# `SchoologyScraperClient.list_courses()`'s crawl of /home, /courses, and
+# /course/index can come back incomplete or empty for a parent account (the
+# reported "still not pulling any links or the correct information") even
+# though every one of these courses is reachable directly by URL. This table
+# is authoritative when discovery is missing (or gets wrong) any of these
+# ids — see `merge_known_sections`. `student_uid` is `None` for the two
+# courses whose confirmed link is a direct `/materials` URL rather than a
+# per-student `/preview/{uid}/parent` one.
+# ---------------------------------------------------------------------
+KNOWN_SECTIONS: tuple[dict[str, str | None], ...] = (
+    {"id": "8435659601", "name": "AP Biology: Section 2", "student_uid": "23381548"},
+    {"id": "8435669068", "name": "AP Calculus AB: Section 1", "student_uid": "23381548"},
+    {"id": "8435650700", "name": "DE Entrprnrshp: Section 901", "student_uid": None},
+    {"id": "8435650657", "name": "DE Intro Bus: Section 901", "student_uid": None},
+    {"id": "8435659627", "name": "Bio PreLab HN: Section 2", "student_uid": "23381548"},
+    {"id": "8435655035", "name": "Physics 1 H Ext Lab: Section 1", "student_uid": "23381548"},
+    {"id": "8435659618", "name": "AP Physics I: Section 1", "student_uid": "23381548"},
+    {"id": "8435669783", "name": "AP Calculus BC: Section 1", "student_uid": "23381548"},
+    {"id": "8435652619", "name": "AP English Lang: Section 2", "student_uid": "23381548"},
+)
+
+
+def merge_known_sections(
+    sections: list[dict[str, Any]], student_uid: str | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Union `sections` (whatever an API section listing, a prior sync's
+    already-linked courses, or a fresh login-session discovery already
+    found — each is keyed by section id, with at least `id`/`name`) with
+    `KNOWN_SECTIONS`, by section id. A section discovery already found is
+    left as-is; a known one missing from it is added, so a caller (currently
+    just the Schoology debug tools — see `SchoologyProvider._probe_sections`)
+    can always reach these courses' real materials pages regardless of
+    whether discovery itself worked.
+
+    `student_uid` is backfilled from the first known entry that carries one
+    when not already known — the same student uid applies to every course in
+    this parent account regardless of which course happened to supply it."""
+    by_id = {s["id"]: dict(s) for s in sections if s.get("id")}
+    for known in KNOWN_SECTIONS:
+        entry = by_id.setdefault(known["id"], {"id": known["id"], "name": known["name"]})
+        if not entry.get("name"):
+            entry["name"] = known["name"]
+        if known.get("student_uid") and not entry.get("student_uid"):
+            entry["student_uid"] = known["student_uid"]
+    if not student_uid:
+        student_uid = next((k["student_uid"] for k in KNOWN_SECTIONS if k.get("student_uid")), None)
+    return list(by_id.values()), student_uid

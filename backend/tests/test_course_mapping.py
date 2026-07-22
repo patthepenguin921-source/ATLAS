@@ -67,3 +67,28 @@ def test_ap_calc_ab_bc_group_matching():
 
 def test_unrelated_course_does_not_match_a_group():
     assert course_mapping.match_group("English 10") is None
+
+
+def test_merge_known_sections_adds_missing_known_ids():
+    """A discovered id already found is left as-is; a known id discovery
+    didn't turn up gets added — the fix for discovery coming back partial or
+    empty even though the course is reachable directly by URL."""
+    discovered = [{"id": "8435659601", "name": "AP Biology: Section 2 (live)"}]
+    merged, uid = course_mapping.merge_known_sections(discovered, None)
+    by_id = {s["id"]: s for s in merged}
+    # Already-discovered entry keeps its own (possibly fresher) name.
+    assert by_id["8435659601"]["name"] == "AP Biology: Section 2 (live)"
+    # Every other known section got added.
+    assert set(by_id) == {k["id"] for k in course_mapping.KNOWN_SECTIONS}
+    # A parent account's shared student uid gets backfilled.
+    assert uid == "23381548"
+
+
+def test_merge_known_sections_keeps_caller_supplied_uid():
+    merged, uid = course_mapping.merge_known_sections([], "caller-uid")
+    assert uid == "caller-uid"
+
+
+def test_merge_known_sections_with_no_discovered_sections_returns_all_known():
+    merged, _ = course_mapping.merge_known_sections([], None)
+    assert {s["id"] for s in merged} == {k["id"] for k in course_mapping.KNOWN_SECTIONS}

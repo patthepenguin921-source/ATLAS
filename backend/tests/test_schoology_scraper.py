@@ -800,6 +800,44 @@ def test_list_courses_also_discovers_parent_courses_on_app_domain():
     asyncio.run(run())
 
 
+def test_list_courses_discovers_courses_from_parent_home():
+    """A parent account's own login lands on /parent/home (confirmed
+    against a real account) — not the plain /home a student account lands
+    on. Without probing /parent/home too, a parent login had nothing to
+    crawl on the app domain even when /home and /courses came back empty."""
+    parent_home = """
+    <html><body><a href="/course/8435659601/preview/23381548/parent">AP Biology: Section 2</a></body></html>
+    """
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "app.schoology.com":
+                if request.url.path == "/login" and request.method == "GET":
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)
+                if request.url.path == "/login" and request.method == "POST":
+                    return httpx.Response(200, text=APP_DASHBOARD_PAGE)
+                if request.url.path == "/parent/home":
+                    return httpx.Response(200, text=parent_home)
+                return httpx.Response(404)
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            return httpx.Response(404)  # /home, /courses etc. come back empty
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            courses = await client.list_courses()
+            by_id = {c["id"]: c for c in courses}
+            assert by_id["8435659601"]["name"] == "AP Biology: Section 2"
+            assert by_id["8435659601"]["student_uid"] == "23381548"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_list_courses_extracts_student_uid_from_parent_preview_links():
     """A parent account's course links are per-student preview URLs
     (/course/{id}/preview/{student_uid}/parent). list_courses must pull the

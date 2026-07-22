@@ -64,7 +64,11 @@ _COURSE_LINK_PATTERNS = (
 # Pages in the authenticated web UI that carry the enrolled-course list.
 # Tried in order and unioned — different Schoology versions surface it on
 # different ones, so probing several is more robust than betting on one.
-_COURSE_LIST_PATHS = ("/home", "/courses", "/course/index")
+# `/parent/home` is where a parent account's own login actually lands
+# (confirmed against a real account); the plain `/home` a student account
+# lands on doesn't apply there, so without it a parent login had nothing to
+# crawl on the app domain at all.
+_COURSE_LIST_PATHS = ("/home", "/courses", "/course/index", "/parent/home")
 
 # Links that show up on every course's materials page regardless of what the
 # course actually contains — site chrome (skip-link, course nav tabs,

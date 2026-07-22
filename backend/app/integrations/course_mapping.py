@@ -195,6 +195,20 @@ KNOWN_SECTIONS: tuple[dict[str, str | None], ...] = (
 )
 
 
+def materials_url_for(section_id: str) -> str | None:
+    """The confirmed, exact materials URL for `section_id`, if it's one of
+    the courses in `KNOWN_SECTIONS` — `None` otherwise. Any sync/debug code
+    that already has a section id in hand (whether from the API, a linked
+    course, or fresh discovery) can call this directly to know whether it
+    should walk that one exact URL (`SchoologyScraperClient.walk_known_url`)
+    instead of guessing across candidate shapes (`walk_materials`), with no
+    need to have gone through `merge_known_sections` first. Looks up
+    `KNOWN_SECTIONS` fresh on every call (rather than a dict cached at
+    import time) so tests can monkeypatch it and have this reflect the
+    change immediately."""
+    return next((k.get("materials_url") for k in KNOWN_SECTIONS if k["id"] == section_id), None)
+
+
 def merge_known_sections(
     sections: list[dict[str, Any]], student_uid: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:

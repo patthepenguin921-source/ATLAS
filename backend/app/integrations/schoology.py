@@ -1013,6 +1013,15 @@ class SchoologyProvider(IntegrationProvider):
         finally:
             await scraper.aclose()
 
+        # Merge in the confirmed-real course links (course_mapping.
+        # KNOWN_SECTIONS) so these courses get linked and synced every time,
+        # even on a run where the login-session course-list crawl comes back
+        # incomplete or empty for this account. A course discovery already
+        # found is left as-is; `_sync_scraped_materials` separately looks up
+        # `materials_url_for` by id to walk the exact confirmed link instead
+        # of guessing, for both these and any course discovery adds later.
+        discovered, _ = course_mapping.merge_known_sections(discovered)
+
         linked: list[tuple[str, str, str, str | None]] = []
         for c in discovered:
             name, sid = c["name"], c["id"]
@@ -1172,7 +1181,13 @@ class SchoologyProvider(IntegrationProvider):
         `walk_materials`'s `known_names`). `student_uid`, when known, also
         walks the app.schoology.com parent-preview URL — a parent account's
         real materials can live only there, not the district subdomain (see
-        `walk_materials`'s docstring)."""
+        `walk_materials`'s docstring).
+
+        When `section.id` is one of the confirmed-real courses
+        (`course_mapping.KNOWN_SECTIONS`), walks that course's exact
+        `materials_url` instead (`walk_known_url`) — no guessing across
+        candidate URL shapes for a course whose real link is already on
+        file."""
         try:
             scraper = await self._scraper_client(user_id)
         except RuntimeError as e:
@@ -1192,9 +1207,13 @@ class SchoologyProvider(IntegrationProvider):
                 for row in existing
             } - {""}
 
-            items = await scraper.walk_materials(
-                section.id, known_names=known_names, student_uid=student_uid,
-            )
+            materials_url = course_mapping.materials_url_for(section.id)
+            if materials_url:
+                items = await scraper.walk_known_url(materials_url, known_names=known_names)
+            else:
+                items = await scraper.walk_materials(
+                    section.id, known_names=known_names, student_uid=student_uid,
+                )
             for item in items:
                 await self._ingest_scraped_material(
                     user_id=user_id, course_id=course_id, section=section,

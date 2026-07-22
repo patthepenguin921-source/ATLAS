@@ -92,3 +92,25 @@ def test_merge_known_sections_keeps_caller_supplied_uid():
 def test_merge_known_sections_with_no_discovered_sections_returns_all_known():
     merged, _ = course_mapping.merge_known_sections([], None)
     assert {s["id"] for s in merged} == {k["id"] for k in course_mapping.KNOWN_SECTIONS}
+
+
+def test_materials_url_for_known_and_unknown_section():
+    assert course_mapping.materials_url_for("8435659601") == (
+        "https://app.schoology.com/course/8435659601/preview/23381548/parent"
+    )
+    assert course_mapping.materials_url_for("not-a-real-id") is None
+
+
+def test_materials_url_for_reflects_monkeypatched_known_sections(monkeypatch):
+    """Regression: an earlier version cached KNOWN_SECTIONS into a lookup
+    dict at import time, so monkeypatching course_mapping.KNOWN_SECTIONS in
+    a test (the pattern used throughout the Schoology test suite) silently
+    had no effect on this function."""
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", (
+        {"id": "known-1", "name": "Known Course", "student_uid": None,
+         "materials_url": "https://app.schoology.com/course/known-1/materials"},
+    ))
+    assert course_mapping.materials_url_for("known-1") == (
+        "https://app.schoology.com/course/known-1/materials"
+    )
+    assert course_mapping.materials_url_for("8435659601") is None

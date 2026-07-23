@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -20,6 +21,18 @@ from app.config import settings
 
 _SERVICE = "s3"
 _REGION = "auto"
+
+# R2/S3 object keys only accept a restricted, mostly-ASCII charset. Filenames
+# with em/en dashes, curly quotes, accented letters, emoji, etc. make an
+# upload fail — replace anything outside that charset instead of losing the
+# file. Shared by every caller that builds a storage key from a filename
+# (direct upload, Drive import, Schoology material sync, …).
+_UNSAFE_KEY_CHARS = re.compile(r"[^\w!\-.*'() &$@=;:+,?]")
+
+
+def safe_object_name(filename: str) -> str:
+    name = (filename or "document").replace("/", "_")
+    return _UNSAFE_KEY_CHARS.sub("_", name) or "document"
 
 
 class R2Error(RuntimeError):

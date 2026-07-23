@@ -882,6 +882,61 @@ def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypa
     assert by_name["Notes"].get("mime_type") is None
 
 
+def test_sync_scraped_materials_dedup_is_scoped_per_course(fake_db, monkeypatch):
+    """"Already pulled" must be judged per course, not globally — a document
+    named "B" already ingested for one course must not suppress a
+    different course's own item that happens to share the same name.
+    known_names is queried filtered by course_id, and each item's
+    external_id is prefixed with its own section id, so two courses each
+    get their own "B"."""
+    provider = SchoologyProvider()
+    course_c = str(uuid.uuid4())
+    fake_db.tables["courses"].append({
+        "id": course_c, "user_id": USER_ID, "name": "Course C",
+        "external_source": "schoology", "external_id": "sec-c", "metadata": {},
+    })
+    # BIO_COURSE (course A) already has "B" ingested.
+    fake_db.tables["documents"].append({
+        "id": str(uuid.uuid4()), "user_id": USER_ID, "course_id": BIO_COURSE,
+        "external_source": "schoology", "external_id": f"scrape:{SECTION_ID}:b",
+        "metadata": {"material_name": "B"},
+    })
+
+    scraper = _FakeScraperClient([
+        MaterialLink(name="B", href="/materials/b", kind="item", material_type="File"),
+    ])
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    report_a: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report_a,
+    ))
+    section_c = SchoologySection(
+        id="sec-c", course_id="sec-c", course_title="Course C", section_title="",
+        course_code="", section_code="", grading_periods=[], meeting_days=[],
+        start_time="", end_time="", location="", active=True,
+    )
+    report_c: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=course_c, section=section_c, report=report_c,
+    ))
+
+    # Course A already had "B" — correctly skipped, nothing new ingested.
+    assert report_a["documents"] == 0
+    # Course C never had "B" before — it's new there, even though a
+    # completely different course already has an item by that name.
+    assert report_c["documents"] == 1
+    docs = fake_db.tables["documents"]
+    assert any(
+        d["course_id"] == course_c and (d.get("metadata") or {}).get("material_name") == "B"
+        for d in docs
+    )
+
+
 def test_sync_scraped_materials_downloads_real_files(fake_db, monkeypatch):
     """A "File."-labeled item whose href actually resolves to a real file —
     confirmed by content-type, not just trusting Schoology's own label — is

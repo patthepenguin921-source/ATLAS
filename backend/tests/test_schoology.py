@@ -1077,6 +1077,39 @@ def test_sync_scraped_materials_downloads_real_files(fake_db, monkeypatch):
     assert fake_db.r2.objects[doc["storage_path"]] == b"%PDF-1.4 fake pdf bytes"
 
 
+def test_sync_scraped_materials_surfaces_r2_upload_failure(fake_db, monkeypatch):
+    """A real file that downloads fine but fails to land in object storage
+    (R2 down, bad credentials, …) must still be recorded — with its text
+    searchable — but `storage_path` stays null and the failure shows up in
+    report["errors"] instead of silently vanishing (the reported "downloaded
+    but the original PDF isn't there" case)."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                       kind="item", material_type="File", folder_path="Unit 1")],
+        files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
+
+    async def _failing_upload(key, content, content_type):
+        raise RuntimeError("R2 storage error 500: internal error")
+
+    monkeypatch.setattr(r2, "upload", _failing_upload)
+
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["documents"] == 1
+    assert len(report["errors"]) == 1
+    assert "Syllabus.pdf" in report["errors"][0]
+    assert "couldn't store the original" in report["errors"][0]
+    doc = fake_db.tables["documents"][0]
+    assert doc["mime_type"] == "application/pdf"
+    assert doc["storage_path"] is None
+
+
 def test_sync_scraped_materials_enriches_downloaded_files_with_llm(fake_db, monkeypatch):
     """A downloaded file gets the same summary/keywords/concept enrichment a
     direct upload gets (`routers/documents.py`'s `_store_and_ingest`) — this

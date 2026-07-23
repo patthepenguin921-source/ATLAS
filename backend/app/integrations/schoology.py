@@ -791,7 +791,7 @@ class SchoologyProvider(IntegrationProvider):
     async def _ingest_file(
         self, *, user_id: str, course_id: str, external_id: str, title: str,
         content: bytes, filename: str, content_type: str, doc_type: str = "other",
-        extra_meta: dict[str, Any] | None = None,
+        extra_meta: dict[str, Any] | None = None, report: dict[str, Any] | None = None,
     ) -> bool:
         """Store + text-extract + embed a binary file (pdf/pptx/doc/…). Returns
         True if newly ingested, False if it already existed (idempotent).
@@ -807,8 +807,12 @@ class SchoologyProvider(IntegrationProvider):
         storage_path = f"{user_id}/{doc_id}/{safe_object_name(filename)}"
         try:
             await r2.upload(storage_path, content, content_type or "application/octet-stream")
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             storage_path = None
+            if report is not None:
+                report["errors"].append(
+                    f"{title}: downloaded but couldn't store the original file ({e})"
+                )
         text = ""
         try:
             # extract_text is a synchronous, CPU-bound call (PyMuPDF layout
@@ -885,7 +889,7 @@ class SchoologyProvider(IntegrationProvider):
                 if await self._ingest_file(
                     user_id=user_id, course_id=course_id, external_id=ext_id,
                     title=f.get("title") or filename, content=content, filename=filename,
-                    content_type="application/octet-stream", doc_type="other",
+                    content_type="application/octet-stream", doc_type="other", report=report,
                 ):
                     report["documents"] += 1
             except Exception as e:  # noqa: BLE001
@@ -922,6 +926,7 @@ class SchoologyProvider(IntegrationProvider):
                         title=title, content=content, filename=filename,
                         content_type=content_type, doc_type="other",
                         extra_meta={"source_url": url, "google_file_id": ref.file_id},
+                        report=report,
                     ):
                         report["documents"] += 1
                     return
@@ -1422,6 +1427,7 @@ class SchoologyProvider(IntegrationProvider):
                         title=title, content=content, filename=filename,
                         content_type=content_type, doc_type="other",
                         extra_meta={**base_meta, "google_file_id": ref.file_id},
+                        report=report,
                     ):
                         report["documents"] += 1
                     return
@@ -1449,6 +1455,7 @@ class SchoologyProvider(IntegrationProvider):
                     user_id=user_id, course_id=course_id, external_id=external_id,
                     title=title, content=content, filename=item.name,
                     content_type=content_type, doc_type="other", extra_meta=base_meta,
+                    report=report,
                 ):
                     report["documents"] += 1
                 return

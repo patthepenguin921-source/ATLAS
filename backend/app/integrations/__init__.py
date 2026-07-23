@@ -9,7 +9,8 @@ so implementing a provider is a localized task.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.supabase_client import eq, supabase
@@ -24,12 +25,49 @@ PROVIDERS: dict[str, IntegrationProvider] = {
     "blackboard": BlackboardProvider(),
 }
 
+# Vercel's `maxDuration` for the backend function is 60s (vercel.json). If a
+# sync runs longer than that, the platform hard-kills the process mid-`await`
+# with no exception raised — `run_sync`'s except blocks never fire, and the
+# row saved by `_set_status(..., "running")` is left stuck forever. Timing
+# out here first, with margin to spare, means we always get to record a real
+# status ourselves before the platform can silently do it for us.
+SYNC_TIMEOUT_SECONDS = 45
+
+# Safety net for anything that still manages to get stuck on "running" (e.g.
+# an old row from before this timeout existed, or a kill that also cut off
+# the timeout handler itself) — reconciled on every scheduled run.
+STALE_RUNNING_MINUTES = 10
+
+
+async def reconcile_stale_syncs(provider: str, *, stale_after_minutes: int = STALE_RUNNING_MINUTES) -> None:
+    """Force-fail any row left on "running" well past a sync's own timeout."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=stale_after_minutes)).isoformat()
+    try:
+        await supabase.update(
+            "integrations",
+            {
+                "status": "error",
+                "last_error": (
+                    f"Sync was interrupted (stuck on \"running\" past "
+                    f"{stale_after_minutes} minutes) and was marked failed automatically."
+                ),
+            },
+            filters={
+                "provider": eq(provider),
+                "status": eq("running"),
+                "updated_at": f"lt.{cutoff}",
+            },
+        )
+    except Exception:
+        pass
+
 
 async def run_sync_for_all(provider: str) -> dict[str, Any]:
     """Sync every user who has this provider connected & enabled — the entry
     point automated schedulers (Vercel Cron, n8n, …) call, since a scheduler
     has no logged-in user to scope a request to the way the normal
     `POST /integrations/{provider}/sync` endpoint does."""
+    await reconcile_stale_syncs(provider)
     rows = await supabase.select(
         "integrations", columns="user_id",
         filters={"provider": eq(provider), "enabled": eq("true")},
@@ -50,12 +88,16 @@ async def run_sync(provider: str, user_id: str) -> dict[str, Any]:
     impl = PROVIDERS[provider]
     await _set_status(user_id, provider, "running")
     try:
-        result = await impl.sync(user_id)
+        result = await asyncio.wait_for(impl.sync(user_id), timeout=SYNC_TIMEOUT_SECONDS)
         await _set_status(user_id, provider, "success", None)
         return {"provider": provider, "status": "success", **result}
     except NotImplementedError as e:
         await _set_status(user_id, provider, "idle", str(e))
         return {"provider": provider, "status": "not_implemented", "detail": str(e)}
+    except asyncio.TimeoutError:
+        msg = f"Sync timed out after {SYNC_TIMEOUT_SECONDS}s and was aborted."
+        await _set_status(user_id, provider, "error", msg)
+        return {"provider": provider, "status": "error", "detail": msg}
     except Exception as e:  # noqa: BLE001
         await _set_status(user_id, provider, "error", str(e))
         return {"provider": provider, "status": "error", "detail": str(e)}

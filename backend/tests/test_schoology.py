@@ -27,6 +27,7 @@ from app.core.supabase_client import supabase
 from app.integrations import course_mapping, google_files
 from app.integrations.schoology import (
     SchoologyProvider,
+    _is_schoology_url,
     _map_category,
     _names_match,
     _normalize_name,
@@ -402,9 +403,10 @@ def test_sync_reconciles_course_and_imports_without_grades(fake_db, monkeypatch)
     # Materials always come from the login-scraper session now (never the
     # API — see _sync_section), regardless of whether an API key is present.
     async def _fake_scraper_client(self, user_id):
-        return _FakeScraperClient([
-            MaterialLink(name="syllabus.pdf", href="/attachment/download/100", kind="item", material_type="File"),
-        ])
+        return _FakeScraperClient(
+            [MaterialLink(name="syllabus.pdf", href="/attachment/download/100", kind="item", material_type="File")],
+            files={"/attachment/download/100": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+        )
 
     monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
 
@@ -600,9 +602,10 @@ def test_sync_survives_is_active_write_failure(fake_db, monkeypatch):
     monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
 
     async def _fake_scraper_client(self, user_id):
-        return _FakeScraperClient([
-            MaterialLink(name="syllabus.pdf", href="/attachment/download/100", kind="item", material_type="File"),
-        ])
+        return _FakeScraperClient(
+            [MaterialLink(name="syllabus.pdf", href="/attachment/download/100", kind="item", material_type="File")],
+            files={"/attachment/download/100": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+        )
 
     monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
 
@@ -636,6 +639,15 @@ def test_sync_survives_is_active_write_failure(fake_db, monkeypatch):
 
 def test_normalize_name_basic():
     assert _normalize_name("AP  Calculus-AB!") == "ap calculus ab"
+
+
+def test_is_schoology_url():
+    assert _is_schoology_url("https://district.schoology.com/course/555/materials?f=1") is True
+    assert _is_schoology_url("https://app.schoology.com/course/555/materials") is True
+    assert _is_schoology_url("https://schoology.com/course/555") is True
+    assert _is_schoology_url("https://www.khanacademy.org/science") is False
+    assert _is_schoology_url("https://docs.google.com/document/d/abc") is False
+    assert _is_schoology_url("") is False
 
 
 # ---------------------------------------------------------------------------
@@ -883,12 +895,15 @@ def test_sync_login_only_discovers_courses_and_pulls_materials(fake_db, monkeypa
 
 def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypatch):
     provider = SchoologyProvider()
-    scraper = _FakeScraperClient([
-        MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
-                     kind="item", material_type="File", folder_path="Unit 1"),
-        MaterialLink(name="Notes", href="/materials/page/2",
-                     kind="item", material_type="Page", folder_path="Unit 1"),
-    ])
+    scraper = _FakeScraperClient(
+        [
+            MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                         kind="item", material_type="File", folder_path="Unit 1"),
+            MaterialLink(name="Notes", href="/materials/page/2",
+                         kind="item", material_type="Page", folder_path="Unit 1"),
+        ],
+        files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
 
     report: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
@@ -907,6 +922,75 @@ def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypa
     # "Notes" isn't labeled File/Document, so no download was attempted for
     # it — it's a plain reference either way.
     assert by_name["Notes"].get("mime_type") is None
+
+
+def test_sync_scraped_materials_skips_file_item_when_download_fails(fake_db, monkeypatch):
+    """A "File."-labeled item whose download doesn't actually come back as a
+    real file (bad href, transient failure, …) must be skipped entirely —
+    not filed as a bare text stub standing in for a PDF nothing was ever
+    saved for. Skipping (rather than ingesting a placeholder) also means the
+    name never enters the known-items set, so the next sync retries it."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient([
+        MaterialLink(name="Missing.pdf", href="/attachment/download/404", kind="item", material_type="File"),
+    ])  # no `files` entry — download_file() returns None, i.e. the fetch failed
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["documents"] == 0
+    assert report["errors"] == []
+    assert fake_db.tables["documents"] == []
+
+
+def test_sync_scraped_materials_skips_schoology_internal_link_with_no_real_content(fake_db, monkeypatch):
+    """A plain item whose link stays on schoology.com (a folder that slipped
+    past folder detection, a page, a discussion, …) has nothing real behind
+    it and must be skipped — not filed as an empty document. This is the
+    reported "pulled an empty Physics folder in as a document" bug."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient([
+        MaterialLink(
+            name="Empty Folder", href="https://district.schoology.com/course/555/materials?f=999",
+            kind="item", material_type="",  # misclassified — should have been kind="folder"
+        ),
+    ])
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["documents"] == 0
+    assert fake_db.tables["documents"] == []
+
+
+def test_sync_scraped_materials_keeps_genuine_external_link_as_reference(fake_db, monkeypatch):
+    """A link that actually goes somewhere off schoology.com (a Khan Academy
+    video, a news article, …) is still worth recording as a reference even
+    though nothing is downloaded for it — only schoology.com's own internal
+    placeholders (folders/pages/discussions) get skipped."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient([
+        MaterialLink(
+            name="Extra reading", href="https://www.khanacademy.org/science/photosynthesis",
+            kind="item", material_type="Link",
+        ),
+    ])
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["documents"] == 1
+    docs = fake_db.tables["documents"]
+    assert docs[0]["metadata"]["material_name"] == "Extra reading"
 
 
 def test_sync_scraped_materials_dedup_is_scoped_per_course(fake_db, monkeypatch):
@@ -929,9 +1013,10 @@ def test_sync_scraped_materials_dedup_is_scoped_per_course(fake_db, monkeypatch)
         "metadata": {"material_name": "B"},
     })
 
-    scraper = _FakeScraperClient([
-        MaterialLink(name="B", href="/materials/b", kind="item", material_type="File"),
-    ])
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="B", href="/materials/b", kind="item", material_type="File")],
+        files={"/materials/b": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
 
     report_a: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
@@ -1107,9 +1192,14 @@ def test_sync_scraped_materials_rescan_only_adds_whats_new(fake_db, monkeypatch)
     recorded for this course from a prior scan must be handed back to
     `walk_materials` as already-known, and not re-ingested."""
     provider = SchoologyProvider()
-    scraper = _FakeScraperClient([
-        MaterialLink(name="a", href="/materials/a", kind="item", material_type="File"),
-    ])
+    fake_files = {
+        "/materials/a": (b"%PDF-1.4 fake pdf bytes", "application/pdf"),
+        "/materials/b": (b"%PDF-1.4 fake pdf bytes", "application/pdf"),
+    }
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="a", href="/materials/a", kind="item", material_type="File")],
+        files=fake_files,
+    )
 
     report1: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
@@ -1119,10 +1209,13 @@ def test_sync_scraped_materials_rescan_only_adds_whats_new(fake_db, monkeypatch)
     assert report1["documents"] == 1
 
     # Second scan: "a" is already known, "b" is new.
-    scraper2 = _FakeScraperClient([
-        MaterialLink(name="a", href="/materials/a", kind="item", material_type="File"),
-        MaterialLink(name="b", href="/materials/b", kind="item", material_type="File"),
-    ])
+    scraper2 = _FakeScraperClient(
+        [
+            MaterialLink(name="a", href="/materials/a", kind="item", material_type="File"),
+            MaterialLink(name="b", href="/materials/b", kind="item", material_type="File"),
+        ],
+        files=fake_files,
+    )
 
     report2: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
@@ -1156,9 +1249,10 @@ def test_sync_falls_back_to_scraper_only_when_api_materials_are_empty(fake_db, m
     async def _fake_client(self, integration):
         return SchoologyClient("ckey", "csecret", transport=httpx.MockTransport(_empty_folder_handler))
 
-    scraper = _FakeScraperClient([
-        MaterialLink(name="Fallback Item", href="/materials/x", kind="item", material_type="File"),
-    ])
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Fallback Item", href="/materials/x", kind="item", material_type="File")],
+        files={"/materials/x": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
 
     async def _fake_scraper_client(self, user_id):
         return scraper
@@ -1197,9 +1291,10 @@ def test_sync_with_no_api_key_refreshes_materials_for_already_linked_courses(fak
     # as a prior API-connected sync would have.
     fake_db.tables["courses"][0]["metadata"] = {"schoology_section_id": SECTION_ID}
 
-    scraper = _FakeScraperClient([
-        MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File"),
-    ])
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Notes", href="/materials/notes", kind="item", material_type="File")],
+        files={"/materials/notes": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
 
     async def _fake_scraper_client(self, user_id):
         return scraper

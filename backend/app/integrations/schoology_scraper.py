@@ -292,18 +292,35 @@ class SchoologyScraperClient:
             f"(Got HTTP {r.status_code} at {r.url}, page titled {title!r}.)"
         )
 
-    async def _submit_login(self, get_url: str, post_url: str, *, school_nid: str | None = None) -> BeautifulSoup:
+    async def _submit_login(
+        self, get_url: str, post_url: str, *, school_nid: str | None = None,
+        already_authenticated_ok: bool = False,
+    ) -> BeautifulSoup | None:
         """Shared mechanics for both the district-subdomain and
         app.schoology.com logins: fetch the form, fill in credentials (and
         `school_nid` when the caller already knows it — the app-domain form
         doesn't carry district context, so it can't pre-fill one), submit,
         and return the resulting page's soup for the caller to judge success
         from (each domain's login form looks slightly different, so what
-        "still on the login page" means is domain-specific)."""
+        "still on the login page" means is domain-specific).
+
+        `already_authenticated_ok`, when set, treats a missing form
+        differently: confirmed against a real account, hitting
+        app.schoology.com/login while the district login's session is
+        already valid there too (the cookie is apparently scoped to the
+        whole `.schoology.com` domain, not just the district subdomain)
+        redirects straight to the dashboard (e.g. `/home`) instead of
+        showing a login form — that's success, not failure. Only a redirect
+        that leaves schoology.com entirely (a genuine third-party SSO
+        provider) still raises. Returns `None` in the already-authenticated
+        case (nothing was submitted); the caller should skip `POST`-result
+        checks like `_raise_if_login_failed` when it gets `None` back."""
         r = await self._client.get(get_url)
         soup = BeautifulSoup(r.text, "html.parser")
         form = self._find_login_form(soup)
         if form is None:
+            if already_authenticated_ok and (r.url.host or "").endswith("schoology.com"):
+                return None
             raise self._no_login_form_error(r, soup)
         fields = {
             inp.get("name"): inp.get("value", "")
@@ -348,12 +365,18 @@ class SchoologyScraperClient:
         self._logged_in = True
 
     async def _login_app_domain(self) -> None:
-        """`app.schoology.com` has its own session, separate from the
-        district subdomain's — confirmed against a real account (logging in
-        at the district subdomain and then requesting an app.schoology.com
-        URL just bounced back to a login page there, `?destination=` and
-        all). Its login form is the same shape but district-agnostic, so it
-        needs `school_nid` supplied explicitly instead of pre-filled.
+        """`app.schoology.com` needs its own explicit login *attempt*, but
+        confirmed against a real account: the district login's session
+        cookie is apparently scoped to the whole `.schoology.com` domain,
+        not just the district subdomain — so by the time this runs,
+        app.schoology.com may already consider the session authenticated
+        and redirect `/login` straight to the dashboard (e.g. `/home`)
+        instead of showing a login form at all. `_submit_login`'s
+        `already_authenticated_ok` handles that case as success rather than
+        the "no login form — SSO?" error it used to raise (which is what
+        that redirect looks like at a glance, but isn't). When a form *is*
+        shown, `school_nid` supplied explicitly (the app-domain form is
+        district-agnostic, so it can't pre-fill one) still submits normally.
 
         A failure is cached on this client instance instead of retried on
         every call: every one of a debug/sync run's several courses calls
@@ -372,8 +395,12 @@ class SchoologyScraperClient:
             raise self._app_login_error
         login_url = f"{_APP_DOMAIN}{_LOGIN_PATH}"
         try:
-            result_soup = await self._submit_login(login_url, login_url, school_nid=self._school_nid)
-            self._raise_if_login_failed(result_soup)
+            result_soup = await self._submit_login(
+                login_url, login_url, school_nid=self._school_nid,
+                already_authenticated_ok=True,
+            )
+            if result_soup is not None:
+                self._raise_if_login_failed(result_soup)
         except SchoologyScraperAuthError as e:
             self._app_login_error = e
             raise

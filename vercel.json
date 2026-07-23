@@ -11,7 +11,7 @@
       "entrypoint": "app.main:app",
       "functions": {
         "app/main.py": {
-          "maxDuration": 60
+          "maxDuration": 300
         }
       },
       "routes": [

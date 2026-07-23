@@ -905,7 +905,7 @@ def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypa
         files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
     )
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report,
@@ -935,7 +935,7 @@ def test_sync_scraped_materials_skips_file_item_when_download_fails(fake_db, mon
         MaterialLink(name="Missing.pdf", href="/attachment/download/404", kind="item", material_type="File"),
     ])  # no `files` entry — download_file() returns None, i.e. the fetch failed
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report,
@@ -959,7 +959,7 @@ def test_sync_scraped_materials_skips_schoology_internal_link_with_no_real_conte
         ),
     ])
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report,
@@ -982,7 +982,7 @@ def test_sync_scraped_materials_keeps_genuine_external_link_as_reference(fake_db
         ),
     ])
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report,
@@ -1018,7 +1018,7 @@ def test_sync_scraped_materials_dedup_is_scoped_per_course(fake_db, monkeypatch)
         files={"/materials/b": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
     )
 
-    report_a: dict[str, Any] = {"documents": 0, "errors": []}
+    report_a: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report_a,
@@ -1028,7 +1028,7 @@ def test_sync_scraped_materials_dedup_is_scoped_per_course(fake_db, monkeypatch)
         course_code="", section_code="", grading_periods=[], meeting_days=[],
         start_time="", end_time="", location="", active=True,
     )
-    report_c: dict[str, Any] = {"documents": 0, "errors": []}
+    report_c: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=course_c, section=section_c,
         scraper=scraper, report=report_c,
@@ -1058,7 +1058,7 @@ def test_sync_scraped_materials_downloads_real_files(fake_db, monkeypatch):
         files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
     )
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report,
@@ -1099,7 +1099,7 @@ def test_sync_scraped_materials_enriches_downloaded_files_with_llm(fake_db, monk
 
     monkeypatch.setattr(Archivist, "enrich", fake_enrich)
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report,
@@ -1126,7 +1126,7 @@ def test_sync_scraped_materials_skips_enrichment_without_llm(fake_db, monkeypatc
 
     monkeypatch.setattr(Archivist, "enrich", _unexpected_enrich)
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report,
@@ -1156,7 +1156,7 @@ def test_sync_scraped_materials_downloads_google_links_with_token(fake_db, monke
 
     monkeypatch.setattr(schoology_module, "download_google_file", _fake_download_google_file)
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report, google_token="tok123",
@@ -1175,7 +1175,7 @@ def test_sync_scraped_materials_google_link_without_token_is_flagged(fake_db, mo
                      kind="item", material_type="Link", folder_path="Unit 1"),
     ])
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report,
@@ -1201,7 +1201,7 @@ def test_sync_scraped_materials_rescan_only_adds_whats_new(fake_db, monkeypatch)
         files=fake_files,
     )
 
-    report1: dict[str, Any] = {"documents": 0, "errors": []}
+    report1: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper, report=report1,
@@ -1217,7 +1217,7 @@ def test_sync_scraped_materials_rescan_only_adds_whats_new(fake_db, monkeypatch)
         files=fake_files,
     )
 
-    report2: dict[str, Any] = {"documents": 0, "errors": []}
+    report2: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper2, report=report2,

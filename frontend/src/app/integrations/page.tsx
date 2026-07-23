@@ -58,6 +58,10 @@ interface SchoologyMaterialItem {
   type: string | null;
   folder: string | null;
   href: string;
+  downloaded?: boolean;
+  download_content_type?: string;
+  download_size_bytes?: number;
+  download_error?: string;
 }
 
 interface SchoologyWalkStep {
@@ -577,6 +581,17 @@ export default function IntegrationsPage() {
                             <li key={i} className="flex flex-wrap items-baseline gap-x-2">
                               <span>{item.folder ? `${item.folder} · ` : ""}{item.name}</span>
                               {item.type && <span className="text-atlas-muted">({item.type})</span>}
+                              {item.downloaded === true && (
+                                <span className="text-atlas-good">
+                                  ✓ downloaded ({item.download_content_type}, {item.download_size_bytes} bytes)
+                                </span>
+                              )}
+                              {item.downloaded === false && (
+                                <span className="text-atlas-bad">✗ couldn&apos;t find a real download</span>
+                              )}
+                              {item.download_error && (
+                                <span className="text-atlas-bad">✗ download failed: {item.download_error}</span>
+                              )}
                               {item.href && (
                                 <a
                                   href={item.href}

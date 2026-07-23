@@ -1409,6 +1409,47 @@ def test_debug_walk_materials_hits_only_the_exact_known_url(fake_db, monkeypatch
     assert result["probed"][0]["items"][0]["name"] == "Notes"
 
 
+def test_debug_walk_materials_actually_attempts_the_download(fake_db, monkeypatch):
+    """The debug screen must report whether a File/Document item's download
+    actually succeeded — not just list the item and leave that as a guess —
+    using the exact same scraper.download_file call the real sync uses.
+    Covers both outcomes: a real file found, and one that isn't."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", (
+        {"id": "known-1", "name": "Known Course", "student_uid": None,
+         "materials_url": "https://app.schoology.com/course/known-1/materials"},
+    ))
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {"domain": "https://d.schoology.com"}}
+
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+    fake_db.tables["courses"] = []
+
+    scraper = _FakeScraperClient(
+        [
+            MaterialLink(name="Real.pdf", href="/materials/gp/1", kind="item", material_type="File"),
+            MaterialLink(name="Missing.pdf", href="/materials/gp/2", kind="item", material_type="File"),
+        ],
+        files={"/materials/gp/1": (b"%PDF-1.4 bytes", "application/pdf")},
+        courses=[],
+    )
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+
+    result = asyncio.run(provider.debug_walk_materials(USER_ID))
+
+    by_name = {i["name"]: i for i in result["probed"][0]["items"]}
+    assert by_name["Real.pdf"]["downloaded"] is True
+    assert by_name["Real.pdf"]["download_content_type"] == "application/pdf"
+    assert by_name["Real.pdf"]["download_size_bytes"] == len(b"%PDF-1.4 bytes")
+    assert by_name["Missing.pdf"]["downloaded"] is False
+
+
 def test_debug_walk_materials_known_sections_skip_discovery_logins(fake_db, monkeypatch):
     """When the request is (or defaults to) known courses,
     `_probe_sections` must not spin up any extra scraper client/login just

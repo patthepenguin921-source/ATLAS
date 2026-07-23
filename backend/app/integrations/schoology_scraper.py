@@ -272,6 +272,26 @@ class SchoologyScraperClient:
             (f for f in soup.find_all("form") if f.find("input", {"name": "pass"})), None
         )
 
+    @staticmethod
+    def _no_login_form_error(r: httpx.Response, soup: BeautifulSoup) -> "SchoologyScraperAuthError":
+        """Diagnostic-first version of the "no login form" error: the plain
+        "this district may enforce SSO" message alone was a dead end when
+        the real cause turned out to be something else entirely (a stale/
+        cross-domain session cookie changing what page gets served, a
+        temporary rate-limit or challenge page, …) — a fetch of the same URL
+        with no session at all can come back perfectly normal, making the
+        SSO explanation look right when it wasn't. Including the actual
+        status/URL/title this specific request got back turns "form not
+        found" from a guess into something that can be diagnosed without
+        server log access, the same reasoning as `debug_materials_page`."""
+        title = soup.title.get_text(strip=True) if soup.title else "(no title)"
+        return SchoologyScraperAuthError(
+            "Could not find Schoology's login form — this district may enforce "
+            "SSO (Google/Microsoft/Clever) instead of a username/password login, "
+            "which this client can't automate. "
+            f"(Got HTTP {r.status_code} at {r.url}, page titled {title!r}.)"
+        )
+
     async def _submit_login(self, get_url: str, post_url: str, *, school_nid: str | None = None) -> BeautifulSoup:
         """Shared mechanics for both the district-subdomain and
         app.schoology.com logins: fetch the form, fill in credentials (and
@@ -284,11 +304,7 @@ class SchoologyScraperClient:
         soup = BeautifulSoup(r.text, "html.parser")
         form = self._find_login_form(soup)
         if form is None:
-            raise SchoologyScraperAuthError(
-                "Could not find Schoology's login form — this district may enforce "
-                "SSO (Google/Microsoft/Clever) instead of a username/password login, "
-                "which this client can't automate."
-            )
+            raise self._no_login_form_error(r, soup)
         fields = {
             inp.get("name"): inp.get("value", "")
             for inp in form.find_all("input") if inp.get("name")
@@ -323,11 +339,7 @@ class SchoologyScraperClient:
         soup = BeautifulSoup(r.text, "html.parser")
         form = self._find_login_form(soup)
         if form is None:
-            raise SchoologyScraperAuthError(
-                "Could not find Schoology's login form — this district may enforce "
-                "SSO (Google/Microsoft/Clever) instead of a username/password login, "
-                "which this client can't automate."
-            )
+            raise self._no_login_form_error(r, soup)
         school_nid_input = form.find("input", {"name": "school_nid"})
         self._school_nid = school_nid_input.get("value") if school_nid_input else None
 

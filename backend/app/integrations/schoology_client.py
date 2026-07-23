@@ -8,8 +8,8 @@ exchange for; the consumer key/secret alone authenticate as that user, at that
 user's own permission level. See https://developers.schoology.com/api/ .
 
 The REST host is always ``https://api.schoology.com/v1`` regardless of the
-district's web subdomain (e.g. lexington1.schoology.com) — the subdomain only
-serves the web UI and the ``/api`` key-generation page.
+district's web subdomain (e.g. yourdistrict.schoology.com) — the subdomain
+only serves the web UI and the ``/api`` key-generation page.
 
 Signing notes (learned against the live API):
   * The signature base string MUST include any query-string parameters, sorted

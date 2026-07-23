@@ -35,6 +35,17 @@ def safe_object_name(filename: str) -> str:
     return _UNSAFE_KEY_CHARS.sub("_", name) or "document"
 
 
+def _control_char_position(value: str) -> int | None:
+    """Index of the first control character (the class httpx's URL parser
+    rejects — a literal newline being the practical case seen in production,
+    from an env var value with a trailing newline) in `value`, or None if
+    it's clean."""
+    for i, ch in enumerate(value):
+        if ord(ch) < 0x20 or ord(ch) == 0x7F:
+            return i
+    return None
+
+
 class R2Error(RuntimeError):
     def __init__(self, status: int, detail: str):
         super().__init__(f"R2 storage error {status}: {detail}")
@@ -119,8 +130,33 @@ class R2Client:
         request_headers["Authorization"] = auth
         return request_headers
 
+    def _check_url_components(self, key: str) -> None:
+        """Raise a precise, actionable error instead of httpx's generic
+        "Invalid non-printable ASCII character in URL" — that message alone
+        doesn't say whether the bad character is in the account id/host
+        (config — e.g. a stray newline pasted into R2_ACCOUNT_ID), the
+        bucket name (config), or the storage key (derived from a filename,
+        already sanitized by `safe_object_name` — so this would mean that
+        sanitizer has a real gap, not a config problem). Reports only
+        position/length, never the value itself, since the host embeds the
+        account id."""
+        for label, value in (("account id", self._account_id), ("bucket", self._bucket), ("key", key)):
+            pos = _control_char_position(value)
+            if pos is not None:
+                raise R2Error(
+                    0,
+                    f"R2 {label} contains a control character (e.g. a stray "
+                    f"newline) at position {pos} of {len(value)} characters — "
+                    + ("check the R2_ACCOUNT_ID env var for stray whitespace."
+                       if label == "account id" else
+                       "check the ATLAS_STORAGE_BUCKET env var for stray whitespace."
+                       if label == "bucket" else
+                       "this shouldn't happen after safe_object_name(); please report it."),
+                )
+
     # ---- object operations ----
     async def upload(self, key: str, content: bytes, content_type: str) -> None:
+        self._check_url_components(key)
         client = self._require()
         payload_hash = hashlib.sha256(content).hexdigest()
         headers = self._sign_request(

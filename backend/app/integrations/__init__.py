@@ -25,13 +25,18 @@ PROVIDERS: dict[str, IntegrationProvider] = {
     "blackboard": BlackboardProvider(),
 }
 
-# Vercel's `maxDuration` for the backend function is 60s (vercel.json). If a
-# sync runs longer than that, the platform hard-kills the process mid-`await`
-# with no exception raised — `run_sync`'s except blocks never fire, and the
-# row saved by `_set_status(..., "running")` is left stuck forever. Timing
-# out here first, with margin to spare, means we always get to record a real
-# status ourselves before the platform can silently do it for us.
-SYNC_TIMEOUT_SECONDS = 45
+# Vercel's `maxDuration` for the backend function is 300s (vercel.json —
+# raised from 60s: a real account's sync kept genuinely needing more than
+# 60s, even after logging in once instead of per course, running section
+# syncs concurrently, and moving blocking calls off the event loop — the
+# work itself just doesn't fit in 60s for an account with enough courses
+# and materials). If a sync runs longer than the configured max, the
+# platform hard-kills the process mid-`await` with no exception raised —
+# `run_sync`'s except blocks never fire, and the row saved by
+# `_set_status(..., "running")` is left stuck forever. Timing out here
+# first, with margin to spare, means we always get to record a real status
+# ourselves before the platform can silently do it for us.
+SYNC_TIMEOUT_SECONDS = 270
 
 # Safety net for anything that still manages to get stuck on "running" (e.g.
 # an old row from before this timeout existed, or a kill that also cut off
@@ -89,6 +94,13 @@ async def run_sync(provider: str, user_id: str) -> dict[str, Any]:
     await _set_status(user_id, provider, "running")
     try:
         result = await asyncio.wait_for(impl.sync(user_id), timeout=SYNC_TIMEOUT_SECONDS)
+        if result.get("skipped"):
+            result.setdefault("errors", []).append(
+                f"{result['skipped']} item(s) had nothing real to save (an empty "
+                "folder, a failed download, or a link with no real content) and "
+                "were skipped rather than saved as empty placeholders — they'll be "
+                "retried on the next sync."
+            )
         await _set_status(user_id, provider, "success", None)
         return {"provider": provider, "status": "success", **result}
     except NotImplementedError as e:

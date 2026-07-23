@@ -949,7 +949,7 @@ class SchoologyProvider(IntegrationProvider):
         integration = await self._load_integration(user_id)
         report: dict[str, Any] = {
             "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
-            "documents": 0, "links": 0, "announcements": 0, "errors": [],
+            "documents": 0, "links": 0, "announcements": 0, "skipped": 0, "errors": [],
         }
 
         # The login (username/password) is the only required credential now;
@@ -1455,11 +1455,13 @@ class SchoologyProvider(IntegrationProvider):
             # Not actually a direct file (or the download failed) — skip
             # rather than filing a stub with no original to open. Not added
             # to the known-names set, so the next sync tries it again.
+            report["skipped"] += 1
             return
 
         # Not a Google link, not a downloadable file — only worth a
         # reference if it actually leads somewhere off schoology.com.
         if _is_schoology_url(item.href):
+            report["skipped"] += 1
             return
         if await self._ingest_text(
             user_id=user_id, course_id=course_id, external_id=external_id,

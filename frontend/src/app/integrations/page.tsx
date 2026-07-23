@@ -565,43 +565,7 @@ export default function IntegrationsPage() {
                         <div className="text-atlas-bad">Couldn&apos;t reach this course: {p.error}</div>
                       )}
                       {p.items.length === 0 ? (
-                        <>
-                          <div className="text-atlas-muted">No items found.</div>
-                          {p.walk_trace && p.walk_trace.length > 0 && (
-                            <div className="mt-1.5 space-y-1">
-                              <div className="text-atlas-muted">
-                                {diagnoseWalk(p.walk_trace)}
-                              </div>
-                              <details>
-                                <summary className="cursor-pointer text-atlas-muted">
-                                  Pages checked ({p.walk_trace.length})
-                                </summary>
-                                <ul className="mt-1 space-y-2 font-mono text-[11px] leading-tight">
-                                  {p.walk_trace.map((step, i) => (
-                                    <li key={i} className="break-all text-atlas-muted">
-                                      <div>
-                                        [{step.status_code ?? "?"}]
-                                        {step.looks_like_login ? " ⚠ login-wall" : ""}
-                                        {step.likely_js_shell ? " ⚠ js-shell" : ""}{" "}
-                                        {step.parsed_count ?? 0} of {step.raw_link_count ?? 0} links ·{" "}
-                                        {step.final_url ?? step.requested_url}
-                                      </div>
-                                      {step.sample_links && step.sample_links.length > 0 && (
-                                        <ul className="mt-0.5 ml-3 space-y-0.5 opacity-80">
-                                          {step.sample_links.map((l, j) => (
-                                            <li key={j}>
-                                              {l.text ? `"${l.text}" ` : ""}→ {l.href}
-                                            </li>
-                                          ))}
-                                        </ul>
-                                      )}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </details>
-                            </div>
-                          )}
-                        </>
+                        <div className="text-atlas-muted">No items found.</div>
                       ) : (
                         <ul className="space-y-1">
                           {p.items.map((item, i) => (
@@ -621,6 +585,44 @@ export default function IntegrationsPage() {
                             </li>
                           ))}
                         </ul>
+                      )}
+                      {/* Every raw link the walk actually saw on each page it
+                          visited, not just the ones classified as real
+                          content above — shown unconditionally so nothing
+                          is hidden behind the classifier's judgment call. */}
+                      {p.walk_trace && p.walk_trace.length > 0 && (
+                        <div className="mt-1.5 space-y-1">
+                          {p.items.length === 0 && (
+                            <div className="text-atlas-muted">{diagnoseWalk(p.walk_trace)}</div>
+                          )}
+                          <details>
+                            <summary className="cursor-pointer text-atlas-muted">
+                              All links seen, every page checked ({p.walk_trace.length})
+                            </summary>
+                            <ul className="mt-1 space-y-2 font-mono text-[11px] leading-tight">
+                              {p.walk_trace.map((step, i) => (
+                                <li key={i} className="break-all text-atlas-muted">
+                                  <div>
+                                    [{step.status_code ?? "?"}]
+                                    {step.looks_like_login ? " ⚠ login-wall" : ""}
+                                    {step.likely_js_shell ? " ⚠ js-shell" : ""}{" "}
+                                    {step.parsed_count ?? 0} of {step.raw_link_count ?? 0} links ·{" "}
+                                    {step.final_url ?? step.requested_url}
+                                  </div>
+                                  {step.sample_links && step.sample_links.length > 0 && (
+                                    <ul className="mt-0.5 ml-3 space-y-0.5 opacity-80">
+                                      {step.sample_links.map((l, j) => (
+                                        <li key={j}>
+                                          {l.text ? `"${l.text}" ` : ""}→ {l.href}
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        </div>
                       )}
                     </div>
                   ))}

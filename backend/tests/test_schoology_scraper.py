@@ -79,6 +79,72 @@ def test_parse_materials_page_filters_real_boilerplate_dump():
     assert item.href == "/course/8435659601/materials?f=1003379126"
 
 
+# Verbatim link dump from the real "Syllabus and Other Important Documents"
+# folder page (the one folder above, opened) — confirms two real bugs found
+# against a live account: "Next"'s href is *identical* to the first real
+# item's own permalink (Schoology points pagination at the next page's first
+# item rather than a dedicated pager endpoint), and each item is a bare
+# "*.pdf" filename with no "File. " a11y prefix, linking to a
+# `/materials/gp/{id}` detail/viewer page rather than a direct download.
+REAL_FOLDER_PAGE_LINKS = [
+    {"text": "Skip to Content", "href": "#main"},
+    {"text": "Folder. Syllabus and Other Important Documents",
+     "href": "/course/8435659601/materials?f=1003379126"},
+    {"text": "Course Profile", "href": "/course/8435659601"},
+    {"text": "Current Menu Item Materials Dropdown Materials", "href": "/course/8435659601/materials"},
+    {"text": "Updates", "href": "/course/8435659601/updates"},
+    {"text": "Grades", "href": "/course/8435659601/student_grades"},
+    {"text": "Mastery", "href": "/course/8435659601/student_mastery"},
+    {"text": "Members", "href": "/course/8435659601/members"},
+    {"text": "Course Profile", "href": "/course-templates/8435659601"},
+    {"text": "Canva for Education", "href": "/apps/4673660618/run/course/8435659601"},
+    {"text": "CodeAI", "href": "/apps/7293540612/run/course/8435659601"},
+    {"text": "Google Meet", "href": "/apps/7169483585/run/course/8435659601"},
+    {"text": "Lingco Classroom", "href": "/apps/2414152280/run/course/8435659601"},
+    {"text": "Math Nation", "href": "/apps/2940901321/run/course/8435659601"},
+    {"text": "McGraw Hill K-12 SSO", "href": "/apps/652250061/run/course/8435659601"},
+    {"text": "Nearpod LTI 1.3 by Nearpod", "href": "/apps/6695120929/run/course/8435659601"},
+    {"text": "Newsela", "href": "/apps/2147537916/run/course/8435659601"},
+    {"text": "AP Biology: Section 2", "href": "/course/8435659601"},
+    {"text": "Prev", "href": "/course/8435659601/materials?f=1003379126"},
+    {"text": "Next", "href": "/course/8435659601/materials/gp/8444336430"},
+    {"text": "Up", "href": "/course/8435659601/materials"},
+    {"text": "Course and Exam Description Guide (CED) ap-biology-course-and-exam-description-effective-fall-2025.pdf",
+     "href": "/course/8435659601/materials/gp/8444336430"},
+    {"text": "AP BIO TASK VERBS.pdf", "href": "/course/8435659601/materials/gp/8444336432"},
+    {"text": "AP Units of Instruction.pdf", "href": "/course/8435659601/materials/gp/8444336435"},
+    {"text": "AP Biology: Section 2", "href": "/course/8435659601"},
+    {"text": "Prev", "href": "/course/8435659601/materials?f=1003379126"},
+    {"text": "Next", "href": "/course/8435659601/materials/gp/8444336430"},
+]
+
+
+def test_parse_materials_page_recovers_real_item_shadowed_by_pagination_link():
+    """Regression: "Next" used to be treated as a plain item (no recognized
+    prefix, href not yet recognized as a file), and since it appears before
+    the real document with the identical href, it claimed that href first —
+    silently replacing "Course and Exam Description Guide (CED) ...pdf"
+    with the meaningless name "Next" in the final result. All three real
+    PDFs must come through with their real names and be tagged as files
+    (via the /materials/gp/{id} href pattern, since none of them carry a
+    "File. " a11y prefix)."""
+    parsed = parse_materials_page(REAL_FOLDER_PAGE_LINKS)
+    by_name = {p.name: p for p in parsed}
+    assert "Next" not in by_name
+    assert "Prev" not in by_name
+    assert "Up" not in by_name
+    # The folder's own self-link (present in every page's nav) still comes
+    # through as a folder; only the three real items are checked below.
+    items_by_name = {p.name: p for p in parsed if p.kind == "item"}
+    assert set(items_by_name) == {
+        "Course and Exam Description Guide (CED) ap-biology-course-and-exam-description-effective-fall-2025.pdf",
+        "AP BIO TASK VERBS.pdf",
+        "AP Units of Instruction.pdf",
+    }
+    for item in items_by_name.values():
+        assert item.material_type == "File"
+
+
 def test_parse_materials_page_classifies_items_vs_folders():
     links = [
         {"text": "Folder. Unit 1", "href": "/course/1/materials?f=10"},
@@ -1087,6 +1153,55 @@ def test_download_file_follows_detail_page_to_real_attachment():
         client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
         try:
             result = await client.download_file(f"{BASE_URL}/course/1/materials/document/9001")
+            assert result is not None
+            content, content_type = result
+            assert content == b"%PDF-1.4 real bytes"
+            assert content_type == "application/pdf"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_download_file_follows_materials_gp_detail_page_to_real_pdf():
+    """The real folder-item detail/viewer page shape confirmed against a
+    live account (`/course/{id}/materials/gp/{item_id}` — see
+    REAL_FOLDER_PAGE_LINKS) is just another HTML detail page as far as
+    `download_file` is concerned; this exercises the same generic
+    detail-page-to-download-link following against that specific URL shape,
+    now that `_FILE_HREF_PATTERNS` recognizes it as a file so
+    `_ingest_scraped_material` actually calls `download_file` on it at all
+    (previously it fell through to a plain text reference instead)."""
+    detail_html = """
+    <html><body>
+      <h1>AP Units of Instruction.pdf</h1>
+      <a class="download-button" href="/attachment/8444336435/download">Download</a>
+    </body></html>
+    """
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/course/8435659601/materials/gp/8444336435":
+                return httpx.Response(
+                    200, text=detail_html, headers={"content-type": "text/html; charset=utf-8"},
+                )
+            if request.url.path == "/attachment/8444336435/download":
+                return httpx.Response(
+                    200, content=b"%PDF-1.4 real bytes",
+                    headers={"content-type": "application/pdf"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.download_file(
+                f"{BASE_URL}/course/8435659601/materials/gp/8444336435"
+            )
             assert result is not None
             content, content_type = result
             assert content == b"%PDF-1.4 real bytes"

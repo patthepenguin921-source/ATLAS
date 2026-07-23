@@ -103,6 +103,23 @@ async def run_sync(provider: str, user_id: str) -> dict[str, Any]:
         return {"provider": provider, "status": "error", "detail": str(e)}
 
 
+async def cancel_sync(provider: str, user_id: str) -> dict[str, Any]:
+    """Let the user unstick their own integration instead of waiting out
+    `reconcile_stale_syncs`'s 10-minute sweep (or a legitimately slow run
+    they just want to give up on). There's no handle to the in-flight
+    request itself to actually abort it — a Vercel invocation isn't
+    cancellable via API — so this only clears the "running" status; if that
+    request is still alive, its own eventual `_set_status` call will just
+    overwrite this again. Only applies to a row currently "running" — a
+    no-op (`canceled: False`) otherwise, e.g. the sync already finished."""
+    rows = await supabase.update(
+        "integrations",
+        {"status": "idle", "last_error": "Sync canceled."},
+        filters={"user_id": eq(user_id), "provider": eq(provider), "status": eq("running")},
+    )
+    return {"provider": provider, "status": "idle", "canceled": bool(rows)}
+
+
 async def _set_status(user_id: str, provider: str, status: str, error: str | None = "") -> None:
     patch: dict[str, Any] = {"status": status}
     if status == "success":

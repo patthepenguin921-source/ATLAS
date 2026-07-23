@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app.config import settings
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
-from app.integrations import PROVIDERS, run_sync, run_sync_for_all
+from app.integrations import PROVIDERS, cancel_sync, run_sync, run_sync_for_all
 from app.integrations.powerschool import encrypt_credentials, encrypt_session_cookie
 from app.integrations.powerschool_client import PowerSchoolClient
 from app.integrations.schoology import (
@@ -75,6 +75,16 @@ async def sync_provider(provider: str, user: CurrentUser = Depends(get_current_u
     if provider not in PROVIDERS:
         raise HTTPException(400, f"Unknown provider. Known: {list(PROVIDERS)}")
     return await run_sync(provider, user.id)
+
+
+@router.post("/{provider}/cancel")
+async def cancel_provider_sync(provider: str, user: CurrentUser = Depends(get_current_user)):
+    """Clear a "running" status stuck on this account's row so the UI (and
+    the next "Sync now" click) aren't blocked on it — see `cancel_sync`'s
+    docstring for what this can and can't actually stop."""
+    if provider not in PROVIDERS:
+        raise HTTPException(400, f"Unknown provider. Known: {list(PROVIDERS)}")
+    return await cancel_sync(provider, user.id)
 
 
 def _check_cron_secret(request: Request) -> None:

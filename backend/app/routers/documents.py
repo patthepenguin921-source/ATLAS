@@ -1,6 +1,7 @@
 """Documents — upload, ingest (chunk+embed), enrich, and manage files."""
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import httpx
@@ -41,11 +42,15 @@ async def _store_and_ingest(
     # iPhone photos & scans come in as images — OCR the text (so it's
     # searchable), then normalize them to PDF so every document is a uniform,
     # viewable file.
+    # ocr_image/convert_image_to_pdf/extract_text below are synchronous,
+    # CPU-bound calls (Tesseract subprocess, PyMuPDF layout reconstruction) —
+    # run off the event loop thread so a slow one can't block the whole
+    # worker for the duration.
     ocr_text = ""
     if ingestion.is_image(content_type, filename):
-        ocr_text = ingestion.ocr_image(content)
+        ocr_text = await asyncio.to_thread(ingestion.ocr_image, content)
         try:
-            content, filename = ingestion.convert_image_to_pdf(content, filename)
+            content, filename = await asyncio.to_thread(ingestion.convert_image_to_pdf, content, filename)
             content_type = "application/pdf"
         except Exception as e:
             raise HTTPException(422, f"Could not convert image to PDF: {e}")
@@ -65,7 +70,7 @@ async def _store_and_ingest(
     # Parsing failures are non-fatal; the original is already saved either way.
     text = ""
     try:
-        text = ingestion.extract_text(content, content_type or "", filename or "")
+        text = await asyncio.to_thread(ingestion.extract_text, content, content_type or "", filename or "")
         if not text.strip() and ocr_text.strip():
             text = ocr_text
     except Exception:

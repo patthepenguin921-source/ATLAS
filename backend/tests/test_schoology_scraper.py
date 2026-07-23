@@ -409,6 +409,83 @@ def test_login_app_domain_reuses_school_nid_captured_from_district_login():
     assert captured["form_build_id"] == "app-form-build-id-xyz789"
 
 
+def test_login_app_domain_treats_already_authenticated_redirect_as_success():
+    """Confirmed against a real account: app.schoology.com/login can
+    redirect straight to the dashboard (e.g. /home) instead of showing a
+    login form, when the district login's session cookie already
+    authenticates there too (apparently scoped to the whole .schoology.com
+    domain). That must be treated as success, not the "no login form —
+    SSO?" error it used to raise, which looks identical to a genuinely
+    SSO-only district at a glance but isn't the same thing at all."""
+    app_home_page = "<html><head><title>Home | Schoology</title></head><body>Welcome!</body></html>"
+
+    async def run():
+        post_calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal post_calls
+            if request.url.host == "app.schoology.com":
+                if request.url.path == "/login" and request.method == "GET":
+                    return httpx.Response(302, headers={"location": "/home"})
+                if request.url.path == "/login" and request.method == "POST":
+                    post_calls += 1
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)
+                if request.url.path == "/home":
+                    return httpx.Response(200, text=app_home_page)
+                return httpx.Response(404)
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            await client.login()
+            await client._login_app_domain()
+            assert client._app_logged_in is True
+        finally:
+            await client.aclose()
+        # Never actually submitted credentials to app.schoology.com — there
+        # was nothing to log into, the session was already valid there.
+        assert post_calls == 0
+
+    asyncio.run(run())
+
+
+def test_login_app_domain_still_errors_on_redirect_to_real_sso_provider():
+    """A redirect that actually leaves schoology.com entirely (a genuine
+    third-party SSO provider) must still raise — only a same-domain
+    redirect (already authenticated) is treated as success."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "app.schoology.com":
+                if request.url.path == "/login" and request.method == "GET":
+                    return httpx.Response(
+                        302, headers={"location": "https://accounts.google.com/o/oauth2/auth"},
+                    )
+                return httpx.Response(404)
+            if request.url.host == "accounts.google.com":
+                return httpx.Response(200, text="<html><body>Sign in with Google</body></html>")
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            await client.login()
+            with pytest.raises(SchoologyScraperAuthError, match="SSO"):
+                await client._login_app_domain()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_debug_materials_page_reports_app_domain_login_failure_without_crashing():
     async def run():
         # Right password for the district subdomain, wrong for the app

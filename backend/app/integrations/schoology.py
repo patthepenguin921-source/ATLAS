@@ -62,6 +62,26 @@ _CATEGORY_KEYWORDS = (
     "lab", "discussion", "presentation", "reading", "participation",
 )
 
+# Each course's assignments/events/materials walk is independent I/O, so
+# they run several at once instead of one full course after another — with
+# only one course in flight at a time, a many-course account's total sync
+# time is roughly (course count × per-course latency), which is what's been
+# pushing accounts past the request timeout even after the shared-login fix.
+# Capped (rather than unbounded) so as not to hammer Schoology or the shared
+# scraper/API sessions with every course's requests at once.
+_SECTION_SYNC_CONCURRENCY = 4
+
+
+async def _gather_bounded(coros: list[Any], limit: int) -> None:
+    """Run coroutines concurrently, at most `limit` in flight at a time."""
+    semaphore = asyncio.Semaphore(limit)
+
+    async def _run(coro: Any) -> None:
+        async with semaphore:
+            await coro
+
+    await asyncio.gather(*(_run(c) for c in coros))
+
 
 def encrypt_api_key(consumer_key: str, consumer_secret: str) -> str:
     return encrypt_json({"consumer_key": consumer_key, "consumer_secret": consumer_secret})
@@ -964,6 +984,11 @@ class SchoologyProvider(IntegrationProvider):
                     g, m = gm
                     present_group_semesters.setdefault(g.key, set()).add(m.semester)
 
+            # Resolving each section to a course_id is a single cheap DB
+            # upsert, done up front and in order; the actual slow part —
+            # assignments/events/materials — is collected into a task list
+            # and run concurrently below instead of one course at a time.
+            section_tasks: list[Any] = []
             for section in sections:
                 # Non-academic blocks (lunch, advisory) — never imported, and
                 # any stale row from before this filter existed is removed.
@@ -995,11 +1020,14 @@ class SchoologyProvider(IntegrationProvider):
                     report["errors"].append(f"{section.display_name}: {e}")
                     continue
 
-                await self._sync_section(
+                section_tasks.append(self._sync_section(
                     client=client, user_id=user_id, course_id=course_id, section=section,
                     monday=monday, sunday=sunday, google_token=google_token,
                     student_uid=uid, report=report, scraper=scraper,
-                )
+                ))
+
+            if section_tasks:
+                await _gather_bounded(section_tasks, limit=_SECTION_SYNC_CONCURRENCY)
 
             return report
         finally:
@@ -1066,7 +1094,7 @@ class SchoologyProvider(IntegrationProvider):
                     "is enrolled in courses."
                 )
                 return
-            for course_id, name, section_id, student_uid in linked:
+            async def _sync_one(course_id: str, name: str, section_id: str, student_uid: str | None) -> None:
                 section = SchoologySection(
                     id=section_id, course_id=section_id, course_title=name, section_title="",
                     course_code="", section_code="", grading_periods=[], meeting_days=[],
@@ -1078,6 +1106,12 @@ class SchoologyProvider(IntegrationProvider):
                     student_uid=student_uid,
                 )
                 report["courses"] += 1
+
+            # See `sync()`'s section_tasks comment — same reasoning, walking
+            # each course's materials concurrently instead of one at a time.
+            await _gather_bounded(
+                [_sync_one(*item) for item in linked], limit=_SECTION_SYNC_CONCURRENCY,
+            )
         finally:
             await scraper.aclose()
 

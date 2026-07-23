@@ -63,14 +63,20 @@ _CATEGORY_KEYWORDS = (
     "lab", "discussion", "presentation", "reading", "participation",
 )
 
-# Each course's assignments/events/materials walk is independent I/O, so
-# they run several at once instead of one full course after another — with
-# only one course in flight at a time, a many-course account's total sync
-# time is roughly (course count × per-course latency), which is what's been
-# pushing accounts past the request timeout even after the shared-login fix.
-# Capped (rather than unbounded) so as not to hammer Schoology or the shared
-# scraper/API sessions with every course's requests at once.
-_SECTION_SYNC_CONCURRENCY = 4
+# How many courses' assignments/events/materials walks run at once. Was 4
+# (motivated by the original 45-60s request timeout — see git history), but
+# concurrent requests against the *same* authenticated Schoology session
+# turned out to be unreliable in production: a real account's real files
+# reliably showed up via the debug tool (which walks courses one at a time)
+# but came back nearly empty through the real sync (concurrency=4) — almost
+# certainly Schoology's own session/anti-bot handling reacting to bursts of
+# simultaneous requests on one login, not a code bug on either side. Now
+# that the request timeout is 300s (SYNC_TIMEOUT_SECONDS in
+# app.integrations), there's no time-budget reason left to risk that
+# unreliability — sequential is both correct and still comfortably fast
+# enough. Kept as a constant (not just removing _gather_bounded) so it's a
+# one-line, easy-to-revisit knob if a future timeout tightens again.
+_SECTION_SYNC_CONCURRENCY = 1
 
 
 async def _gather_bounded(coros: list[Any], limit: int) -> None:

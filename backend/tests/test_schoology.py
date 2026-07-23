@@ -755,11 +755,19 @@ _SCRAPE_SECTION = SchoologySection(
 )
 
 
-def test_sync_scraped_materials_skips_silently_when_not_configured(fake_db, monkeypatch):
+def test_sync_skips_materials_silently_when_scraper_not_configured(fake_db, monkeypatch):
     """No materials-scraper login saved yet is an expected, common case (most
     accounts won't need it — only districts that block the Courses realm for
-    the API key do) — must not show up in report["errors"]."""
+    the API key do) — must not show up in report["errors"], and the rest of
+    the sync (assignments/events, API-backed) must still run normally. The
+    login attempt happens once up front in `sync()`, not per course."""
     provider = SchoologyProvider()
+
+    async def _fake_load(self, user_id):
+        return {"secret_ref": "x", "config": {}}
+
+    async def _fake_client(self, integration):
+        return _mock_client()
 
     async def _fake_scraper_client(self, user_id):
         raise RuntimeError(
@@ -767,14 +775,14 @@ def test_sync_scraped_materials_skips_silently_when_not_configured(fake_db, monk
             "and password under \"Materials access\" first."
         )
 
+    monkeypatch.setattr(SchoologyProvider, "_load_integration", _fake_load)
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
     monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
 
-    report: dict[str, Any] = {"documents": 0, "errors": []}
-    asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
-    ))
-    assert report == {"documents": 0, "errors": []}
-    assert fake_db.tables["documents"] == []
+    report = asyncio.run(provider.sync(USER_ID))
+    assert report["errors"] == []
+    assert report["assignments"] == 1  # API-backed sync still ran fine
 
 
 class _FakeScraperClient:
@@ -882,19 +890,14 @@ def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypa
                      kind="item", material_type="Page", folder_path="Unit 1"),
     ])
 
-    async def _fake_scraper_client(self, user_id):
-        return scraper
-
-    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
-
     report: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
     ))
 
     assert report["documents"] == 2
     assert report["errors"] == []
-    assert scraper.closed is True
     docs = fake_db.tables["documents"]
     by_name = {d["metadata"]["material_name"]: d for d in docs}
     assert set(by_name) == {"Syllabus.pdf", "Notes"}
@@ -930,14 +933,10 @@ def test_sync_scraped_materials_dedup_is_scoped_per_course(fake_db, monkeypatch)
         MaterialLink(name="B", href="/materials/b", kind="item", material_type="File"),
     ])
 
-    async def _fake_scraper_client(self, user_id):
-        return scraper
-
-    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
-
     report_a: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report_a,
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report_a,
     ))
     section_c = SchoologySection(
         id="sec-c", course_id="sec-c", course_title="Course C", section_title="",
@@ -946,7 +945,8 @@ def test_sync_scraped_materials_dedup_is_scoped_per_course(fake_db, monkeypatch)
     )
     report_c: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=course_c, section=section_c, report=report_c,
+        user_id=USER_ID, course_id=course_c, section=section_c,
+        scraper=scraper, report=report_c,
     ))
 
     # Course A already had "B" — correctly skipped, nothing new ingested.
@@ -973,14 +973,10 @@ def test_sync_scraped_materials_downloads_real_files(fake_db, monkeypatch):
         files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
     )
 
-    async def _fake_scraper_client(self, user_id):
-        return scraper
-
-    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
-
     report: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
     ))
 
     assert report["documents"] == 1
@@ -1008,10 +1004,6 @@ def test_sync_scraped_materials_enriches_downloaded_files_with_llm(fake_db, monk
         files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
     )
 
-    async def _fake_scraper_client(self, user_id):
-        return scraper
-
-    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
 
     calls = []
@@ -1024,7 +1016,8 @@ def test_sync_scraped_materials_enriches_downloaded_files_with_llm(fake_db, monk
 
     report: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
     ))
 
     doc = fake_db.tables["documents"][0]
@@ -1041,10 +1034,6 @@ def test_sync_scraped_materials_skips_enrichment_without_llm(fake_db, monkeypatc
         files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
     )
 
-    async def _fake_scraper_client(self, user_id):
-        return scraper
-
-    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
     monkeypatch.setattr(settings, "groq_api_key", "")  # settings.has_llm -> False
 
     async def _unexpected_enrich(self, *a, **kw):
@@ -1054,7 +1043,8 @@ def test_sync_scraped_materials_skips_enrichment_without_llm(fake_db, monkeypatc
 
     report: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
     ))
 
     assert report["documents"] == 1
@@ -1072,9 +1062,6 @@ def test_sync_scraped_materials_downloads_google_links_with_token(fake_db, monke
                      kind="item", material_type="Link", folder_path="Unit 1"),
     ])
 
-    async def _fake_scraper_client(self, user_id):
-        return scraper
-
     async def _fake_download_google_file(ref, token, name=None):
         assert token == "tok123"
         return (
@@ -1082,13 +1069,12 @@ def test_sync_scraped_materials_downloads_google_links_with_token(fake_db, monke
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         )
 
-    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
     monkeypatch.setattr(schoology_module, "download_google_file", _fake_download_google_file)
 
     report: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
-        report=report, google_token="tok123",
+        scraper=scraper, report=report, google_token="tok123",
     ))
 
     assert report["documents"] == 1
@@ -1104,14 +1090,10 @@ def test_sync_scraped_materials_google_link_without_token_is_flagged(fake_db, mo
                      kind="item", material_type="Link", folder_path="Unit 1"),
     ])
 
-    async def _fake_scraper_client(self, user_id):
-        return scraper
-
-    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
-
     report: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
     ))
 
     assert report["documents"] == 1
@@ -1129,14 +1111,10 @@ def test_sync_scraped_materials_rescan_only_adds_whats_new(fake_db, monkeypatch)
         MaterialLink(name="a", href="/materials/a", kind="item", material_type="File"),
     ])
 
-    async def _fake_scraper_client(self, user_id):
-        return scraper
-
-    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
-
     report1: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report1,
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report1,
     ))
     assert report1["documents"] == 1
 
@@ -1146,14 +1124,10 @@ def test_sync_scraped_materials_rescan_only_adds_whats_new(fake_db, monkeypatch)
         MaterialLink(name="b", href="/materials/b", kind="item", material_type="File"),
     ])
 
-    async def _fake_scraper_client_2(self, user_id):
-        return scraper2
-
-    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client_2)
-
     report2: dict[str, Any] = {"documents": 0, "errors": []}
     asyncio.run(provider._sync_scraped_materials(
-        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report2,
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper2, report=report2,
     ))
 
     assert scraper2.known_names_calls == [{"a"}]

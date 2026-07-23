@@ -928,6 +928,22 @@ class SchoologyProvider(IntegrationProvider):
         config = integration.get("config") or {}
         google_token = config.get("google_access_token")  # optional, for Drive downloads
         client = await self._client(integration)
+        # Materials still only ever come from the login-scraper session (see
+        # module docstring), but logged in *once* here and reused for every
+        # course below — logging in separately per course (the previous
+        # behavior) made a many-course account's sync time scale with course
+        # count just from repeated logins, which is what pushed some syncs
+        # past the platform's request timeout. A login failure here doesn't
+        # abort the sync: assignments/events (API-backed) still run per
+        # section, just without materials for this run.
+        scraper: SchoologyScraperClient | None = None
+        try:
+            scraper = await self._scraper_client(user_id)
+        except SchoologyScraperAuthError as e:
+            report["errors"].append(f"Schoology materials (scrape login): {e}")
+        except RuntimeError as e:
+            if "isn't connected yet" not in str(e):
+                report["errors"].append(f"Schoology materials (scrape login): {e}")
         try:
             uid = await client.current_user_id()
             sections = await client.get_sections(uid)
@@ -974,12 +990,14 @@ class SchoologyProvider(IntegrationProvider):
                 await self._sync_section(
                     client=client, user_id=user_id, course_id=course_id, section=section,
                     monday=monday, sunday=sunday, google_token=google_token,
-                    student_uid=uid, report=report,
+                    student_uid=uid, report=report, scraper=scraper,
                 )
 
             return report
         finally:
             await client.aclose()
+            if scraper is not None:
+                await scraper.aclose()
 
     async def _sync_materials_only(self, user_id: str, integration: dict[str, Any], report: dict[str, Any]) -> None:
         """No API key on file — refresh materials via the login-scraper
@@ -990,58 +1008,73 @@ class SchoologyProvider(IntegrationProvider):
         works without ever needing the API. For a parent account the walk
         also needs the student's user id (to reach the parent-view materials
         pages) — that's carried on each course's `metadata.schoology_student_uid`,
-        captured during discovery."""
+        captured during discovery. Logs in once for the whole run — that one
+        session is shared by discovery and every course's materials walk
+        below, rather than re-logging-in per course."""
         config = integration.get("config") or {}
         google_token = config.get("google_access_token")
-        # Discover from the login session every sync — it's the source of
-        # truth for section ids, names, and (for a parent account) the
-        # student uid, and it reconciles/links each course while backfilling
-        # metadata.schoology_student_uid. Running it unconditionally is what
-        # gives an already-linked parent course (linked before parent support
-        # existed, so with no student uid stored) its uid — without which the
-        # walk falls back to the empty plain /materials page.
         try:
-            linked = await self._discover_and_link_sections(user_id, report)
+            scraper = await self._scraper_client(user_id)
         except SchoologyScraperAuthError as e:
             report["errors"].append(f"Schoology materials (scrape login): {e}")
-            linked = []
+            return
         except RuntimeError as e:
             report["errors"].append(str(e))
-            linked = []
-
-        if not linked:
-            # Discovery found nothing (or the login failed) — fall back to
-            # whatever a prior sync already linked so those still refresh.
-            rows = await supabase.select(
-                "courses", columns="id,name,metadata", filters={"user_id": eq(user_id)},
-            ) or []
-            linked = [
-                (r["id"], r["name"], (r.get("metadata") or {}).get("schoology_section_id"),
-                 (r.get("metadata") or {}).get("schoology_student_uid"))
-                for r in rows
-            ]
-            linked = [(cid, name, sid, uid) for cid, name, sid, uid in linked if sid]
-        if not linked:
-            report["errors"].append(
-                "No Schoology courses found for this login. If this is a parent account, "
-                "its courses may live on app.schoology.com; otherwise confirm the account "
-                "is enrolled in courses."
-            )
             return
-        for course_id, name, section_id, student_uid in linked:
-            section = SchoologySection(
-                id=section_id, course_id=section_id, course_title=name, section_title="",
-                course_code="", section_code="", grading_periods=[], meeting_days=[],
-                start_time="", end_time="", location="", active=True,
-            )
-            await self._sync_scraped_materials(
-                user_id=user_id, course_id=course_id, section=section,
-                report=report, google_token=google_token, student_uid=student_uid,
-            )
-            report["courses"] += 1
+
+        try:
+            # Discover from the login session every sync — it's the source of
+            # truth for section ids, names, and (for a parent account) the
+            # student uid, and it reconciles/links each course while backfilling
+            # metadata.schoology_student_uid. Running it unconditionally is what
+            # gives an already-linked parent course (linked before parent support
+            # existed, so with no student uid stored) its uid — without which the
+            # walk falls back to the empty plain /materials page.
+            try:
+                linked = await self._discover_and_link_sections(user_id, report, scraper)
+            except SchoologyScraperAuthError as e:
+                report["errors"].append(f"Schoology materials (scrape login): {e}")
+                linked = []
+            except RuntimeError as e:
+                report["errors"].append(str(e))
+                linked = []
+
+            if not linked:
+                # Discovery found nothing — fall back to whatever a prior
+                # sync already linked so those still refresh.
+                rows = await supabase.select(
+                    "courses", columns="id,name,metadata", filters={"user_id": eq(user_id)},
+                ) or []
+                linked = [
+                    (r["id"], r["name"], (r.get("metadata") or {}).get("schoology_section_id"),
+                     (r.get("metadata") or {}).get("schoology_student_uid"))
+                    for r in rows
+                ]
+                linked = [(cid, name, sid, uid) for cid, name, sid, uid in linked if sid]
+            if not linked:
+                report["errors"].append(
+                    "No Schoology courses found for this login. If this is a parent account, "
+                    "its courses may live on app.schoology.com; otherwise confirm the account "
+                    "is enrolled in courses."
+                )
+                return
+            for course_id, name, section_id, student_uid in linked:
+                section = SchoologySection(
+                    id=section_id, course_id=section_id, course_title=name, section_title="",
+                    course_code="", section_code="", grading_periods=[], meeting_days=[],
+                    start_time="", end_time="", location="", active=True,
+                )
+                await self._sync_scraped_materials(
+                    user_id=user_id, course_id=course_id, section=section,
+                    report=report, scraper=scraper, google_token=google_token,
+                    student_uid=student_uid,
+                )
+                report["courses"] += 1
+        finally:
+            await scraper.aclose()
 
     async def _discover_and_link_sections(
-        self, user_id: str, report: dict[str, Any],
+        self, user_id: str, report: dict[str, Any], scraper: SchoologyScraperClient,
     ) -> list[tuple[str, str, str, str | None]]:
         """Discover enrolled courses from the login session (no API key) and
         reconcile each into an Atlas course row — reusing the same
@@ -1053,12 +1086,10 @@ class SchoologyProvider(IntegrationProvider):
         and returned so the materials walk can reach the parent-view pages.
         Returns `(course_id, name, section_id, student_uid)` for every
         academic course found; clubs go to their own table, excluded blocks
-        are skipped — matching `sync()`'s behavior."""
-        scraper = await self._scraper_client(user_id)
-        try:
-            discovered = await scraper.list_courses()
-        finally:
-            await scraper.aclose()
+        are skipped — matching `sync()`'s behavior. `scraper` is the caller's
+        already-logged-in session (shared with the materials walk that
+        follows) — this method does not close it."""
+        discovered = await scraper.list_courses()
 
         # Merge in the confirmed-real course links (course_mapping.
         # KNOWN_SECTIONS) so these courses get linked and synced every time,
@@ -1118,7 +1149,8 @@ class SchoologyProvider(IntegrationProvider):
     async def _sync_section(
         self, *, client: SchoologyClient, user_id: str, course_id: str,
         section: SchoologySection, monday: date, sunday: date,
-        google_token: str | None, student_uid: str | None = None, report: dict[str, Any],
+        google_token: str | None, scraper: SchoologyScraperClient | None,
+        student_uid: str | None = None, report: dict[str, Any],
     ) -> None:
         sid = section.id
 
@@ -1165,10 +1197,15 @@ class SchoologyProvider(IntegrationProvider):
         #    just a quiet empty list), and the login is unconditionally on
         #    file now (see SchoologyConnectRequest) — there's no case left
         #    where the API is the only way to reach materials.
-        await self._sync_scraped_materials(
-            user_id=user_id, course_id=course_id, section=section, report=report,
-            google_token=google_token, student_uid=student_uid,
-        )
+        #    `scraper` is None when the materials-login session couldn't be
+        #    established for this run (see `sync()`) — skip materials for
+        #    every section rather than trying (and failing) to log in again
+        #    per course.
+        if scraper is not None:
+            await self._sync_scraped_materials(
+                user_id=user_id, course_id=course_id, section=section, report=report,
+                scraper=scraper, google_token=google_token, student_uid=student_uid,
+            )
 
     async def _import_assignment(
         self, *, client: SchoologyClient, user_id: str, course_id: str,
@@ -1213,7 +1250,8 @@ class SchoologyProvider(IntegrationProvider):
     # ---- material ingestion: always via the login-scraper session ----
     async def _sync_scraped_materials(
         self, *, user_id: str, course_id: str, section: SchoologySection,
-        report: dict[str, Any], google_token: str | None = None, student_uid: str | None = None,
+        scraper: SchoologyScraperClient, report: dict[str, Any],
+        google_token: str | None = None, student_uid: str | None = None,
     ) -> None:
         """Materials via the login-scraper session (`schoology_scraper.py`) —
         the only materials path now (see the call site in `_sync_section`;
@@ -1234,15 +1272,11 @@ class SchoologyProvider(IntegrationProvider):
         (`course_mapping.KNOWN_SECTIONS`), walks that course's exact
         `materials_url` instead (`walk_known_url`) — no guessing across
         candidate URL shapes for a course whose real link is already on
-        file."""
-        try:
-            scraper = await self._scraper_client(user_id)
-        except RuntimeError as e:
-            if "isn't connected yet" in str(e):
-                return  # materials-scraper login not set up — nothing to fall back to
-            report["errors"].append(f"{section.display_name} materials (scrape login): {e}")
-            return
+        file.
 
+        `scraper` is the caller's already-logged-in session, shared across
+        every course in this sync run (see `sync()`/`_sync_materials_only()`)
+        — this method neither logs in nor closes it."""
         try:
             existing = await supabase.select(
                 "documents", columns="metadata",
@@ -1270,8 +1304,6 @@ class SchoologyProvider(IntegrationProvider):
             report["errors"].append(f"{section.display_name} materials (scrape login): {e}")
         except Exception as e:  # noqa: BLE001
             report["errors"].append(f"{section.display_name} materials (scrape): {e}")
-        finally:
-            await scraper.aclose()
 
     # Schoology's own accessibility-text type prefixes that mean "this
     # item's href is (probably) a direct file download" — see

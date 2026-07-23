@@ -102,6 +102,17 @@ _BOILERPLATE_LINK_TEXTS = frozenset({
     "External Tools",
     "Assessments",
     "Managed Assessments",
+    # Pagination controls on a folder page with more items than fit on one
+    # screen. Confirmed against a real folder page: "Next"'s href can be
+    # *identical* to the actual next real item's own permalink (Schoology
+    # points "Next" at the first item of the following page rather than a
+    # dedicated pager endpoint) — since links are deduped by href in the
+    # order they're seen, leaving "Next" unfiltered let it claim that href
+    # first and silently replace the real item's title with "Next" instead
+    # (the reported "it pulled the wrong name for one document").
+    "Prev",
+    "Next",
+    "Up",
 })
 
 # href *patterns* for chrome that isn't safe to blocklist by exact text
@@ -160,6 +171,7 @@ _FOLDER_HREF_PATTERNS = (
 _FILE_HREF_PATTERNS = (
     re.compile(r"/attachment/"),
     re.compile(r"/course/\d+/materials/document/\d+"),
+    re.compile(r"/course/\d+/materials/gp/\d+"),  # confirmed real: a folder item's detail/viewer page
     re.compile(r"/system/files/"),
     re.compile(r"/content/\d+/download"),
 )

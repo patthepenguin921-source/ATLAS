@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +11,20 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore"
     )
+
+    # A trailing newline pasted into an env var's value (a common accident in
+    # Vercel's/most platforms' env var UI) is invisible in the UI but breaks
+    # anything that puts it straight into a URL or header — confirmed in
+    # production: R2_ACCOUNT_ID had one, so it landed in the R2 upload host
+    # (`{account_id}.r2.cloudflarestorage.com`), and every single upload
+    # failed with httpx's "Invalid non-printable ASCII character in URL"
+    # rather than anything pointing at R2 or the account id. Stripping every
+    # string field here means a stray newline/space in *any* env var — not
+    # just this one — can't silently break whatever uses it the same way.
+    @field_validator("*", mode="before")
+    @classmethod
+    def _strip_whitespace(cls, v: object) -> object:
+        return v.strip() if isinstance(v, str) else v
 
     # ---- Supabase (Postgres + auth) ----
     supabase_url: str = ""

@@ -28,6 +28,7 @@ from datetime import date, datetime
 from typing import Any
 
 from app.core.crypto import decrypt_json, encrypt_json
+from app.core.r2_client import r2, safe_object_name
 from app.core.supabase_client import eq, supabase
 from app.integrations import course_mapping
 from app.integrations.base import IntegrationProvider
@@ -760,10 +761,21 @@ class SchoologyProvider(IntegrationProvider):
         extra_meta: dict[str, Any] | None = None,
     ) -> bool:
         """Store + text-extract + embed a binary file (pdf/pptx/doc/…). Returns
-        True if newly ingested, False if it already existed (idempotent)."""
+        True if newly ingested, False if it already existed (idempotent).
+
+        Uploads the original bytes to R2 the same way a direct upload does
+        (`routers/documents.py`'s `_store_and_ingest`) so the file has a
+        `storage_path` and is actually viewable/downloadable from the app,
+        not just searchable as extracted text — best-effort, same as there:
+        a storage failure still lets the document be recorded and indexed."""
         if await self._document_exists(user_id, external_id):
             return False
         doc_id = str(uuid.uuid4())
+        storage_path = f"{user_id}/{doc_id}/{safe_object_name(filename)}"
+        try:
+            await r2.upload(storage_path, content, content_type or "application/octet-stream")
+        except Exception:  # noqa: BLE001
+            storage_path = None
         text = ""
         try:
             text = ingestion.extract_text(content, content_type, filename)
@@ -773,6 +785,7 @@ class SchoologyProvider(IntegrationProvider):
             "id": doc_id, "user_id": user_id, "course_id": course_id,
             "title": title or filename or "Untitled", "doc_type": doc_type,
             "mime_type": content_type, "size_bytes": len(content),
+            "storage_path": storage_path,
             "external_id": external_id, "external_source": self.name,
             "metadata": extra_meta or {},
         })

@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, quote, urlsplit
 import httpx
 import pytest
 
+from app.core.r2_client import r2
 from app.core.supabase_client import supabase
 from app.integrations import course_mapping, google_files
 from app.integrations.schoology import (
@@ -211,6 +212,22 @@ class FakeSupabase:
         return removed
 
 
+class FakeR2:
+    """Minimal in-memory stand-in for the R2 object store."""
+
+    def __init__(self):
+        self.objects: dict[str, bytes] = {}
+
+    async def upload(self, key, content, content_type):
+        self.objects[key] = content
+
+    def signed_url(self, key, expires_in=3600):
+        return f"https://fake-r2/{key}"
+
+    async def remove(self, key):
+        self.objects.pop(key, None)
+
+
 @pytest.fixture
 def fake_db(monkeypatch):
     fake = FakeSupabase()
@@ -223,6 +240,11 @@ def fake_db(monkeypatch):
         return {"chunks": 1}
 
     monkeypatch.setattr(ingestion, "ingest_document", _noop_ingest)
+
+    fake_storage = FakeR2()
+    for name in ("upload", "signed_url", "remove"):
+        monkeypatch.setattr(r2, name, getattr(fake_storage, name))
+    fake.r2 = fake_storage
     return fake
 
 
@@ -965,6 +987,11 @@ def test_sync_scraped_materials_downloads_real_files(fake_db, monkeypatch):
     assert doc["mime_type"] == "application/pdf"
     assert doc["size_bytes"] == len(b"%PDF-1.4 fake pdf bytes")
     assert doc["metadata"]["material_name"] == "Syllabus.pdf"
+    # The downloaded PDF must actually land in object storage (not just have
+    # its text extracted/embedded) — that's what makes it viewable/
+    # downloadable from the app afterward, via storage_path -> signed_url.
+    assert doc["storage_path"]
+    assert fake_db.r2.objects[doc["storage_path"]] == b"%PDF-1.4 fake pdf bytes"
 
 
 def test_sync_scraped_materials_downloads_google_links_with_token(fake_db, monkeypatch):

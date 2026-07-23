@@ -5,11 +5,11 @@ import math
 import httpx
 from starlette.testclient import TestClient
 
+from app.core.r2_client import safe_object_name
 from app.core.supabase_client import SupabaseClient, _strip_null_bytes
 from app.embeddings.embedder import DIM, embed_text
 from app.llm.claude import _extract_json
 from app.main import app
-from app.routers.documents import _safe_storage_name
 from app.services.ingestion import _sanitize_text, chunk_text
 from app.services.knowledge_model import _retention
 
@@ -104,10 +104,10 @@ def test_insert_upsert_sends_on_conflict(monkeypatch):
     assert "resolution=merge-duplicates" in captured["prefer"]
 
 
-def test_safe_storage_name_strips_unsupported_unicode():
-    # Supabase Storage keys only accept an S3-safe, mostly-ASCII charset —
-    # em dashes, curly quotes, etc. used to make the upload silently fail.
-    assert _safe_storage_name("Overview – Vercel.pdf") == "Overview _ Vercel.pdf"
-    assert _safe_storage_name("SE States (6).pdf") == "SE States (6).pdf"
-    assert _safe_storage_name("a/b.pdf") == "a_b.pdf"
-    assert _safe_storage_name("") == "document"
+def test_safe_object_name_strips_unsupported_unicode():
+    # R2/S3 storage keys only accept an S3-safe, mostly-ASCII charset — em
+    # dashes, curly quotes, etc. used to make the upload silently fail.
+    assert safe_object_name("Overview – Vercel.pdf") == "Overview _ Vercel.pdf"
+    assert safe_object_name("SE States (6).pdf") == "SE States (6).pdf"
+    assert safe_object_name("a/b.pdf") == "a_b.pdf"
+    assert safe_object_name("") == "document"

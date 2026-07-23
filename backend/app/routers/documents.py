@@ -1,7 +1,6 @@
 """Documents — upload, ingest (chunk+embed), enrich, and manage files."""
 from __future__ import annotations
 
-import re
 import uuid
 
 import httpx
@@ -9,26 +8,13 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.agents.archivist import Archivist
 from app.config import settings
-from app.core.r2_client import r2
+from app.core.r2_client import r2, safe_object_name
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.schemas import DocumentPatchRequest, DriveImportRequest, IngestTextRequest
 from app.services import ingestion
 
 router = APIRouter(prefix="/documents", tags=["documents"])
-
-# Supabase Storage only accepts a restricted, mostly-ASCII charset in object
-# keys (word chars, and !-.*'()  &$@=;:+,?). Filenames with em/en dashes,
-# curly quotes, accented letters, emoji, etc. make the upload 400 — which
-# we treat as best-effort and swallow — silently losing the original file.
-# Replace anything outside that charset instead of dropping the file.
-_UNSAFE_STORAGE_CHARS = re.compile(r"[^\w!\-.*'() &$@=;:+,?]")
-
-
-def _safe_storage_name(filename: str) -> str:
-    name = (filename or "document").replace("/", "_")
-    return _UNSAFE_STORAGE_CHARS.sub("_", name) or "document"
-
 
 # Below this, a course auto-detection guess is flagged for the student to
 # double-check rather than trusted outright.
@@ -65,7 +51,7 @@ async def _store_and_ingest(
             raise HTTPException(422, f"Could not convert image to PDF: {e}")
 
     doc_id = str(uuid.uuid4())
-    safe_name = _safe_storage_name(filename)
+    safe_name = safe_object_name(filename)
     storage_path = f"{user_id}/{doc_id}/{safe_name}"
 
     # 1) store the original file (best-effort; text ingest still works without it)

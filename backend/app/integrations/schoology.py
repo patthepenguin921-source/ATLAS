@@ -27,6 +27,8 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
+from app.agents.archivist import Archivist
+from app.config import settings
 from app.core.crypto import decrypt_json, encrypt_json
 from app.core.r2_client import r2, safe_object_name
 from app.core.supabase_client import eq, supabase
@@ -796,6 +798,15 @@ class SchoologyProvider(IntegrationProvider):
                 "documents", {"ingested": False, "ingest_error": str(e)[:400]},
                 filters={"id": eq(doc_id)},
             )
+        # Same enrichment (summary/keywords/doc_type + concept links) a direct
+        # upload gets via `_store_and_ingest` — best-effort, and never renames
+        # the title: Schoology's own material name is already the right title,
+        # unlike a direct upload's filename-derived placeholder.
+        if settings.has_llm and text.strip():
+            try:
+                await Archivist().enrich(user_id, doc_id, text)
+            except Exception:  # noqa: BLE001
+                pass
         return True
 
     async def _ingest_text(

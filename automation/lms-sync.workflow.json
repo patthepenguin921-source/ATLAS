@@ -5,12 +5,12 @@
       "parameters": {
         "rule": {
           "interval": [
-            { "field": "cronExpression", "expression": "0 7,16 * * *" }
+            { "field": "cronExpression", "expression": "0 6,16 * * *" }
           ]
         }
       },
       "id": "trigger",
-      "name": "7am & 4pm (NY)",
+      "name": "6am & 4pm (NY)",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [260, 300]
@@ -32,7 +32,7 @@
     }
   ],
   "connections": {
-    "7am & 4pm (NY)": { "main": [[{ "node": "Sync Schoology", "type": "main", "index": 0 }]] }
+    "6am & 4pm (NY)": { "main": [[{ "node": "Sync Schoology", "type": "main", "index": 0 }]] }
   },
   "settings": { "timezone": "America/New_York" },
   "active": true

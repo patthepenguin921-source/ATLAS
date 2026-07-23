@@ -114,6 +114,33 @@ def extract_text(content: bytes, mime_type: str, filename: str = "") -> str:
 
 
 def _extract_pdf(content: bytes) -> str:
+    """Text of every page, in real reading order.
+
+    pypdf's `extract_text()` walks the PDF content stream in the order its
+    drawing operators appear, which is often *not* visual order — a common
+    real-world layout (two columns, a sidebar, a table) whose operators are
+    interleaved row-by-row across columns comes out with lines from each
+    column alternating, silently changing what the text says (confirmed: a
+    row-interleaved two-column PDF extracts as "Left Column Header / Right
+    Column Header / <left line 1> / <right line 1> / …" instead of each
+    column's lines staying together). PyMuPDF's layout reconstruction (via
+    `pymupdf4llm`, built for exactly this — feeding PDFs to an LLM) groups
+    text by its actual visual block/column instead, and also linearizes
+    tables reasonably rather than shredding them cell-by-cell. Falls back to
+    the plain pypdf walk if that fails for any reason (e.g. a malformed PDF
+    only one of the two libraries tolerates) rather than losing the file."""
+    try:
+        import fitz
+        import pymupdf4llm
+
+        doc = fitz.open(stream=content, filetype="pdf")
+        try:
+            return pymupdf4llm.to_markdown(doc, write_images=False, show_progress=False)
+        finally:
+            doc.close()
+    except Exception:
+        pass
+
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(content))

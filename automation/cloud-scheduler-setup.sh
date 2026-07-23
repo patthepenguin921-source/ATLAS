@@ -22,7 +22,7 @@ LOCATION="${LOCATION:-us-east1}"
 gcloud scheduler jobs create http atlas-schoology-sync-morning \
   --project="$PROJECT_ID" \
   --location="$LOCATION" \
-  --schedule="0 7 * * *" \
+  --schedule="0 6 * * *" \
   --time-zone="America/New_York" \
   --uri="${CLOUD_RUN_URL}/api/v1/integrations/cron/schoology/sync" \
   --http-method=GET \

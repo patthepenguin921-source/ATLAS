@@ -26,6 +26,7 @@ import asyncio
 import re
 import uuid
 from datetime import date, datetime
+from urllib.parse import urlsplit
 from typing import Any
 
 from app.agents.archivist import Archivist
@@ -81,6 +82,15 @@ async def _gather_bounded(coros: list[Any], limit: int) -> None:
             await coro
 
     await asyncio.gather(*(_run(c) for c in coros))
+
+
+def _is_schoology_url(href: str) -> bool:
+    """True for a link that stays on schoology.com itself — a folder, page,
+    discussion, or other internal placeholder with nothing real behind it
+    for Atlas to store, as opposed to a link that actually goes somewhere
+    (an external site, or Google Drive, handled separately)."""
+    host = (urlsplit(href).netloc or "").lower()
+    return host == "schoology.com" or host.endswith(".schoology.com")
 
 
 def encrypt_api_key(consumer_key: str, consumer_secret: str) -> str:
@@ -1361,24 +1371,37 @@ class SchoologyProvider(IntegrationProvider):
         item: MaterialLink, scraper: SchoologyScraperClient,
         google_token: str | None, report: dict[str, Any],
     ) -> None:
-        """Download and record one new scraped item as real, searchable
-        content — not just a link reference:
+        """Download and record one new scraped item — but only when there's
+        something real behind it. Reported failure modes this guards
+        against: an empty folder whose link didn't match the structural
+        folder-detection fallback got filed as a content-less "document";
+        a "File."-labeled item whose download failed got filed as a bare
+        text stub standing in for a PDF that was never actually saved. Both
+        looked like real content in the app with nothing behind them.
           - A Google Drive/Docs/Slides/Sheets link is downloaded through the
             existing Google Drive path (same as the API path's
             `_ingest_link`) when a Google token is available; without one
-            it's recorded as a reference and flagged for auth, same
-            fallback.
+            it's recorded as a reference and flagged for auth — it's still
+            a real Google Drive link even though nothing's downloaded yet.
           - Anything Schoology itself labeled a "File"/"Document" (see
             `MaterialLink.material_type`) is fetched through the
             authenticated scraper session and ingested like any other
-            document. If that GET actually returns an HTML page instead of
-            a real file — the href led to an intermediate detail page, not
-            a direct download — it falls back to a reference rather than
-            ingesting the raw HTML or silently dropping the item.
-          - Everything else (a Schoology page/discussion, a plain external
-            link) is recorded as a searchable reference.
-        `material_name` is always set in metadata, whichever branch is
-        taken — `_sync_scraped_materials` reads it back to build the
+            document, original bytes included. If that GET doesn't actually
+            return a real file — the href led to an intermediate detail
+            page instead of a direct download, or the fetch failed — the
+            item is skipped entirely rather than filed as a placeholder
+            with no real content; it'll be retried on the next sync since
+            skipping it (unlike ingesting a stub) never adds its name to
+            the known-items set.
+          - Everything else is recorded as a reference only if the link
+            actually goes somewhere off schoology.com — a genuine external
+            link is worth keeping even without downloading it. A link that
+            stays on schoology.com (a folder, page, discussion, or other
+            internal placeholder — including a folder that slipped past
+            `_classify_link`'s folder detection) has nothing real behind it
+            and is skipped instead of being filed as an empty document.
+        `material_name` is always set in metadata for anything actually
+        ingested — `_sync_scraped_materials` reads it back to build the
         already-known set for the next scan's dedupe."""
         title = f"{item.folder_path + ' · ' if item.folder_path else ''}{item.name}"
         external_id = f"scrape:{section.id}:{_normalize_name(item.name)}"
@@ -1429,9 +1452,15 @@ class SchoologyProvider(IntegrationProvider):
                 ):
                     report["documents"] += 1
                 return
-            # Not actually a direct file (or the download failed) — fall
-            # through to a plain reference below instead of dropping it.
+            # Not actually a direct file (or the download failed) — skip
+            # rather than filing a stub with no original to open. Not added
+            # to the known-names set, so the next sync tries it again.
+            return
 
+        # Not a Google link, not a downloadable file — only worth a
+        # reference if it actually leads somewhere off schoology.com.
+        if _is_schoology_url(item.href):
+            return
         if await self._ingest_text(
             user_id=user_id, course_id=course_id, external_id=external_id,
             title=title, text=f"{title}\n{item.href}", doc_type="other", extra_meta=base_meta,

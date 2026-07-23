@@ -117,7 +117,7 @@ class SchoologyConnectRequest(BaseModel):
     ``schoology_scraper.py``). The REST host is always api.schoology.com/v1;
     ``api_base`` only overrides it if ever needed."""
 
-    domain: str                             # e.g. https://lexington1.schoology.com
+    domain: str                             # e.g. https://yourdistrict.schoology.com
     username: str
     password: str
     consumer_key: Optional[str] = None

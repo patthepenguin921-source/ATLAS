@@ -408,11 +408,12 @@ class PowerSchoolClient:
                 continue
 
             # Where the course name lives varies by district. Grids with
-            # attendance columns (e.g. Lexington's, which has a full
-            # Last-Week/This-Week block before the course) mark the course
-            # cell as left-aligned while every other cell is centered — so
-            # prefer that cell, and only fall back to the second column for
-            # the simpler layouts (and the test fixtures) that lack it.
+            # attendance columns (a full Last-Week/This-Week block before
+            # the course, confirmed against a real district's portal) mark
+            # the course cell as left-aligned while every other cell is
+            # centered — so prefer that cell, and only fall back to the
+            # second column for the simpler layouts (and the test fixtures)
+            # that lack it.
             name_cell = next((c for c in cells if c.get("align") == "left"), None)
             if name_cell is not None:
                 name = next(

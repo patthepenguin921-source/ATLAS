@@ -309,6 +309,36 @@ def test_login_with_no_recognizable_form_raises():
     asyncio.run(run())
 
 
+def test_login_with_no_recognizable_form_includes_diagnostic_details():
+    """The "no login form" error must include what was actually seen (HTTP
+    status, final URL, page title) — not just the generic "may enforce SSO"
+    guess. A plain guess turned out to be a dead end in practice: the same
+    URL fetched with no session at all can come back with a perfectly
+    normal login form, so the real cause of a specific failure has to come
+    from what that specific request actually got back, not an assumption."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return httpx.Response(
+                503, text="<html><head><title>Access Denied</title></head><body>blocked</body></html>",
+            )
+        return httpx.Response(404)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            with pytest.raises(SchoologyScraperAuthError) as exc_info:
+                await client.login()
+            message = str(exc_info.value)
+            assert "503" in message
+            assert "Access Denied" in message
+            assert BASE_URL in message
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_debug_materials_page_without_student_uid_only_tries_district_domain():
     async def run():
         transport = httpx.MockTransport(_handler_factory(valid_password=VALID_PASS))

@@ -855,7 +855,7 @@ export default function IntegrationsPage() {
             <input
               className="input"
               required
-              placeholder="https://lexington1.schoology.com"
+              placeholder="https://yourdistrict.schoology.com"
               value={schoologyForm.domain}
               onChange={(e) => setSchoologyForm({ ...schoologyForm, domain: e.target.value })}
             />

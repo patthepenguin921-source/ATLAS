@@ -22,6 +22,7 @@ manual) course so the two systems share one course row instead of duplicating.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from datetime import date, datetime
@@ -780,7 +781,14 @@ class SchoologyProvider(IntegrationProvider):
             storage_path = None
         text = ""
         try:
-            text = ingestion.extract_text(content, content_type, filename)
+            # extract_text is a synchronous, CPU-bound call (PyMuPDF layout
+            # reconstruction for PDFs can take real wall-clock time on a big
+            # or complex file) — run it off the event loop thread so it can't
+            # block other awaits, including the asyncio.wait_for() timeout
+            # that wraps the whole sync() call in app.integrations.run_sync:
+            # a blocking call has no await point for that timeout to cancel
+            # at, so it would otherwise defeat the timeout entirely.
+            text = await asyncio.to_thread(ingestion.extract_text, content, content_type, filename)
         except Exception:  # noqa: BLE001
             text = ""
         await supabase.insert("documents", {

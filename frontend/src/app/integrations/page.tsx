@@ -133,6 +133,7 @@ export default function IntegrationsPage() {
   const [connectOpen, setConnectOpen] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [syncingProvider, setSyncingProvider] = useState<string | null>(null);
+  const [cancelingProvider, setCancelingProvider] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<SyncResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"password" | "cookie">("password");
@@ -318,6 +319,25 @@ export default function IntegrationsPage() {
     }
   }
 
+  // Clears a sync stuck on "running" (e.g. one that outlived the backend's
+  // own timeout) so the account isn't blocked waiting for the next scheduled
+  // sweep. This can't reach into an in-flight request on the server and stop
+  // it — there's no such handle — it only clears the status; if that request
+  // is in fact still running, it'll just overwrite this again once it
+  // finishes on its own.
+  async function cancelSync(provider: string) {
+    setCancelingProvider(provider);
+    setError(null);
+    try {
+      await apiPost(`/integrations/${provider}/cancel`);
+      await load();
+    } catch (err: any) {
+      setError(err.message ?? "Could not cancel the sync.");
+    } finally {
+      setCancelingProvider(null);
+    }
+  }
+
   async function debugScrape() {
     setDebugging(true);
     setDebugError(null);
@@ -406,6 +426,15 @@ export default function IntegrationsPage() {
                     >
                       {syncingProvider === "powerschool" ? "Syncing…" : "Sync now"}
                     </button>
+                    {powerschool.status === "running" && (
+                      <button
+                        className="btn-ghost"
+                        disabled={cancelingProvider === "powerschool"}
+                        onClick={() => cancelSync("powerschool")}
+                      >
+                        {cancelingProvider === "powerschool" ? "Canceling…" : "Cancel"}
+                      </button>
+                    )}
                     <button className="btn-ghost" disabled={debugging} onClick={debugScrape}>
                       {debugging ? "Fetching…" : "Debug scrape"}
                     </button>
@@ -511,6 +540,15 @@ export default function IntegrationsPage() {
                     >
                       {syncingProvider === "schoology" ? "Syncing…" : "Sync now"}
                     </button>
+                    {schoology.status === "running" && (
+                      <button
+                        className="btn-ghost"
+                        disabled={cancelingProvider === "schoology"}
+                        onClick={() => cancelSync("schoology")}
+                      >
+                        {cancelingProvider === "schoology" ? "Canceling…" : "Cancel"}
+                      </button>
+                    )}
                     <input
                       className="input w-32 text-xs"
                       placeholder="AP Physics…"

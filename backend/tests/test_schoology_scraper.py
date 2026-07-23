@@ -634,6 +634,49 @@ def test_walk_known_url_survives_app_domain_login_failure():
     asyncio.run(run())
 
 
+def test_login_app_domain_failure_is_cached_not_retried():
+    """A real Schoology login failure (rate-limited, challenge-gated, …)
+    must only be attempted once per client lifetime, not retried on every
+    course a debug/sync run probes — a single run walking several known
+    courses (each calling walk_known_url, each calling _login_app_domain)
+    used to re-POST the login for every single one of them, compounding the
+    very repeated-automated-login pattern that trips a site's own bot
+    detection in the first place."""
+    async def run():
+        app_login_post_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal app_login_post_count
+            if request.url.host == "app.schoology.com":
+                if request.url.path == "/login" and request.method == "GET":
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)
+                if request.url.path == "/login" and request.method == "POST":
+                    app_login_post_count += 1
+                    return httpx.Response(200, text=APP_LOGIN_PAGE)  # always "fails"
+                return httpx.Response(404)
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            # Three "courses" in one client lifetime, same as one debug/sync
+            # run walking three known courses in a row.
+            for _ in range(3):
+                items = await client.walk_known_url(
+                    "https://app.schoology.com/course/8435659601/preview/23381548/parent",
+                )
+                assert items == []
+            assert app_login_post_count == 1
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_walk_materials_with_student_uid_survives_app_domain_login_failure():
     """The district-subdomain results must still stand even if the
     app-domain login fails for some reason (e.g. the account only exists on

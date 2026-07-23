@@ -260,6 +260,7 @@ class SchoologyScraperClient:
         )
         self._logged_in = False
         self._app_logged_in = False
+        self._app_login_error: SchoologyScraperAuthError | None = None
         self._school_nid: str | None = None
 
     async def aclose(self) -> None:
@@ -340,14 +341,30 @@ class SchoologyScraperClient:
         at the district subdomain and then requesting an app.schoology.com
         URL just bounced back to a login page there, `?destination=` and
         all). Its login form is the same shape but district-agnostic, so it
-        needs `school_nid` supplied explicitly instead of pre-filled."""
+        needs `school_nid` supplied explicitly instead of pre-filled.
+
+        A failure is cached on this client instance instead of retried on
+        every call: every one of a debug/sync run's several courses calls
+        this (via `walk_known_url`/`walk_materials`), and without caching, a
+        single real problem (e.g. Schoology temporarily rate-limiting or
+        challenge-gating this login) got retried once per course — up to 9
+        more failed login POSTs in one debug click alone, compounding
+        exactly the kind of repeated-automated-login pattern that trips a
+        site's bot detection in the first place. One real attempt per
+        client lifetime is enough to know the answer."""
         if not self._logged_in:
             await self.login()
         if self._app_logged_in:
             return
+        if self._app_login_error is not None:
+            raise self._app_login_error
         login_url = f"{_APP_DOMAIN}{_LOGIN_PATH}"
-        result_soup = await self._submit_login(login_url, login_url, school_nid=self._school_nid)
-        self._raise_if_login_failed(result_soup)
+        try:
+            result_soup = await self._submit_login(login_url, login_url, school_nid=self._school_nid)
+            self._raise_if_login_failed(result_soup)
+        except SchoologyScraperAuthError as e:
+            self._app_login_error = e
+            raise
         self._app_logged_in = True
 
     async def list_courses(self) -> list[dict[str, str | None]]:

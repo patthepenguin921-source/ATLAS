@@ -75,6 +75,7 @@ interface SchoologyWalkStep {
   folders?: string[];
   items?: string[];
   sample_links?: { text?: string; href?: string }[];
+  error?: string;
 }
 
 interface SchoologyProbedSection {
@@ -96,6 +97,10 @@ interface SchoologyDebugResult {
 // bounced to a login page", "the page loaded but had nothing on it", and "the
 // page couldn't be reached" is invisible from an empty list alone.
 function diagnoseWalk(trace: SchoologyWalkStep[]): string {
+  const errorStep = trace.find((s) => s.error);
+  if (errorStep) {
+    return `Couldn't log in to load this page: ${errorStep.error}`;
+  }
   if (trace.some((s) => s.looks_like_login)) {
     return "The Schoology session was bounced to a login page while loading this course — the login may not have full access to it (e.g. a parent account whose materials live elsewhere), or the session expired.";
   }
@@ -605,10 +610,14 @@ export default function IntegrationsPage() {
                                   <div>
                                     [{step.status_code ?? "?"}]
                                     {step.looks_like_login ? " ⚠ login-wall" : ""}
-                                    {step.likely_js_shell ? " ⚠ js-shell" : ""}{" "}
+                                    {step.likely_js_shell ? " ⚠ js-shell" : ""}
+                                    {step.error ? " ⚠ login failed" : ""}{" "}
                                     {step.parsed_count ?? 0} of {step.raw_link_count ?? 0} links ·{" "}
                                     {step.final_url ?? step.requested_url}
                                   </div>
+                                  {step.error && (
+                                    <div className="text-atlas-bad">{step.error}</div>
+                                  )}
                                   {step.sample_links && step.sample_links.length > 0 && (
                                     <ul className="mt-0.5 ml-3 space-y-0.5 opacity-80">
                                       {step.sample_links.map((l, j) => (

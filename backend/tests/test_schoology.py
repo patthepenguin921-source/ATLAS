@@ -20,6 +20,8 @@ from urllib.parse import parse_qsl, quote, urlsplit
 import httpx
 import pytest
 
+from app.agents.archivist import Archivist
+from app.config import settings
 from app.core.r2_client import r2
 from app.core.supabase_client import supabase
 from app.integrations import course_mapping, google_files
@@ -992,6 +994,71 @@ def test_sync_scraped_materials_downloads_real_files(fake_db, monkeypatch):
     # downloadable from the app afterward, via storage_path -> signed_url.
     assert doc["storage_path"]
     assert fake_db.r2.objects[doc["storage_path"]] == b"%PDF-1.4 fake pdf bytes"
+
+
+def test_sync_scraped_materials_enriches_downloaded_files_with_llm(fake_db, monkeypatch):
+    """A downloaded file gets the same summary/keywords/concept enrichment a
+    direct upload gets (`routers/documents.py`'s `_store_and_ingest`) — this
+    was missing entirely for Schoology materials, which only got their text
+    embedded, never summarized."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                       kind="item", material_type="File", folder_path="Unit 1")],
+        files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    calls = []
+
+    async def fake_enrich(self, user_id, document_id, text, **kwargs):
+        calls.append((user_id, document_id, text))
+        return {"summary": "s", "keywords": ["k"]}
+
+    monkeypatch.setattr(Archivist, "enrich", fake_enrich)
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+    ))
+
+    doc = fake_db.tables["documents"][0]
+    assert calls == [(USER_ID, doc["id"], "extracted text")]
+
+
+def test_sync_scraped_materials_skips_enrichment_without_llm(fake_db, monkeypatch):
+    """No LLM configured (no groq/anthropic key) — the document is still
+    downloaded and stored, just without the AI enrichment step."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                       kind="item", material_type="File", folder_path="Unit 1")],
+        files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+    monkeypatch.setattr(settings, "groq_api_key", "")  # settings.has_llm -> False
+
+    async def _unexpected_enrich(self, *a, **kw):
+        raise AssertionError("enrich() should not be called without an LLM configured")
+
+    monkeypatch.setattr(Archivist, "enrich", _unexpected_enrich)
+
+    report: dict[str, Any] = {"documents": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION, report=report,
+    ))
+
+    assert report["documents"] == 1
+    assert report["errors"] == []
 
 
 def test_sync_scraped_materials_downloads_google_links_with_token(fake_db, monkeypatch):

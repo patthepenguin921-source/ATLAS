@@ -14,10 +14,15 @@ no separate service to run:
 2. Set the **same** value as `ATLAS_CRON_SECRET` on the backend service's
    environment variables. The endpoint is disabled until this is set.
 3. Deploy. `vercel.json`'s `crons` entries hit
-   `GET /api/backend/api/v1/integrations/cron/schoology/sync` at 07:00 and
-   16:00 UTC (≈ 7am/4pm US Eastern; shifts an hour across the DST boundary —
-   still the same twice-daily cadence) and sync **every** user who has
-   Schoology connected and enabled, not just one student.
+   `GET /api/backend/api/v1/integrations/cron/schoology/sync` at 10:00 and
+   20:00 UTC — 6am/4pm US Eastern while daylight time is in effect (roughly
+   mid-March to early November). Vercel Cron schedules are UTC-only (no IANA
+   timezone support), so across the DST boundary this drifts to 5am/3pm
+   Eastern until the entries are next adjusted by an hour — still the same
+   twice-daily cadence, just shifted. Syncs **every** user who has Schoology
+   connected and enabled, not just one student. If exact Eastern-time firing
+   across DST matters, use the Cloud Run + Cloud Scheduler path below
+   instead — Cloud Scheduler supports real `America/New_York` scheduling.
 4. Check `GET /api/v1/integrations` (or the Integrations page) for
    `last_synced_at` / `last_error` to confirm it's running.
 
@@ -77,7 +82,7 @@ setups not deployed on Vercel).
 | `daily-plan.workflow.json` | every day 06:00 | `POST /api/v1/agents/planner/daily-plan` → generates the day's plan |
 | `weekly-review.workflow.json` | Sundays 18:00 | `POST /api/v1/agents/coach/weekly-review` → weekend review |
 | `refresh-retention.workflow.json` | every day 03:00 | `POST /api/v1/knowledge/refresh-retention` → decays retention estimates |
-| `lms-sync.workflow.json` | 07:00 & 16:00 (America/New_York) | `POST /api/v1/integrations/schoology/sync` → morning & afternoon Schoology pull |
+| `lms-sync.workflow.json` | 06:00 & 16:00 (America/New_York) | `POST /api/v1/integrations/schoology/sync` → morning & afternoon Schoology pull |
 
 Each is a minimal Schedule Trigger → HTTP Request. Extend them to fan out over
 multiple students, post results to Slack/email, or chain steps (e.g. sync →

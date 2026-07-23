@@ -65,7 +65,17 @@ export function Sidebar({
               </span>
               Atlas
             </div>
-            <div className="text-[11px] text-atlas-muted mt-1 pl-9">Academic OS</div>
+            <div className="text-[11px] text-atlas-muted mt-1 pl-9">
+              Academic OS
+              {(process.env.NEXT_PUBLIC_PR_NUMBER || process.env.NEXT_PUBLIC_COMMIT_SHA) && (
+                <span className="text-atlas-muted/70">
+                  {" · "}
+                  {process.env.NEXT_PUBLIC_PR_NUMBER
+                    ? `PR #${process.env.NEXT_PUBLIC_PR_NUMBER}`
+                    : process.env.NEXT_PUBLIC_COMMIT_SHA}
+                </span>
+              )}
+            </div>
           </div>
           <button
             onClick={onClose}
@@ -109,13 +119,6 @@ export function Sidebar({
           <button onClick={signOut} className="btn-ghost w-full text-xs py-1.5">
             Sign out
           </button>
-          {(process.env.NEXT_PUBLIC_PR_NUMBER || process.env.NEXT_PUBLIC_COMMIT_SHA) && (
-            <div className="text-[10px] text-atlas-muted/60 text-center mt-2">
-              {process.env.NEXT_PUBLIC_PR_NUMBER
-                ? `PR #${process.env.NEXT_PUBLIC_PR_NUMBER}`
-                : process.env.NEXT_PUBLIC_COMMIT_SHA}
-            </div>
-          )}
         </div>
       </aside>
     </>

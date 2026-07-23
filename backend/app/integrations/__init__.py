@@ -90,8 +90,34 @@ async def run_sync_for_all(provider: str) -> dict[str, Any]:
 
 
 async def run_sync(provider: str, user_id: str) -> dict[str, Any]:
+    """Sync `provider` for `user_id`. Manual ("Sync now") and scheduled
+    (cron) triggers both come through here — including a manual retry
+    clicked while a previous sync is still genuinely in flight. Two
+    overlapping syncs racing the same authenticated Schoology session
+    concurrently is exactly the kind of concurrency that turned out to be
+    unreliable in production (see _SECTION_SYNC_CONCURRENCY's history), so
+    the "running" transition is claimed with an atomic
+    `UPDATE ... WHERE status != 'running'`: only one sync can be in flight
+    per user+provider at a time, and a second attempt is rejected
+    immediately with a clear message instead of silently interfering with
+    the first."""
     impl = PROVIDERS[provider]
-    await _set_status(user_id, provider, "running")
+    claimed = await supabase.update(
+        "integrations", {"status": "running"},
+        filters={"user_id": eq(user_id), "provider": eq(provider), "status": "neq.running"},
+    )
+    if not claimed:
+        existing = await supabase.select(
+            "integrations", columns="status",
+            filters={"user_id": eq(user_id), "provider": eq(provider)}, limit=1,
+        )
+        if existing:
+            msg = "A sync is already running for this account — wait for it to finish, or use Cancel to clear it."
+            return {"provider": provider, "status": "error", "detail": msg}
+        # No integration row exists yet to claim (shouldn't normally happen —
+        # every caller creates the row before syncing) — fall through so the
+        # usual _set_status still records a status once one exists.
+        await _set_status(user_id, provider, "running")
     try:
         result = await asyncio.wait_for(impl.sync(user_id), timeout=SYNC_TIMEOUT_SECONDS)
         if result.get("skipped"):

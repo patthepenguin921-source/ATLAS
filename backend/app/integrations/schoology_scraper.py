@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -795,6 +795,24 @@ class SchoologyScraperClient:
             resolved = urljoin(page_url, raw)
             if resolved != page_url and resolved not in candidates:
                 candidates.append(resolved)
+
+        # A PDF.js-style embedded viewer (confirmed against a real account:
+        # a folder item's detail page — /materials/gp/{id} — is exactly
+        # this, a toolbar with page controls and a Download button) carries
+        # the *actual* file's URL as a `file`/`src`/`url` query parameter on
+        # the iframe hosting the viewer, not as a plain visible link
+        # anywhere in the static HTML — the viewer fetches it via JS to
+        # render the PDF canvas, so there's nothing else on the page to
+        # find. Checked first since it's the most specific signal when
+        # present; `parse_qs` already URL-decodes the value.
+        for tag in soup.find_all(["iframe", "embed", "object"]):
+            src = tag.get("src") or tag.get("data")
+            if not src:
+                continue
+            query = parse_qs(urlsplit(urljoin(page_url, src)).query)
+            for key in ("file", "src", "url"):
+                for value in query.get(key, []):
+                    _add(value)
 
         # Explicit "download" affordances.
         for a in soup.find_all("a", href=True):

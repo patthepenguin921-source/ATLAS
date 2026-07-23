@@ -505,6 +505,33 @@ class SchoologyProvider(IntegrationProvider):
                     # per-course sync loop already has.
                     items = []
                     error = str(e)
+                item_dicts = []
+                for i in items:
+                    item_dict: dict[str, Any] = {
+                        "name": i.name, "type": i.material_type or None,
+                        "folder": i.folder_path or None, "href": i.href,
+                    }
+                    # Actually attempt the download for anything the real
+                    # sync would (see _ingest_scraped_material's
+                    # _SCRAPED_FILE_TYPES gate) — using the exact same
+                    # scraper.download_file call the real sync uses, so the
+                    # debug screen gives a definitive yes/no on whether a
+                    # document was really downloaded instead of just
+                    # listing the item and leaving that as a guess.
+                    if (i.material_type or "").lower() in self._SCRAPED_FILE_TYPES:
+                        try:
+                            downloaded = await scraper.download_file(i.href)
+                        except Exception as e:  # noqa: BLE001
+                            downloaded = None
+                            item_dict["download_error"] = str(e)
+                        if downloaded:
+                            content, content_type = downloaded
+                            item_dict["downloaded"] = True
+                            item_dict["download_content_type"] = content_type
+                            item_dict["download_size_bytes"] = len(content)
+                        else:
+                            item_dict["downloaded"] = False
+                    item_dicts.append(item_dict)
                 probed.append({
                     "section": {"id": s["id"], "name": s["name"]},
                     # The exact URL walked, when it's a confirmed course
@@ -512,11 +539,7 @@ class SchoologyProvider(IntegrationProvider):
                     # screen that this is really hitting the given link,
                     # not a guess, whether or not it found any items.
                     "materials_url": materials_url,
-                    "items": [
-                        {"name": i.name, "type": i.material_type or None,
-                         "folder": i.folder_path or None, "href": i.href}
-                        for i in items
-                    ],
+                    "items": item_dicts,
                     # Every page the walk actually visited (url, status, how
                     # many links it saw / parsed, whether it hit a login
                     # wall) — so an empty `items` list is diagnosable instead

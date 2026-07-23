@@ -1210,3 +1210,52 @@ def test_download_file_follows_materials_gp_detail_page_to_real_pdf():
             await client.aclose()
 
     asyncio.run(run())
+
+
+def test_download_file_follows_pdfjs_viewer_file_query_param():
+    """A PDF.js-style embedded viewer (confirmed by screenshot against the
+    real materials/gp/{id} page: page controls + a Download toolbar button)
+    carries the actual file's URL as a `file=` query parameter on the
+    iframe hosting the viewer — not as any plain visible link, since the
+    viewer fetches it via JS to render the PDF canvas. There's nothing else
+    in the static HTML for the old heuristics (explicit "download" links,
+    an iframe src that's itself already a direct file link) to find."""
+    detail_html = """
+    <html><body>
+      <h1>AP Units of Instruction.pdf</h1>
+      <iframe src="/pdfjs/web/viewer.html?file=%2Fcourse%2F8435659601%2Fattachment%2F9001%2Fdownload"
+              id="viewer"></iframe>
+    </body></html>
+    """
+
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/course/8435659601/materials/gp/8444336435":
+                return httpx.Response(
+                    200, text=detail_html, headers={"content-type": "text/html; charset=utf-8"},
+                )
+            if request.url.path == "/course/8435659601/attachment/9001/download":
+                return httpx.Response(
+                    200, content=b"%PDF-1.4 real bytes",
+                    headers={"content-type": "application/pdf"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.download_file(
+                f"{BASE_URL}/course/8435659601/materials/gp/8444336435"
+            )
+            assert result is not None
+            content, content_type = result
+            assert content == b"%PDF-1.4 real bytes"
+            assert content_type == "application/pdf"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())

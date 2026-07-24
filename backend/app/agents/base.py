@@ -13,6 +13,14 @@ from app.agents.persona import ATLAS_SHARED_PRINCIPLES
 from app.llm import claude
 from app.services import memory, web_search
 
+# `semantic_search` has no real relevance cutoff (default similarity_threshold
+# is 0.0) — it always returns the *closest* chunks even when none actually
+# answer the question, so "relevant_passages is non-empty" alone isn't a
+# reliable signal that the student's documents had the answer. Require the
+# single best match to clear this cosine-similarity bar before treating the
+# question as "answered from your documents" instead of falling back to the web.
+_RELEVANT_SIMILARITY_THRESHOLD = 0.5
+
 
 class Agent:
     role: str = "general"
@@ -49,8 +57,10 @@ class Agent:
         # to the open web rather than answering from unlabeled general
         # knowledge. Kept as its own context block (never merged into
         # "document context") so the model can only ever cite it as web-sourced.
+        passages = ctx.get("relevant_passages") or []
+        best_similarity = max((p.get("similarity") or 0.0 for p in passages), default=0.0)
         web_results: list[dict] = []
-        if include_semantic and not ctx.get("relevant_passages"):
+        if include_semantic and best_similarity < _RELEVANT_SIMILARITY_THRESHOLD:
             web_results = await web_search.search(user_message)
         ctx["web_results"] = web_results
         context_text = memory.render_context(ctx)

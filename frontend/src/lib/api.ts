@@ -60,15 +60,38 @@ export const apiPatch = <T = any>(p: string, body: unknown) =>
   api<T>(p, { method: "PATCH", body: JSON.stringify(body) });
 export const apiDelete = (p: string) => api(p, { method: "DELETE" });
 
-/** Multipart upload (for documents) with auth header, no JSON content-type. */
-export async function apiUpload<T = any>(path: string, form: FormData): Promise<T> {
-  const res = await fetch(`${BASE}/api/v1${path}`, {
-    method: "POST",
-    headers: { ...(await authHeader()) },
-    body: form,
+/** Multipart upload (for documents) with auth header, no JSON content-type.
+ *  Uses XMLHttpRequest instead of fetch so `onProgress` can report how much
+ *  of the file has actually reached the server — fetch exposes no upload
+ *  progress event. That percentage covers only the network transfer; the
+ *  server's extraction/embedding work afterward has no progress to report. */
+export async function apiUpload<T = any>(
+  path: string, form: FormData, onProgress?: (pct: number) => void
+): Promise<T> {
+  const headers = await authHeader();
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/api/v1${path}`);
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(xhr.responseText ? JSON.parse(xhr.responseText) : (undefined as T));
+        } catch {
+          resolve(undefined as T);
+        }
+      } else {
+        reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Failed to fetch"));
+    xhr.send(form);
   });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-  return res.json();
 }
 
 export { BASE as API_BASE };

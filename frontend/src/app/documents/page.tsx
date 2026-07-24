@@ -26,12 +26,14 @@ export default function DocumentsPage() {
   const [courses, setCourses] = useState<any[]>([]);
   const [courseId, setCourseId] = useState("");
   const [busy, setBusy] = useState(false);
+  const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
   const [driveBusy, setDriveBusy] = useState(false);
   const [backendDown, setBackendDown] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const bulkFileRef = useRef<HTMLInputElement>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkPct, setBulkPct] = useState<number | null>(null);
   const [review, setReview] = useState<BulkResult[] | null>(null);
   const [reviewChoice, setReviewChoice] = useState<Record<string, string>>({});
 
@@ -71,12 +73,13 @@ export default function DocumentsPage() {
     if (!file) return;
     if (!requireCourse()) return;
     setBusy(true);
+    setUploadPct(0);
     setStatus(null);
     try {
       const form = new FormData();
       form.append("file", file);
       form.append("course_id", courseId);
-      const res = await apiUpload("/documents/upload", form);
+      const res = await apiUpload("/documents/upload", form, setUploadPct);
       const title = res.enrichment?.title;
       setStatus({
         ok: true,
@@ -88,6 +91,7 @@ export default function DocumentsPage() {
       setStatus({ ok: false, text: friendlyError(err) });
     } finally {
       setBusy(false);
+      setUploadPct(null);
     }
   }
 
@@ -123,11 +127,12 @@ export default function DocumentsPage() {
     const files = bulkFileRef.current?.files;
     if (!files || !files.length) return;
     setBulkBusy(true);
+    setBulkPct(0);
     setStatus(null);
     try {
       const form = new FormData();
       Array.from(files).forEach((f) => form.append("files", f));
-      const res = await apiUpload("/documents/bulk-upload", form);
+      const res = await apiUpload("/documents/bulk-upload", form, setBulkPct);
       const results: BulkResult[] = res.results ?? [];
       const flagged = results.filter((r) => r.needs_review && r.id);
       const failed = results.filter((r) => r.error);
@@ -148,6 +153,7 @@ export default function DocumentsPage() {
       setStatus({ ok: false, text: friendlyError(err) });
     } finally {
       setBulkBusy(false);
+      setBulkPct(null);
     }
   }
 
@@ -208,7 +214,13 @@ export default function DocumentsPage() {
             <label className="label">File</label>
             <input ref={fileRef} type="file" className="text-sm" required accept={ACCEPT} />
           </div>
-          <button className="btn-primary" disabled={busy}>{busy ? "Ingesting…" : "Upload"}</button>
+          <button className="btn-primary" disabled={busy}>
+            {busy
+              ? uploadPct != null && uploadPct < 100
+                ? `Uploading… ${uploadPct}%`
+                : "Processing…"
+              : "Upload"}
+          </button>
           <button
             type="button"
             className="btn-ghost"
@@ -239,7 +251,11 @@ export default function DocumentsPage() {
             <input ref={bulkFileRef} type="file" className="text-sm" multiple required accept={ACCEPT} />
           </div>
           <button className="btn-ghost" disabled={bulkBusy}>
-            {bulkBusy ? "Filing…" : "Upload & auto-file"}
+            {bulkBusy
+              ? bulkPct != null && bulkPct < 100
+                ? `Uploading… ${bulkPct}%`
+                : "Filing…"
+              : "Upload & auto-file"}
           </button>
         </div>
         <p className="text-xs text-atlas-muted mt-2">

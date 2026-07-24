@@ -11,11 +11,14 @@ export function AppShell({
   subtitle,
   actions,
   children,
+  fullWidth = false,
 }: {
   title: string;
   subtitle?: string;
   actions?: React.ReactNode;
   children: React.ReactNode;
+  /** Skip the default max-w-6xl content cap — for pages meant to fill the page. */
+  fullWidth?: boolean;
 }) {
   const { session, loading } = useAuth();
   const router = useRouter();
@@ -61,7 +64,7 @@ export function AppShell({
           </div>
           {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
         </header>
-        <div className="p-4 sm:p-6 lg:p-8 max-w-6xl">{children}</div>
+        <div className={`p-4 sm:p-6 lg:p-8 ${fullWidth ? "" : "max-w-6xl"}`}>{children}</div>
       </main>
       <FloatingChat />
     </div>

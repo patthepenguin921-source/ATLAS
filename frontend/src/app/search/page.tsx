@@ -154,6 +154,7 @@ export default function AskAtlasPage() {
       title="Ask Atlas"
       subtitle="Chat with your specialists — grounded in your real academic life"
       actions={<button className="btn-ghost" onClick={chat.reset}>New chat</button>}
+      fullWidth
     >
       <div className="grid grid-cols-1 lg:grid-cols-[16rem_1fr] gap-4">
         {/* Projects / history rail */}
@@ -220,7 +221,7 @@ export default function AskAtlasPage() {
         {/* Conversation column — Claude-style */}
         <div className="flex flex-col min-h-[64vh]">
           <div className="flex-1 overflow-auto">
-            <div className="max-w-2xl mx-auto px-1 py-2 space-y-6">
+            <div className="w-full px-1 py-2 space-y-6">
               {!chat.messages.length && (
                 <div className="text-center py-12">
                   <div className="text-sm text-atlas-muted mb-4">
@@ -255,7 +256,7 @@ export default function AskAtlasPage() {
           </div>
 
           {/* Composer */}
-          <div className="max-w-2xl mx-auto w-full pt-3">
+          <div className="w-full pt-3">
             <div className="rounded-2xl border border-atlas-border bg-atlas-panel2 p-2.5 shadow-soft">
               <textarea
                 className="w-full bg-transparent outline-none text-sm resize-none px-2 pt-1 min-h-[44px] max-h-40 placeholder:text-atlas-muted"

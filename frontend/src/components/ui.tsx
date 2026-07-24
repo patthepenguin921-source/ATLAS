@@ -1,6 +1,49 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+
+/** Same layout as Stat, but the value is blurred until the user taps it —
+ *  for numbers like GPA that someone might not want visible over your shoulder. */
+export function RevealStat({
+  label,
+  value,
+  hint,
+  tone = "default",
+}: {
+  label: string;
+  value: React.ReactNode;
+  hint?: string;
+  tone?: "default" | "good" | "warn" | "bad";
+}) {
+  const [revealed, setRevealed] = useState(false);
+  const toneColor = {
+    default: "text-atlas-text",
+    good: "text-atlas-good",
+    warn: "text-atlas-warn",
+    bad: "text-atlas-bad",
+  }[tone];
+  return (
+    <button
+      type="button"
+      onClick={() => setRevealed((r) => !r)}
+      className="card text-left w-full"
+      title={revealed ? "Tap to hide" : "Tap to reveal"}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-atlas-muted">{label}</div>
+        <div className="text-[10px] text-atlas-muted">{revealed ? "hide" : "tap to reveal"}</div>
+      </div>
+      <div
+        className={`text-2xl font-semibold mt-1 ${toneColor} transition-[filter] ${
+          revealed ? "" : "blur-md select-none"
+        }`}
+      >
+        {value}
+      </div>
+      {hint && <div className="text-xs text-atlas-muted mt-1">{hint}</div>}
+    </button>
+  );
+}
 
 export function Stat({
   label,

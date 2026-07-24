@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Stat, Section, Empty, Loading, Badge, RiskBadge } from "@/components/ui";
+import { Stat, RevealStat, Section, Empty, Loading, Badge, RiskBadge } from "@/components/ui";
 import { apiGet, apiPost } from "@/lib/api";
 
 export default function AnalyticsPage() {
@@ -44,8 +44,8 @@ export default function AnalyticsPage() {
       {snap && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <Stat label="GPA (weighted)" value={snap.predicted_gpa_weighted ?? "—"} tone="good" />
-            <Stat label="GPA (unweighted)" value={snap.predicted_gpa_unweighted ?? "—"} />
+            <RevealStat label="GPA (unweighted)" value={snap.predicted_gpa_unweighted ?? "—"} tone="good" />
+            <RevealStat label="GPA (weighted)" value={snap.predicted_gpa_weighted ?? "—"} />
             <Stat label="Study (30d)" value={`${eff?.total_minutes ?? 0}m`}
               hint={`${eff?.sessions ?? 0} sessions`} />
             <Stat label="Avg focus" value={eff?.avg_focus ?? "—"}

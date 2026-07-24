@@ -189,8 +189,6 @@ export default function CourseDetailPage() {
   }
 
   const level = (course.course_level ?? "regular") as CourseLevel;
-  const teacherName = teachers.find((t) => t.id === course.teacher_id)?.name;
-  const termName = terms.find((t) => t.id === course.term_id)?.name;
   const currentSemester = (course.semester ?? "full_year") as string;
   const isSplit = semesters.length > 1;
 
@@ -365,17 +363,11 @@ export default function CourseDetailPage() {
         </form>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+      <div className="grid grid-cols-2 gap-4 mb-8">
         <Stat
           label="Current grade"
           value={course.current_grade != null ? `${course.current_grade}% ${course.current_letter ?? ""}` : "—"}
           tone={gradeTone(course.current_grade)}
-        />
-        <Stat label="Credit hours" value={course.credit_hours ?? "—"} />
-        <Stat
-          label="Teacher"
-          value={teacherName ?? "—"}
-          hint={[course.period, course.room].filter(Boolean).join(" · ") || termName || undefined}
         />
       </div>
 

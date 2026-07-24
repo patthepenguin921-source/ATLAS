@@ -40,8 +40,13 @@ SYNC_TIMEOUT_SECONDS = 270
 
 # Safety net for anything that still manages to get stuck on "running" (e.g.
 # an old row from before this timeout existed, or a kill that also cut off
-# the timeout handler itself) — reconciled on every scheduled run.
-STALE_RUNNING_MINUTES = 10
+# the timeout handler itself) — reconciled on every scheduled run, on every
+# "Sync now" attempt, and on every page load (see run_sync and
+# list_integrations). 6 minutes is SYNC_TIMEOUT_SECONDS (4.5 min) plus a
+# couple minutes' margin — enough that a sync that's genuinely still running
+# normally won't be reconciled out from under itself, but not so long that a
+# hard-killed one looks permanently stuck.
+STALE_RUNNING_MINUTES = 6
 
 
 async def reconcile_stale_syncs(provider: str, *, stale_after_minutes: int = STALE_RUNNING_MINUTES) -> None:
@@ -100,7 +105,15 @@ async def run_sync(provider: str, user_id: str) -> dict[str, Any]:
     `UPDATE ... WHERE status != 'running'`: only one sync can be in flight
     per user+provider at a time, and a second attempt is rejected
     immediately with a clear message instead of silently interfering with
-    the first."""
+    the first.
+
+    Also reconciles this provider's stale "running" rows first — without
+    this, a row left stuck by a hard-killed run (see SYNC_TIMEOUT_SECONDS's
+    docstring) would only ever get cleared by the next scheduled
+    `run_sync_for_all` sweep, up to 12 hours away; a manual "Sync now"
+    click never used to trigger it, so a stuck sync looked permanent until
+    someone clicked Cancel by hand."""
+    await reconcile_stale_syncs(provider)
     impl = PROVIDERS[provider]
     claimed = await supabase.update(
         "integrations", {"status": "running"},

@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app.config import settings
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
-from app.integrations import PROVIDERS, cancel_sync, run_sync, run_sync_for_all
+from app.integrations import PROVIDERS, cancel_sync, reconcile_stale_syncs, run_sync, run_sync_for_all
 from app.integrations.powerschool import encrypt_credentials, encrypt_session_cookie
 from app.integrations.powerschool_client import PowerSchoolClient
 from app.integrations.schoology import (
@@ -49,6 +49,12 @@ async def providers():
 
 @router.get("")
 async def list_integrations(user: CurrentUser = Depends(get_current_user)):
+    # Without this, a row stuck on "running" by a hard-killed sync (see
+    # SYNC_TIMEOUT_SECONDS's docstring) only ever gets cleared by the next
+    # scheduled cron sweep — up to 12 hours away — so just opening the page
+    # kept showing a permanently-stuck sync until someone clicked Cancel.
+    for provider in PROVIDERS:
+        await reconcile_stale_syncs(provider)
     return await supabase.select(
         "integrations", filters={"user_id": eq(user.id)}, order="created_at.desc"
     )

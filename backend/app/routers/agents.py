@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.agents import get_agent
+from app.agents.memory_keeper import MemoryKeeper
 from app.agents.registry import Analyst, Coach, Planner, Tutor
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
@@ -61,6 +62,12 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
         user.id, body.conversation_id, body.agent, body.message,
         result["reply"], result.get("context_used", {}),
     )
+    try:
+        await MemoryKeeper().extract_facts(
+            user.id, body.message, result["reply"], conversation_id=conv_id
+        )
+    except Exception:
+        pass  # learning long-term facts is best-effort; never break the chat turn
     return {**result, "conversation_id": conv_id}
 
 
@@ -143,3 +150,20 @@ async def conversation_messages(conversation_id: str, user: CurrentUser = Depend
         filters={"user_id": eq(user.id), "conversation_id": eq(conversation_id)},
         order="created_at.asc", limit=200,
     )
+
+
+@router.get("/facts")
+async def list_facts(user: CurrentUser = Depends(get_current_user)):
+    """What Atlas has learned about the student from past conversations."""
+    return await supabase.select(
+        "user_facts", columns="id,key,value,category,updated_at",
+        filters={"user_id": eq(user.id)}, order="updated_at.desc", limit=200,
+    )
+
+
+@router.delete("/facts/{fact_id}", status_code=204)
+async def forget_fact(fact_id: str, user: CurrentUser = Depends(get_current_user)):
+    await supabase.delete(
+        "user_facts", filters={"user_id": eq(user.id), "id": eq(fact_id)}
+    )
+    return None

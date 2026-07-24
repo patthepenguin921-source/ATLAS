@@ -119,6 +119,17 @@ async def repeated_mistakes(user_id: str, *, limit: int = 15) -> list[dict]:
     ) or []
 
 
+async def learned_facts(user_id: str, *, limit: int = 50) -> list[dict]:
+    """Durable facts/preferences learned from past conversations (see MemoryKeeper)."""
+    return await supabase.select(
+        "user_facts",
+        columns="key,value,category",
+        filters={"user_id": eq(user_id)},
+        order="updated_at.desc",
+        limit=limit,
+    ) or []
+
+
 async def available_documents(user_id: str, *, limit: int = 50) -> list[dict]:
     """Titles/summaries of every ingested document the student has.
 
@@ -152,6 +163,7 @@ async def build_context(
         "review_due": await concepts_needing_review(user_id, limit=10),
         "repeated_mistakes": await repeated_mistakes(user_id, limit=10),
         "documents": await available_documents(user_id),
+        "learned_facts": await learned_facts(user_id),
     }
     if query and include_semantic:
         try:
@@ -171,6 +183,12 @@ def render_context(ctx: dict[str, Any]) -> str:
     def course_name(cid: str | None) -> str:
         c = courses.get(cid or "")
         return c["name"] if c else "—"
+
+    if ctx.get("learned_facts"):
+        lines.append("\n## What you've learned about this student")
+        for f in ctx["learned_facts"]:
+            label = f" ({f['category']})" if f.get("category") else ""
+            lines.append(f"- {f['value']}{label}")
 
     if ctx.get("courses"):
         lines.append("\n## Courses")

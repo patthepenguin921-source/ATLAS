@@ -22,7 +22,7 @@ class _FakeProvider:
         self._result = result
         self.sync_calls = 0
 
-    async def sync(self, user_id: str) -> dict[str, Any]:
+    async def sync(self, user_id: str, *, deadline: float | None = None) -> dict[str, Any]:
         self.sync_calls += 1
         return self._result
 

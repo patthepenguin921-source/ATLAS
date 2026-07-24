@@ -131,7 +131,11 @@ class PowerSchoolProvider(IntegrationProvider):
         finally:
             await client.aclose()
 
-    async def sync(self, user_id: str) -> dict[str, Any]:
+    async def sync(self, user_id: str, *, deadline: float | None = None) -> dict[str, Any]:
+        # `deadline` isn't honored here — a PowerSchool account's course list
+        # is small enough (one grades-page scrape) that chunking has never
+        # been needed the way it is for Schoology's per-course materials
+        # walk; see SchoologyProvider.sync.
         client = await self._authenticated_client(user_id)
         try:
             classes = await client.fetch_classes()

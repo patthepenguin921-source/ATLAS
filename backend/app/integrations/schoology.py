@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 import uuid
 from datetime import date, datetime
 from urllib.parse import urlsplit
@@ -956,7 +957,7 @@ class SchoologyProvider(IntegrationProvider):
             report["links"] += 1
 
     # ---- main sync ----
-    async def sync(self, user_id: str) -> dict[str, Any]:
+    async def sync(self, user_id: str, *, deadline: float | None = None) -> dict[str, Any]:
         integration = await self._load_integration(user_id)
         report: dict[str, Any] = {
             "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
@@ -971,7 +972,15 @@ class SchoologyProvider(IntegrationProvider):
         # for whatever courses a *previous* API-connected sync already
         # linked, instead of syncing nothing at all.
         if not self._has_api_key(integration):
-            await self._sync_materials_only(user_id, integration, report)
+            # This is the only path that honors `deadline` — each course's
+            # login-scraped materials walk is a multi-request crawl, and a
+            # real account's course count reliably pushes the *whole* sync
+            # (all courses, one at a time — see _SECTION_SYNC_CONCURRENCY)
+            # past a single request's time budget even when each individual
+            # course is fast. `_sync_materials_only` stops at `deadline` and
+            # saves its place (`config._sync_progress`) so the next chunked
+            # call picks up where this one left off instead of restarting.
+            await self._sync_materials_only(user_id, integration, report, deadline=deadline)
             return report
 
         config = integration.get("config") or {}
@@ -1056,7 +1065,10 @@ class SchoologyProvider(IntegrationProvider):
             if scraper is not None:
                 await scraper.aclose()
 
-    async def _sync_materials_only(self, user_id: str, integration: dict[str, Any], report: dict[str, Any]) -> None:
+    async def _sync_materials_only(
+        self, user_id: str, integration: dict[str, Any], report: dict[str, Any],
+        *, deadline: float | None = None,
+    ) -> None:
         """No API key on file — refresh materials via the login-scraper
         session. Uses whatever courses Atlas already linked a Schoology
         section id for (`metadata.schoology_section_id`) and, when nothing is
@@ -1067,9 +1079,21 @@ class SchoologyProvider(IntegrationProvider):
         pages) — that's carried on each course's `metadata.schoology_student_uid`,
         captured during discovery. Logs in once for the whole run — that one
         session is shared by discovery and every course's materials walk
-        below, rather than re-logging-in per course."""
+        below, rather than re-logging-in per course.
+
+        Chunked/resumable: courses are walked one at a time (matching
+        `_SECTION_SYNC_CONCURRENCY`'s single-session reasoning), and if
+        `deadline` is hit before they're all done, the remaining courses and
+        the counts collected so far are saved to
+        `integrations.config._sync_progress` and `report["continue"]` is set
+        — the caller (`app.integrations.run_sync`) leaves the row "running"
+        and the next chunked call resumes from exactly there instead of
+        re-discovering and re-counting from scratch."""
         config = integration.get("config") or {}
         google_token = config.get("google_access_token")
+        progress = config.get("_sync_progress")
+        resuming = bool(progress and progress.get("pending") is not None)
+
         try:
             scraper = await self._scraper_client(user_id)
         except SchoologyScraperAuthError as e:
@@ -1080,42 +1104,56 @@ class SchoologyProvider(IntegrationProvider):
             return
 
         try:
-            # Discover from the login session every sync — it's the source of
-            # truth for section ids, names, and (for a parent account) the
-            # student uid, and it reconciles/links each course while backfilling
-            # metadata.schoology_student_uid. Running it unconditionally is what
-            # gives an already-linked parent course (linked before parent support
-            # existed, so with no student uid stored) its uid — without which the
-            # walk falls back to the empty plain /materials page.
-            try:
-                linked = await self._discover_and_link_sections(user_id, report, scraper)
-            except SchoologyScraperAuthError as e:
-                report["errors"].append(f"Schoology materials (scrape login): {e}")
-                linked = []
-            except RuntimeError as e:
-                report["errors"].append(str(e))
-                linked = []
-
-            if not linked:
-                # Discovery found nothing — fall back to whatever a prior
-                # sync already linked so those still refresh.
-                rows = await supabase.select(
-                    "courses", columns="id,name,metadata", filters={"user_id": eq(user_id)},
-                ) or []
-                linked = [
-                    (r["id"], r["name"], (r.get("metadata") or {}).get("schoology_section_id"),
-                     (r.get("metadata") or {}).get("schoology_student_uid"))
-                    for r in rows
+            if resuming:
+                linked: list[tuple[str, str, str, str | None]] = [
+                    tuple(item) for item in progress["pending"]
                 ]
-                linked = [(cid, name, sid, uid) for cid, name, sid, uid in linked if sid]
-            if not linked:
-                report["errors"].append(
-                    "No Schoology courses found for this login. If this is a parent account, "
-                    "its courses may live on app.schoology.com; otherwise confirm the account "
-                    "is enrolled in courses."
-                )
-                return
-            async def _sync_one(course_id: str, name: str, section_id: str, student_uid: str | None) -> None:
+                report.clear()
+                report.update(progress["report"])
+            else:
+                # Discover from the login session every sync — it's the source of
+                # truth for section ids, names, and (for a parent account) the
+                # student uid, and it reconciles/links each course while backfilling
+                # metadata.schoology_student_uid. Running it unconditionally is what
+                # gives an already-linked parent course (linked before parent support
+                # existed, so with no student uid stored) its uid — without which the
+                # walk falls back to the empty plain /materials page.
+                try:
+                    linked = await self._discover_and_link_sections(user_id, report, scraper)
+                except SchoologyScraperAuthError as e:
+                    report["errors"].append(f"Schoology materials (scrape login): {e}")
+                    linked = []
+                except RuntimeError as e:
+                    report["errors"].append(str(e))
+                    linked = []
+
+                if not linked:
+                    # Discovery found nothing — fall back to whatever a prior
+                    # sync already linked so those still refresh.
+                    rows = await supabase.select(
+                        "courses", columns="id,name,metadata", filters={"user_id": eq(user_id)},
+                    ) or []
+                    linked = [
+                        (r["id"], r["name"], (r.get("metadata") or {}).get("schoology_section_id"),
+                         (r.get("metadata") or {}).get("schoology_student_uid"))
+                        for r in rows
+                    ]
+                    linked = [(cid, name, sid, uid) for cid, name, sid, uid in linked if sid]
+                if not linked:
+                    report["errors"].append(
+                        "No Schoology courses found for this login. If this is a parent account, "
+                        "its courses may live on app.schoology.com; otherwise confirm the account "
+                        "is enrolled in courses."
+                    )
+                    return
+
+            remaining = list(linked)
+            while remaining:
+                if deadline is not None and time.monotonic() >= deadline:
+                    await self._save_sync_progress(user_id, remaining, report)
+                    report["continue"] = True
+                    return
+                course_id, name, section_id, student_uid = remaining.pop(0)
                 section = SchoologySection(
                     id=section_id, course_id=section_id, course_title=name, section_title="",
                     course_code="", section_code="", grading_periods=[], meeting_days=[],
@@ -1128,13 +1166,40 @@ class SchoologyProvider(IntegrationProvider):
                 )
                 report["courses"] += 1
 
-            # See `sync()`'s section_tasks comment — same reasoning, walking
-            # each course's materials concurrently instead of one at a time.
-            await _gather_bounded(
-                [_sync_one(*item) for item in linked], limit=_SECTION_SYNC_CONCURRENCY,
-            )
+            # Every course in this cycle finished — drop any leftover resume
+            # state (a no-op if this cycle never needed to chunk at all).
+            await self._clear_sync_progress(user_id)
         finally:
             await scraper.aclose()
+
+    async def _save_sync_progress(
+        self, user_id: str,
+        pending: list[tuple[str, str, str, str | None]], report: dict[str, Any],
+    ) -> None:
+        """Persist where a chunked `_sync_materials_only` run stopped, so the
+        next call resumes instead of re-discovering and re-counting from
+        scratch. Re-reads `config` first rather than trusting a stale copy,
+        since a "Sync now" retry and a resumed chunk shouldn't be able to
+        stomp each other's unrelated config edits (e.g. an in-progress
+        "Edit login")."""
+        integration = await self._load_integration(user_id)
+        config = dict(integration.get("config") or {})
+        config["_sync_progress"] = {"pending": [list(item) for item in pending], "report": report}
+        await supabase.update(
+            "integrations", {"config": config},
+            filters={"user_id": eq(user_id), "provider": eq(self.name)},
+        )
+
+    async def _clear_sync_progress(self, user_id: str) -> None:
+        integration = await self._load_integration(user_id)
+        config = dict(integration.get("config") or {})
+        if "_sync_progress" not in config:
+            return
+        config.pop("_sync_progress", None)
+        await supabase.update(
+            "integrations", {"config": config},
+            filters={"user_id": eq(user_id), "provider": eq(self.name)},
+        )
 
     async def _discover_and_link_sections(
         self, user_id: str, report: dict[str, Any], scraper: SchoologyScraperClient,

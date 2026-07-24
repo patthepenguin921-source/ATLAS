@@ -11,7 +11,7 @@ from typing import Any
 
 from app.agents.persona import ATLAS_SHARED_PRINCIPLES
 from app.llm import claude
-from app.services import memory
+from app.services import memory, web_search
 
 
 class Agent:
@@ -24,7 +24,13 @@ class Agent:
             f"{self.persona}\n\n{ATLAS_SHARED_PRINCIPLES}\n\n"
             f"{context_text}\n\n"
             "Ground every statement in the context above. If the context lacks "
-            "the answer, say so plainly rather than inventing facts."
+            "the answer, say so plainly rather than inventing facts. Anything "
+            "under \"Found online\" did not come from the student's own "
+            "documents or academic records — say so explicitly whenever you "
+            "use it (e.g. \"I couldn't find this in your materials, but online "
+            "sources say...\"). Never present a web result as if it came from "
+            "the student's own documents, and never present document/record "
+            "content as if it were a web result."
         )
 
     async def respond(
@@ -39,6 +45,14 @@ class Agent:
         ctx = await memory.build_context(
             user_id, user_message, include_semantic=include_semantic
         )
+        # The student's own documents/records had nothing relevant — fall back
+        # to the open web rather than answering from unlabeled general
+        # knowledge. Kept as its own context block (never merged into
+        # "document context") so the model can only ever cite it as web-sourced.
+        web_results: list[dict] = []
+        if include_semantic and not ctx.get("relevant_passages"):
+            web_results = await web_search.search(user_message)
+        ctx["web_results"] = web_results
         context_text = memory.render_context(ctx)
         messages = list(history or [])
         messages.append({"role": "user", "content": user_message})
@@ -54,5 +68,6 @@ class Agent:
                 "courses": len(ctx.get("courses", [])),
                 "upcoming": len(ctx.get("upcoming", [])),
                 "passages": len(ctx.get("relevant_passages", [])),
+                "web_results": len(ctx.get("web_results", [])),
             },
         }

@@ -12,10 +12,16 @@ from app.config import settings
 _TAVILY_URL = "https://api.tavily.com/search"
 
 
-async def search(query: str, *, max_results: int = 5) -> list[dict]:
-    """Best-effort web search. Returns [] if unconfigured or on any failure."""
+async def search(query: str, *, max_results: int = 5) -> tuple[list[dict], str | None]:
+    """Best-effort web search.
+
+    Returns ([], reason) if unconfigured or on any failure — the reason string
+    is surfaced into context (see memory.build_context's "web_search_error")
+    instead of being silently swallowed, so a bad key or a blocked outbound
+    request shows up instead of just looking like "no fallback happened."
+    """
     if not settings.has_web_search:
-        return []
+        return [], "no TAVILY_API_KEY configured"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(
@@ -29,9 +35,10 @@ async def search(query: str, *, max_results: int = 5) -> list[dict]:
             )
             r.raise_for_status()
             data = r.json()
-    except Exception:
-        return []
-    return [
+    except Exception as e:
+        return [], str(e)
+    results = [
         {"title": item.get("title"), "url": item.get("url"), "content": item.get("content")}
         for item in data.get("results", [])[:max_results]
     ]
+    return results, None

@@ -7,19 +7,16 @@ it, rather than answering from the conversation alone.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from app.agents.persona import ATLAS_SHARED_PRINCIPLES
 from app.llm import claude
 from app.services import memory, web_search
 
-# `semantic_search` has no real relevance cutoff (default similarity_threshold
-# is 0.0) — it always returns the *closest* chunks even when none actually
-# answer the question, so "relevant_passages is non-empty" alone isn't a
-# reliable signal that the student's documents had the answer. Require the
-# single best match to clear this cosine-similarity bar before treating the
-# question as "answered from your documents" instead of falling back to the web.
-_RELEVANT_SIMILARITY_THRESHOLD = 0.5
+
+async def _no_web_search() -> tuple[list[dict], str | None]:
+    return [], None
 
 
 class Agent:
@@ -31,14 +28,19 @@ class Agent:
         return (
             f"{self.persona}\n\n{ATLAS_SHARED_PRINCIPLES}\n\n"
             f"{context_text}\n\n"
-            "Ground every statement in the context above. If the context lacks "
-            "the answer, say so plainly rather than inventing facts. Anything "
-            "under \"Found online\" did not come from the student's own "
-            "documents or academic records — say so explicitly whenever you "
-            "use it (e.g. \"I couldn't find this in your materials, but online "
-            "sources say...\"). Never present a web result as if it came from "
-            "the student's own documents, and never present document/record "
-            "content as if it were a web result."
+            "Ground every statement in the context above. Passages under "
+            "\"Relevant passages from your documents\" being present doesn't "
+            "mean they answer the question — they're just the closest matches "
+            "found; judge for yourself whether they actually contain the "
+            "answer. If they don't, use \"Found online\" results instead if "
+            "present. Anything under \"Found online\" did not come from the "
+            "student's own documents or academic records — say so explicitly "
+            "whenever you use it (e.g. \"I couldn't find this in your "
+            "materials, but online sources say...\"). Never present a web "
+            "result as if it came from the student's own documents, and never "
+            "present document/record content as if it were a web result. If "
+            "neither source has the answer, say so plainly rather than "
+            "inventing facts."
         )
 
     async def respond(
@@ -50,19 +52,21 @@ class Agent:
         include_semantic: bool = True,
         max_tokens: int = 1200,
     ) -> dict[str, Any]:
-        ctx = await memory.build_context(
-            user_id, user_message, include_semantic=include_semantic
+        # Run document retrieval and a web search side by side rather than
+        # deciding from document-passage similarity alone whether the web is
+        # needed: embedding similarity reflects topical closeness, not whether
+        # a passage actually contains the answer (e.g. "AP Research" chunks
+        # score as relevant to "what percent got a 5" even with no score data
+        # in them), so gating the web search on a similarity threshold missed
+        # exactly this case. Both sources go into context, clearly separated,
+        # and the model — not a similarity score — judges which one (if
+        # either) actually answers the question.
+        ctx, (web_results, web_search_error) = await asyncio.gather(
+            memory.build_context(user_id, user_message, include_semantic=include_semantic),
+            web_search.search(user_message) if include_semantic else _no_web_search(),
         )
-        # The student's own documents/records had nothing relevant — fall back
-        # to the open web rather than answering from unlabeled general
-        # knowledge. Kept as its own context block (never merged into
-        # "document context") so the model can only ever cite it as web-sourced.
-        passages = ctx.get("relevant_passages") or []
-        best_similarity = max((p.get("similarity") or 0.0 for p in passages), default=0.0)
-        web_results: list[dict] = []
-        if include_semantic and best_similarity < _RELEVANT_SIMILARITY_THRESHOLD:
-            web_results = await web_search.search(user_message)
         ctx["web_results"] = web_results
+        ctx["web_search_error"] = web_search_error
         context_text = memory.render_context(ctx)
         messages = list(history or [])
         messages.append({"role": "user", "content": user_message})
@@ -79,5 +83,6 @@ class Agent:
                 "upcoming": len(ctx.get("upcoming", [])),
                 "passages": len(ctx.get("relevant_passages", [])),
                 "web_results": len(ctx.get("web_results", [])),
+                "web_search_error": ctx.get("web_search_error"),
             },
         }

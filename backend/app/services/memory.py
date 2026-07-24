@@ -119,6 +119,26 @@ async def repeated_mistakes(user_id: str, *, limit: int = 15) -> list[dict]:
     ) or []
 
 
+async def available_documents(user_id: str, *, limit: int = 50) -> list[dict]:
+    """Titles/summaries of every ingested document the student has.
+
+    Semantic search only surfaces the top few *chunks* for a given query, so a
+    document can exist and still never appear in `relevant_passages` if its
+    embedding doesn't happen to win that ranking. Without this manifest Claude
+    has no way to know a document exists at all unless the user names it
+    explicitly. Listing titles/summaries up front lets Claude notice a
+    relevant document and pull it in (or ask to), instead of only reacting
+    when the user spells out the filename.
+    """
+    return await supabase.select(
+        "documents",
+        columns="id,title,doc_type,summary,course_id",
+        filters={"user_id": eq(user_id), "ingested": eq("true")},
+        order="created_at.desc",
+        limit=limit,
+    ) or []
+
+
 async def build_context(
     user_id: str, query: str | None = None, *,
     include_semantic: bool = True, semantic_limit: int = 6,
@@ -131,6 +151,7 @@ async def build_context(
         "recent_grades": await recent_grades(user_id, limit=10),
         "review_due": await concepts_needing_review(user_id, limit=10),
         "repeated_mistakes": await repeated_mistakes(user_id, limit=10),
+        "documents": await available_documents(user_id),
     }
     if query and include_semantic:
         try:
@@ -197,6 +218,12 @@ def render_context(ctx: dict[str, Any]) -> str:
         lines.append("\n## Unresolved mistakes / patterns")
         for m in ctx["repeated_mistakes"]:
             lines.append(f"- ({m.get('mistake_type','?')}) {m['description']}")
+
+    if ctx.get("documents"):
+        lines.append("\n## Documents you have on file (search these before answering from general knowledge)")
+        for d in ctx["documents"]:
+            desc = d.get("summary") or d.get("doc_type") or ""
+            lines.append(f"- {d['title']}" + (f" — {desc}" if desc else ""))
 
     if ctx.get("relevant_passages"):
         lines.append("\n## Relevant passages from your documents")

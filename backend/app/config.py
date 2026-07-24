@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     atlas_claude_model: str = "claude-opus-4-8"
     atlas_claude_fast_model: str = "claude-haiku-4-5-20251001"
 
+    # ---- Web search (optional fallback when the student's own data has nothing) ----
+    tavily_api_key: str = ""
+
     # ---- Embeddings ----
     embeddings_provider: str = "local"          # voyage | openai | local
     embeddings_model: str = "voyage-3"
@@ -102,6 +105,10 @@ class Settings(BaseSettings):
         if self.atlas_llm_provider == "anthropic":
             return bool(self.anthropic_api_key)
         return bool(self.groq_api_key)
+
+    @property
+    def has_web_search(self) -> bool:
+        return bool(self.tavily_api_key)
 
 
 @lru_cache

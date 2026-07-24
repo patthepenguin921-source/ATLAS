@@ -249,4 +249,13 @@ def render_context(ctx: dict[str, Any]) -> str:
             snippet = (p.get("content") or "")[:400].replace("\n", " ")
             lines.append(f"- [{p.get('document_title','doc')}] {snippet}")
 
+    if ctx.get("web_results"):
+        lines.append(
+            "\n## Found online (NOT from the student's documents or records — "
+            "label it as web-sourced if you use it)"
+        )
+        for r in ctx["web_results"]:
+            snippet = (r.get("content") or "")[:400].replace("\n", " ")
+            lines.append(f"- [{r.get('title','web result')}]({r.get('url','')}) {snippet}")
+
     return "\n".join(lines)

@@ -56,6 +56,7 @@ from app.integrations.schoology_scraper import (
     SchoologyScraperAuthError,
     SchoologyScraperClient,
 )
+from app.llm import claude
 from app.services import ingestion
 
 # Assignment/material title keywords → Atlas assignment_category enum values.
@@ -63,6 +64,48 @@ _CATEGORY_KEYWORDS = (
     "homework", "classwork", "quiz", "test", "exam", "project", "essay",
     "lab", "discussion", "presentation", "reading", "participation",
 )
+
+_ASSIGNMENT_CATEGORY_VALUES = frozenset(_CATEGORY_KEYWORDS) | {"other"}
+
+
+async def _classify_google_doc(title: str, text: str) -> dict[str, Any] | None:
+    """Not every Google Doc a teacher links from course materials is an
+    assignment — most are syllabi, slide notes, readings, or reference
+    sheets. But plenty of real assignments (especially papers/projects)
+    live only as a Google Doc brief, never as a proper Schoology Assignment.
+    Ask the reasoning engine to tell the two apart from the doc's own text."""
+    if not settings.has_llm or not text.strip():
+        return None
+    excerpt = text.strip()[:4000]
+    prompt = f"""\
+A teacher linked a Google Doc titled "{title}" from a course's materials in \
+Schoology. Decide whether this document is itself a student assignment — \
+something the student is meant to complete and submit (a paper, project, \
+lab report, or essay prompt with instructions) — as opposed to a general \
+resource (a syllabus, slide deck, reading, rubric, announcement, or \
+reference sheet). Most linked docs are NOT assignments — only say yes when \
+the text itself reads like instructions for work the student must produce.
+
+Document text (may be truncated):
+\"\"\"
+{excerpt}
+\"\"\"
+
+Return JSON with this exact shape:
+{{
+  "is_assignment": <bool>,
+  "assignment_title": "a short, clean title for the assignment, or null",
+  "assignment_type": "one of homework/classwork/quiz/test/exam/project/essay/lab/discussion/presentation/reading/participation/other",
+  "due_date": "YYYY-MM-DD if a due date is explicitly stated in the doc, else null"
+}}"""
+    try:
+        result = await claude.complete_json(
+            system="You are Atlas's Archivist, precisely classifying academic documents.",
+            prompt=prompt, max_tokens=400, temperature=0.0,
+        )
+        return result if isinstance(result, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
 
 # How many courses' assignments/events/materials walks run at once. Was 4
 # (motivated by the original 45-60s request timeout — see git history), but
@@ -817,6 +860,7 @@ class SchoologyProvider(IntegrationProvider):
         self, *, user_id: str, course_id: str, external_id: str, title: str,
         content: bytes, filename: str, content_type: str, doc_type: str = "other",
         extra_meta: dict[str, Any] | None = None, report: dict[str, Any] | None = None,
+        classify_as_assignment: bool = False,
     ) -> bool:
         """Store + text-extract + embed a binary file (pdf/pptx/doc/…). Returns
         True if newly ingested, False if nothing new happened — either it
@@ -891,7 +935,49 @@ class SchoologyProvider(IntegrationProvider):
                 await Archivist().enrich(user_id, doc_id, text)
             except Exception:  # noqa: BLE001
                 pass
+        if classify_as_assignment:
+            await self._link_assignment_from_google_doc(
+                user_id=user_id, course_id=course_id, doc_id=doc_id,
+                doc_external_id=external_id, title=title, text=text,
+                source_url=(extra_meta or {}).get("source_url") or "",
+                report=report,
+            )
         return True
+
+    async def _link_assignment_from_google_doc(
+        self, *, user_id: str, course_id: str, doc_id: str, doc_external_id: str,
+        title: str, text: str, source_url: str, report: dict[str, Any] | None,
+    ) -> None:
+        """Teachers often post project/paper instructions as a linked Google
+        Doc in course materials instead of using Schoology's own Assignments
+        feature. When `_classify_google_doc` says this one really is an
+        assignment, mirror it into `assignments` (linked back to the
+        document) so it shows up alongside real Schoology assignments —
+        otherwise it stays just a course document."""
+        classification = await _classify_google_doc(title, text)
+        if not classification or not classification.get("is_assignment"):
+            return
+        category = classification.get("assignment_type")
+        if category not in _ASSIGNMENT_CATEGORY_VALUES:
+            category = _map_category(title)
+        try:
+            await self.upsert_assignment(user_id, f"gdoc-assignment:{doc_external_id}", {
+                "course_id": course_id,
+                "title": classification.get("assignment_title") or title,
+                "description": text[:8000],
+                "category": category,
+                "due_date": classification.get("due_date") or None,
+                "status": "not_started",
+                "metadata": {
+                    "source_document_id": doc_id, "source_url": source_url,
+                    "detected_from": "google_doc",
+                },
+            })
+            if report is not None:
+                report["assignments"] += 1
+        except Exception as e:  # noqa: BLE001
+            if report is not None:
+                report["errors"].append(f"{title}: detected as assignment but couldn't save it ({e})")
 
     async def _ingest_text(
         self, *, user_id: str, course_id: str, external_id: str, title: str,
@@ -1561,7 +1647,7 @@ class SchoologyProvider(IntegrationProvider):
                         title=title, content=content, filename=filename,
                         content_type=content_type, doc_type="other",
                         extra_meta={**base_meta, "google_file_id": ref.file_id},
-                        report=report,
+                        report=report, classify_as_assignment=True,
                     ):
                         report["documents"] += 1
                     return

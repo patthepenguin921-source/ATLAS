@@ -17,14 +17,34 @@ async function authHeader(): Promise<Record<string, string>> {
 
 export async function api<T = any>(
   path: string,
-  opts: RequestInit = {}
+  opts: RequestInit & { timeoutMs?: number } = {}
 ): Promise<T> {
+  const { timeoutMs, ...rest } = opts;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(await authHeader()),
-    ...((opts.headers as Record<string, string>) ?? {}),
+    ...((rest.headers as Record<string, string>) ?? {}),
   };
-  const res = await fetch(`${BASE}/api/v1${path}`, { ...opts, headers });
+  // Without this, a request that never gets a response (a dropped connection,
+  // a proxy that silently stalls instead of returning an error) leaves the
+  // caller's fetch promise pending forever — the UI just looks broken with no
+  // way to tell "still working" from "never coming back." A bounded timeout
+  // guarantees the caller eventually sees a real, catchable error.
+  const controller = new AbortController();
+  const timer = timeoutMs
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : undefined;
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api/v1${path}`, { ...rest, headers, signal: controller.signal });
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      throw new Error("The request took too long and timed out. Please try again.");
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`${res.status}: ${text}`);
@@ -34,8 +54,8 @@ export async function api<T = any>(
 }
 
 export const apiGet = <T = any>(p: string) => api<T>(p);
-export const apiPost = <T = any>(p: string, body?: unknown) =>
-  api<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined });
+export const apiPost = <T = any>(p: string, body?: unknown, timeoutMs?: number) =>
+  api<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined, timeoutMs });
 export const apiPatch = <T = any>(p: string, body: unknown) =>
   api<T>(p, { method: "PATCH", body: JSON.stringify(body) });
 export const apiDelete = (p: string) => api(p, { method: "DELETE" });

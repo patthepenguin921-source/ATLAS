@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import re
 from datetime import datetime, timezone
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -80,7 +81,14 @@ class R2Client:
     # ---- lifecycle ----
     async def start(self) -> None:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            # A flat 30s timeout applies to connect/read/write/pool alike;
+            # that's plenty for a small object but not always enough to
+            # *write* a large one (a 240-page/6MB+ course PDF reliably hit
+            # this in production) — connecting and reading a response stay
+            # fast, so only the write (upload body) and read (final
+            # response, in case R2 is slow to acknowledge a big object) get
+            # real headroom.
+            self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, write=180.0, read=60.0))
 
     async def stop(self) -> None:
         if self._client is not None:
@@ -95,7 +103,14 @@ class R2Client:
         if not self.enabled:
             raise R2Error(503, "R2 is not configured (set R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY).")
         if self._client is None:  # lazily start if used outside lifespan
-            self._client = httpx.AsyncClient(timeout=30.0)
+            # A flat 30s timeout applies to connect/read/write/pool alike;
+            # that's plenty for a small object but not always enough to
+            # *write* a large one (a 240-page/6MB+ course PDF reliably hit
+            # this in production) — connecting and reading a response stay
+            # fast, so only the write (upload body) and read (final
+            # response, in case R2 is slow to acknowledge a big object) get
+            # real headroom.
+            self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, write=180.0, read=60.0))
         return self._client
 
     def _canonical_uri(self, key: str) -> str:
@@ -165,6 +180,66 @@ class R2Client:
         r = await client.put(f"https://{self._host}{self._canonical_uri(key)}", headers=headers, content=content)
         if r.status_code >= 300:
             raise R2Error(r.status_code, r.text)
+
+    async def list_objects(
+        self, *, prefix: str = "", continuation_token: str | None = None, max_keys: int = 1000,
+    ) -> dict[str, Any]:
+        """Raw S3 ListObjectsV2 against the bucket root. Returns
+        `{"keys": [...], "next_token": str | None}` — a `next_token` means
+        there are more pages; pass it back as `continuation_token` to
+        continue. Nothing in the app's normal upload/download path needs to
+        enumerate the bucket — this exists for one-off admin tooling (see
+        `scripts/cleanup_orphaned_r2_objects.py`), signed separately from
+        `_sign_request` since that one only ever signs a per-object
+        (no-query-string) request."""
+        client = self._require()
+        query: dict[str, str] = {"list-type": "2", "max-keys": str(max_keys)}
+        if prefix:
+            query["prefix"] = prefix
+        if continuation_token:
+            query["continuation-token"] = continuation_token
+        canonical_query = "&".join(f"{_quote_query(k)}={_quote_query(query[k])}" for k in sorted(query))
+
+        now = datetime.now(timezone.utc)
+        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+        date_stamp = now.strftime("%Y%m%d")
+        payload_hash = hashlib.sha256(b"").hexdigest()
+        headers = {"host": self._host, "x-amz-content-sha256": payload_hash, "x-amz-date": amz_date}
+        signed_headers = ";".join(sorted(headers))
+        canonical_headers = "".join(f"{k}:{headers[k]}\n" for k in sorted(headers))
+        canonical_uri = f"/{self._bucket}"
+        canonical_request = "\n".join([
+            "GET", canonical_uri, canonical_query, canonical_headers, signed_headers, payload_hash,
+        ])
+        credential_scope = f"{date_stamp}/{_REGION}/{_SERVICE}/aws4_request"
+        string_to_sign = "\n".join([
+            "AWS4-HMAC-SHA256", amz_date, credential_scope,
+            hashlib.sha256(canonical_request.encode()).hexdigest(),
+        ])
+        signature = hmac.new(
+            _signing_key(self._secret_key, date_stamp), string_to_sign.encode(), hashlib.sha256
+        ).hexdigest()
+        auth = (
+            f"AWS4-HMAC-SHA256 Credential={self._access_key}/{credential_scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        request_headers = {k: v for k, v in headers.items() if k != "host"}
+        request_headers["Authorization"] = auth
+
+        # Built and sent as one already-encoded URL (not httpx's `params=`)
+        # so what's sent is byte-for-byte what was just signed — a second,
+        # independent re-encoding pass risks disagreeing on the exact
+        # percent-encoding of a continuation token and failing signature
+        # verification.
+        r = await client.get(f"https://{self._host}{canonical_uri}?{canonical_query}", headers=request_headers)
+        if r.status_code >= 300:
+            raise R2Error(r.status_code, r.text)
+        keys = re.findall(r"<Key>(.*?)</Key>", r.text)
+        next_token = None
+        if "<IsTruncated>true</IsTruncated>" in r.text:
+            m = re.search(r"<NextContinuationToken>(.*?)</NextContinuationToken>", r.text)
+            next_token = m.group(1) if m else None
+        return {"keys": keys, "next_token": next_token}
 
     async def remove(self, key: str) -> None:
         client = self._require()

@@ -48,12 +48,20 @@ If the backend runs on Cloud Run instead:
    CRON_SECRET=the-same-value-as-ATLAS_CRON_SECRET \
    ./automation/cloud-scheduler-setup.sh
    ```
-   This creates two jobs (7am/4pm America/New_York, real IANA timezone — no
-   UTC math needed) that call `/integrations/cron/schoology/sync` with an
-   `X-Cron-Secret` header — the same endpoint accepts either that header or
+   This creates three jobs: the twice-daily Schoology sync (7am/4pm
+   America/New_York, real IANA timezone — no UTC math needed), and a daily
+   storage-cleanup sweep (9am) that finalizes document deletions — deleting
+   a document in the app removes it immediately, but its R2 file itself is
+   only queued for removal and stays recoverable for 24h (see
+   `app.services.storage_cleanup`); this job is what actually clears it out
+   once that window passes. All three call their endpoint with an
+   `X-Cron-Secret` header — the same endpoints accept either that header or
    Vercel's Bearer-token form, so no code changes are needed either way.
 3. Once Cloud Run is live, the `crons` block in `vercel.json` becomes dead
    weight (nothing left on Vercel for it to call) — fine to leave or remove.
+4. Already ran this script before the storage-cleanup job existed? Re-run
+   it (or just create that one job by hand) — it's additive, existing jobs
+   are untouched.
 
 ## n8n blueprints (for jobs with no native scheduler yet)
 

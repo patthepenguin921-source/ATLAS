@@ -39,6 +39,20 @@ gcloud scheduler jobs create http atlas-schoology-sync-afternoon \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
   --description="Atlas: afternoon Schoology sync (all connected users)"
 
+# Deleting a document in the app queues its R2 file for removal after a
+# 24-hour grace period instead of deleting it immediately (see
+# app.services.storage_cleanup) — this sweep is what actually removes
+# whatever's aged past that window. Once a day is plenty.
+gcloud scheduler jobs create http atlas-storage-cleanup \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" \
+  --schedule="0 9 * * *" \
+  --time-zone="America/New_York" \
+  --uri="${CLOUD_RUN_URL}/api/v1/documents/cron/purge-deleted" \
+  --http-method=GET \
+  --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --description="Atlas: purge R2 files whose 24h delete grace period has passed"
+
 echo "Created. Verify with:"
 echo "  gcloud scheduler jobs list --project=$PROJECT_ID --location=$LOCATION"
 echo "Run one immediately with:"

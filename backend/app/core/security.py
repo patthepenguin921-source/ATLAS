@@ -10,9 +10,10 @@ user's behalf using the service-role key, always scoping to this user id.
 """
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 from app.config import settings
 from app.core.supabase_client import SupabaseError, supabase
@@ -53,3 +54,23 @@ async def get_current_user(
     if not sub:
         raise HTTPException(status_code=401, detail="Token missing subject.")
     return CurrentUser(id=sub, email=user.get("email"), role=user.get("role", "authenticated"))
+
+
+def check_cron_secret(request: Request) -> None:
+    """Auth for unattended scheduler calls (integrations sync, storage
+    cleanup, …) — no user session exists, so this checks a shared secret
+    instead of a bearer JWT. Accepts either the `Authorization: Bearer
+    <secret>` header Vercel Cron sends automatically when `CRON_SECRET` is
+    set, or a plain `X-Cron-Secret` header for other schedulers (n8n,
+    curl, …)."""
+    if not settings.atlas_cron_secret:
+        raise HTTPException(
+            503, "Automated jobs aren't configured — set ATLAS_CRON_SECRET on the backend."
+        )
+    auth = request.headers.get("authorization") or ""
+    provided = (
+        auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else
+        request.headers.get("x-cron-secret") or ""
+    )
+    if not provided or not hmac.compare_digest(provided, settings.atlas_cron_secret):
+        raise HTTPException(401, "Bad or missing cron secret.")

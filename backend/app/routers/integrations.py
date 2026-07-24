@@ -6,13 +6,11 @@ Automation (n8n) can also call these endpoints on a schedule.
 """
 from __future__ import annotations
 
-import hmac
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app.config import settings
-from app.core.security import CurrentUser, get_current_user
+from app.core.security import CurrentUser, check_cron_secret, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.integrations import (
     PROVIDERS,
@@ -104,31 +102,12 @@ async def cancel_provider_sync(provider: str, user: CurrentUser = Depends(get_cu
     return await cancel_sync(provider, user.id)
 
 
-def _check_cron_secret(request: Request) -> None:
-    """Auth for unattended scheduler calls — no user session exists, so this
-    checks a shared secret instead of a bearer JWT. Accepts either the
-    `Authorization: Bearer <secret>` header Vercel Cron sends automatically
-    when `CRON_SECRET` is set, or a plain `X-Cron-Secret` header for other
-    schedulers (n8n, curl, …)."""
-    if not settings.atlas_cron_secret:
-        raise HTTPException(
-            503, "Automated sync isn't configured — set ATLAS_CRON_SECRET on the backend."
-        )
-    auth = request.headers.get("authorization") or ""
-    provided = (
-        auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else
-        request.headers.get("x-cron-secret") or ""
-    )
-    if not provided or not hmac.compare_digest(provided, settings.atlas_cron_secret):
-        raise HTTPException(401, "Bad or missing cron secret.")
-
-
 async def _cron_sync_provider(provider: str, request: Request):
     """Automated sync trigger for schedulers (Vercel Cron, n8n, …) — runs the
     given provider's sync for every user who has it connected & enabled.
     Secured by ATLAS_CRON_SECRET instead of a user session; see
-    `_check_cron_secret`."""
-    _check_cron_secret(request)
+    `check_cron_secret`."""
+    check_cron_secret(request)
     if provider not in PROVIDERS:
         raise HTTPException(400, f"Unknown provider. Known: {list(PROVIDERS)}")
     return await run_sync_for_all(provider)

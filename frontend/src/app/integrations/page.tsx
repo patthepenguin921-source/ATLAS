@@ -309,7 +309,12 @@ export default function IntegrationsPage() {
     setError(null);
     setLastResult(null);
     try {
-      const result = await apiPost<SyncResult>(`/integrations/${provider}/sync`);
+      // The backend gives up on its own after 270s (SYNC_TIMEOUT_SECONDS) and
+      // returns a real error response — this client-side timeout is just
+      // slightly above that, as a backstop for a connection that stalls
+      // without ever coming back (dropped, or silently held by a proxy),
+      // so the UI surfaces a real error instead of spinning forever.
+      const result = await apiPost<SyncResult>(`/integrations/${provider}/sync`, undefined, 285_000);
       setLastResult(result);
       await load();
     } catch (err: any) {
@@ -429,6 +434,7 @@ export default function IntegrationsPage() {
                     {powerschool.status === "running" && (
                       <button
                         className="btn-ghost"
+                        title="Clears a stuck sync so you can try again. If it's genuinely still running in the background, it may briefly show as running again once it finishes."
                         disabled={cancelingProvider === "powerschool"}
                         onClick={() => cancelSync("powerschool")}
                       >
@@ -453,6 +459,10 @@ export default function IntegrationsPage() {
               </div>
             </div>
           </div>
+
+          {error && (
+            <div className="card mt-4 text-sm text-atlas-bad">{error}</div>
+          )}
 
           {lastResult && (
             <div className="card mt-4 text-sm">
@@ -543,6 +553,7 @@ export default function IntegrationsPage() {
                     {schoology.status === "running" && (
                       <button
                         className="btn-ghost"
+                        title="Clears a stuck sync so you can try again. If it's genuinely still running in the background, it may briefly show as running again once it finishes."
                         disabled={cancelingProvider === "schoology"}
                         onClick={() => cancelSync("schoology")}
                       >

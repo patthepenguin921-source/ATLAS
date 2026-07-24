@@ -196,7 +196,7 @@ def test_connect_with_login_only_stores_scraper_credentials_and_syncs(crypto_key
     async def _fake_verify_login(self, user_id):
         return {"status": "success"}
 
-    async def _fake_sync(self, user_id):
+    async def _fake_sync(self, user_id, *, deadline=None):
         return {"courses": 1, "documents": 2, "errors": []}
 
     monkeypatch.setattr(SchoologyProvider, "verify_materials_login", _fake_verify_login)
@@ -238,7 +238,7 @@ def test_connect_with_optional_api_key_verifies_and_merges_credentials(crypto_ke
     async def _fake_verify_login(self, user_id):
         return {"status": "success"}
 
-    async def _fake_sync(self, user_id):
+    async def _fake_sync(self, user_id, *, deadline=None):
         return {"courses": 4, "errors": []}
 
     monkeypatch.setattr(SchoologyProvider, "verify", _fake_api_verify)

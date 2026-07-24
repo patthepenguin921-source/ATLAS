@@ -14,7 +14,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app.config import settings
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
-from app.integrations import PROVIDERS, cancel_sync, reconcile_stale_syncs, run_sync, run_sync_for_all
+from app.integrations import (
+    PROVIDERS,
+    cancel_sync,
+    reconcile_stale_syncs,
+    run_sync,
+    run_sync_for_all,
+    run_sync_step,
+)
 from app.integrations.powerschool import encrypt_credentials, encrypt_session_cookie
 from app.integrations.powerschool_client import PowerSchoolClient
 from app.integrations.schoology import (
@@ -78,9 +85,13 @@ async def create_integration(body: GenericBody, user: CurrentUser = Depends(get_
 
 @router.post("/{provider}/sync")
 async def sync_provider(provider: str, user: CurrentUser = Depends(get_current_user)):
+    """Runs one chunk of the sync and returns right away — a large account
+    can take several chunks to finish (see `run_sync_step`'s docstring). A
+    `status: "running"` response means more chunks remain; the frontend
+    calls this again until it gets something else."""
     if provider not in PROVIDERS:
         raise HTTPException(400, f"Unknown provider. Known: {list(PROVIDERS)}")
-    return await run_sync(provider, user.id)
+    return await run_sync_step(provider, user.id)
 
 
 @router.post("/{provider}/cancel")

@@ -309,13 +309,25 @@ export default function IntegrationsPage() {
     setError(null);
     setLastResult(null);
     try {
-      // The backend gives up on its own after 270s (SYNC_TIMEOUT_SECONDS) and
-      // returns a real error response — this client-side timeout is just
-      // slightly above that, as a backstop for a connection that stalls
-      // without ever coming back (dropped, or silently held by a proxy),
-      // so the UI surfaces a real error instead of spinning forever.
-      const result = await apiPost<SyncResult>(`/integrations/${provider}/sync`, undefined, 285_000);
-      setLastResult(result);
+      // A real account's sync can take several chunks to finish (see
+      // run_sync_step's docstring on the backend) — each call only ever
+      // runs one bounded chunk and comes back in well under a couple
+      // minutes, so this loops, calling again whenever the response says
+      // there's more to do, instead of holding one request open for the
+      // sync's entire duration (the fragile pattern — a dropped WiFi, a
+      // laptop going to sleep, a proxy's idle timeout — that made "Sync
+      // now" unreliable in the first place). The per-call timeout here is
+      // a backstop for a connection that stalls without ever coming back;
+      // it's comfortably above the backend's own per-chunk timeout so that
+      // one wins first in the normal case.
+      let result: SyncResult;
+      let chunks = 0;
+      const MAX_CHUNKS = 60; // generous ceiling against a runaway loop, not a real-world limit
+      do {
+        result = await apiPost<SyncResult>(`/integrations/${provider}/sync`, undefined, 170_000);
+        setLastResult(result);
+        chunks += 1;
+      } while (result.status === "running" && chunks < MAX_CHUNKS);
       await load();
     } catch (err: any) {
       setError(err.message ?? "Sync failed.");
@@ -482,6 +494,14 @@ export default function IntegrationsPage() {
                       Some courses didn't fully sync: {lastResult.errors.join("; ")}
                     </div>
                   )}
+                </>
+              ) : lastResult.status === "running" ? (
+                <>
+                  <div className="font-medium text-atlas-warn mb-1">Syncing…</div>
+                  <div className="text-atlas-muted">
+                    {lastResult.courses ?? 0} course{lastResult.courses === 1 ? "" : "s"} processed so
+                    far — a lot of courses can take a few passes like this to finish.
+                  </div>
                 </>
               ) : (
                 <div className="text-atlas-bad">{lastResult.detail ?? "Sync did not complete."}</div>

@@ -10,8 +10,16 @@ class IntegrationProvider:
     name: str = "base"
     status: str = "stub"  # stub | beta | stable
 
-    async def sync(self, user_id: str) -> dict[str, Any]:
-        """Pull remote data and upsert into Atlas. Override per provider."""
+    async def sync(self, user_id: str, *, deadline: float | None = None) -> dict[str, Any]:
+        """Pull remote data and upsert into Atlas. Override per provider.
+
+        `deadline` (an `asyncio.get_event_loop().time()`-comparable monotonic
+        timestamp) is an optional hint that the caller wants this call to
+        stop and return early — with `report["continue"] = True` and enough
+        state saved to resume — rather than run to full completion. Only
+        providers that actually support chunked/resumable syncing need to
+        honor it (see `SchoologyProvider.sync`); the default here (and
+        providers that ignore the kwarg) just run to completion as before."""
         raise NotImplementedError(
             f"The {self.name} provider is a scaffold. Implement `sync()` with the "
             "district's API/OAuth to enable automatic import."

@@ -893,6 +893,89 @@ def test_sync_login_only_discovers_courses_and_pulls_materials(fake_db, monkeypa
     assert any("Syllabus.pdf" in d["title"] for d in docs)
 
 
+def test_chunked_resume_restores_the_session_instead_of_logging_in_again(fake_db, monkeypatch):
+    """A resumed chunk must not perform a real login — each chunk is a
+    separate request with its own fresh client, and a real login per chunk
+    is the repeated-automated-login pattern that risks tripping Schoology's
+    bot detection (the reported "works the first time, then times out on
+    anything within about an hour" symptom). The first (deadline-cut) chunk
+    should export cookies into `_sync_progress`; the second (resumed) chunk
+    should restore them and skip `login()` entirely."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
+
+    integration_config: dict[str, Any] = {}
+    # `_save_sync_progress`/`_clear_sync_progress` go through the real
+    # `_load_integration` + `supabase.update("integrations", ...)`, so a
+    # matching row needs to actually exist in the fake DB for those to find
+    # and mutate (unlike the rest of this test file's fixtures, which mostly
+    # monkeypatch `_load_integration` directly and never touch this table).
+    fake_db.tables["integrations"] = [{
+        "id": "int-1", "user_id": USER_ID, "provider": "schoology",
+        "secret_ref": "x", "config": integration_config,
+    }]
+
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+
+    login_calls = {"count": 0}
+
+    class _SessionScraper(_FakeScraperClient):
+        async def login(self):
+            login_calls["count"] += 1
+
+        def export_cookies(self):
+            return [{"name": "session", "value": "tok-abc", "domain": "d.schoology.com", "path": "/"}]
+
+        def restore_cookies(self, cookies):
+            self.restored_with = cookies
+
+    scraper = _SessionScraper(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                      kind="item", material_type="File", folder_path="Unit 1")],
+        courses=[
+            {"id": "sec-bio", "name": "AP Biology"},
+            {"id": "sec-hist", "name": "AP US History"},
+        ],
+    )
+
+    async def _fake_unauthenticated(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_unauthenticated_scraper_client", _fake_unauthenticated)
+
+    # First chunk: deadline already passed, so it should stop after
+    # discovery, before walking any course, and save progress + cookies.
+    report1: dict[str, Any] = {
+        "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
+        "documents": 0, "links": 0, "announcements": 0, "skipped": 0, "errors": [],
+    }
+    asyncio.run(
+        provider._sync_materials_only(USER_ID, {"secret_ref": "x", "config": {}}, report1, deadline=0.0)
+    )
+    assert report1.get("continue") is True
+    assert login_calls["count"] == 1  # the first chunk still had to log in for real
+
+    saved_config = fake_db.tables["integrations"][0]["config"]
+    progress = saved_config["_sync_progress"]
+    assert progress["cookies"] == scraper.export_cookies()
+    integration_config.clear()
+    integration_config.update(saved_config)
+
+    # Second chunk: resumes with the saved cookies, no deadline this time —
+    # must restore the session rather than logging in again.
+    report2: dict[str, Any] = {
+        "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
+        "documents": 0, "links": 0, "announcements": 0, "skipped": 0, "errors": [],
+    }
+    asyncio.run(provider._sync_materials_only(
+        USER_ID, {"secret_ref": "x", "config": integration_config}, report2, deadline=None,
+    ))
+
+    assert login_calls["count"] == 1  # still just the one real login, not a second
+    assert scraper.restored_with == progress["cookies"]
+    assert not report2.get("continue")
+
+
 def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypatch):
     provider = SchoologyProvider()
     scraper = _FakeScraperClient(

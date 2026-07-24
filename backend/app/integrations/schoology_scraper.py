@@ -278,6 +278,34 @@ class SchoologyScraperClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    def export_cookies(self) -> list[dict[str, str]]:
+        """Serializable snapshot of this session's cookies — lets a later,
+        separate `SchoologyScraperClient` instance resume the same
+        authenticated session via `restore_cookies` instead of logging in
+        again. This exists because of chunked/resumable syncing (see
+        `SchoologyProvider._sync_materials_only`): each chunk is a separate
+        HTTP request with its own fresh client instance, and without this,
+        every chunk would do a real username/password login — repeated real
+        logins in quick succession is exactly the automated-login burst
+        `_login_app_domain`'s docstring already warns trips a site's bot
+        detection, just now happening once per chunk instead of only when
+        retried on failure."""
+        return [
+            {"name": c.name, "value": c.value, "domain": c.domain, "path": c.path}
+            for c in self._client.cookies.jar
+        ]
+
+    def restore_cookies(self, cookies: list[dict[str, str]]) -> None:
+        """Resume a session captured by `export_cookies`, skipping a real
+        login. Only stands in for the district-subdomain login
+        (`self.login()`) — `_app_logged_in` (app.schoology.com, parent
+        accounts only) is left alone and still verifies itself for real the
+        first time it's actually needed, since this snapshot can't tell the
+        two sessions' cookies apart with full confidence."""
+        for c in cookies:
+            self._client.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"])
+        self._logged_in = True
+
     @staticmethod
     def _find_login_form(soup: BeautifulSoup):
         return soup.find("form", id="s-user-login-form") or next(

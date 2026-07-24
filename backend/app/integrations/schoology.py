@@ -280,11 +280,14 @@ class SchoologyProvider(IntegrationProvider):
             await client.aclose()
 
     # ---- materials scraper (bypasses the blocked Courses-realm API) ----
-    async def _scraper_client(self, user_id: str) -> SchoologyScraperClient:
-        """Load this user's saved materials-scraper login (if configured) and
-        return a logged-in client. Raises a clear error if materials-scraper
-        credentials haven't been saved yet, or if the domain is missing, or
-        if login itself fails — every case a caller needs to distinguish."""
+    async def _unauthenticated_scraper_client(self, user_id: str) -> SchoologyScraperClient:
+        """Construct a not-yet-logged-in client from this user's saved
+        materials-scraper credentials. Shared by `_scraper_client` (logs in
+        for real) and `_sync_materials_only`'s chunk-resume path (restores a
+        saved session's cookies instead of logging in again — see
+        `SchoologyScraperClient.restore_cookies`). Raises a clear error if
+        materials-scraper credentials haven't been saved yet, or the domain
+        is missing."""
         integration = await self._load_integration(user_id)
         creds = decrypt_json(integration["secret_ref"])
         if not creds.get("schoology_username") or not creds.get("schoology_password"):
@@ -299,7 +302,14 @@ class SchoologyProvider(IntegrationProvider):
                 "Materials access needs your Schoology web address (e.g. "
                 "https://yourdistrict.schoology.com) — add it in the Schoology connect form."
             )
-        client = SchoologyScraperClient(domain, creds["schoology_username"], creds["schoology_password"])
+        return SchoologyScraperClient(domain, creds["schoology_username"], creds["schoology_password"])
+
+    async def _scraper_client(self, user_id: str) -> SchoologyScraperClient:
+        """Load this user's saved materials-scraper login (if configured) and
+        return a logged-in client. Raises a clear error if materials-scraper
+        credentials haven't been saved yet, or if the domain is missing, or
+        if login itself fails — every case a caller needs to distinguish."""
+        client = await self._unauthenticated_scraper_client(user_id)
         try:
             await client.login()
         except SchoologyScraperAuthError:
@@ -1113,14 +1123,24 @@ class SchoologyProvider(IntegrationProvider):
         `integrations.config._sync_progress` and `report["continue"]` is set
         — the caller (`app.integrations.run_sync`) leaves the row "running"
         and the next chunked call resumes from exactly there instead of
-        re-discovering and re-counting from scratch."""
+        re-discovering and re-counting from scratch. The scraper *session*
+        (cookies, via `SchoologyScraperClient.export_cookies`) is saved
+        alongside it and restored on the next chunk instead of logging in
+        again — each chunk is a separate HTTP request with its own client
+        instance, and a real login per chunk is exactly the repeated-
+        automated-login pattern that risks tripping Schoology's own bot
+        detection (see `export_cookies`'s docstring)."""
         config = integration.get("config") or {}
         google_token = config.get("google_access_token")
         progress = config.get("_sync_progress")
         resuming = bool(progress and progress.get("pending") is not None)
 
         try:
-            scraper = await self._scraper_client(user_id)
+            if resuming and progress.get("cookies"):
+                scraper = await self._unauthenticated_scraper_client(user_id)
+                scraper.restore_cookies(progress["cookies"])
+            else:
+                scraper = await self._scraper_client(user_id)
         except SchoologyScraperAuthError as e:
             report["errors"].append(f"Schoology materials (scrape login): {e}")
             return
@@ -1175,7 +1195,7 @@ class SchoologyProvider(IntegrationProvider):
             remaining = list(linked)
             while remaining:
                 if deadline is not None and time.monotonic() >= deadline:
-                    await self._save_sync_progress(user_id, remaining, report)
+                    await self._save_sync_progress(user_id, remaining, report, scraper)
                     report["continue"] = True
                     return
                 course_id, name, section_id, student_uid = remaining.pop(0)
@@ -1191,8 +1211,14 @@ class SchoologyProvider(IntegrationProvider):
                 )
                 report["courses"] += 1
 
-            # Every course in this cycle finished — drop any leftover resume
-            # state (a no-op if this cycle never needed to chunk at all).
+            # Every course in this cycle finished. A resumed chunk's `report`
+            # started as a *copy* of the last saved chunk's report (which,
+            # having itself hit the deadline, has `continue: True` baked
+            # in) — clear it now that the cycle has actually completed, or
+            # the caller (`app.integrations._run_chunk`) would read this as
+            # "still more to do" forever and the row would never leave
+            # "running" even though nothing is left to sync.
+            report.pop("continue", None)
             await self._clear_sync_progress(user_id)
         finally:
             await scraper.aclose()
@@ -1200,16 +1226,21 @@ class SchoologyProvider(IntegrationProvider):
     async def _save_sync_progress(
         self, user_id: str,
         pending: list[tuple[str, str, str, str | None]], report: dict[str, Any],
+        scraper: SchoologyScraperClient,
     ) -> None:
         """Persist where a chunked `_sync_materials_only` run stopped, so the
         next call resumes instead of re-discovering and re-counting from
-        scratch. Re-reads `config` first rather than trusting a stale copy,
-        since a "Sync now" retry and a resumed chunk shouldn't be able to
-        stomp each other's unrelated config edits (e.g. an in-progress
-        "Edit login")."""
+        scratch — including the scraper's live session (see
+        `export_cookies`), so resuming doesn't mean logging in again.
+        Re-reads `config` first rather than trusting a stale copy, since a
+        "Sync now" retry and a resumed chunk shouldn't be able to stomp each
+        other's unrelated config edits (e.g. an in-progress "Edit login")."""
         integration = await self._load_integration(user_id)
         config = dict(integration.get("config") or {})
-        config["_sync_progress"] = {"pending": [list(item) for item in pending], "report": report}
+        config["_sync_progress"] = {
+            "pending": [list(item) for item in pending], "report": report,
+            "cookies": scraper.export_cookies(),
+        }
         await supabase.update(
             "integrations", {"config": config},
             filters={"user_id": eq(user_id), "provider": eq(self.name)},

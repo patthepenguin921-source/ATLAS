@@ -34,6 +34,7 @@ Analyze this document and return JSON:
   "summary": "3-5 sentence summary",
   "keywords": ["..."],
   "doc_type": "pdf|powerpoint|notes|announcement|study_guide|essay|practice_problems|rubric|personal_note|email|image|other",
+  "importance": "how much this document matters for the student to study/keep track of — 'high' for things like a syllabus, study guide, rubric, or exam review; 'low' for routine/low-stakes items like a single class announcement or a slide deck that just repeats the textbook; 'normal' for everything in between",
   "concepts": [
     {{"name": "canonical concept name", "description": "one line", "subject": "..."}}
   ]
@@ -55,6 +56,20 @@ DOCUMENT:
         # one (a filename-derived placeholder gets replaced by the AI title).
         if title and rename_untitled:
             update["title"] = title
+
+        importance = data.get("importance")
+        if importance in ("low", "normal", "high"):
+            # Never override a student's own manual rating (see
+            # `update_document`'s `importance_source` handling) — only ever
+            # set it here when it's still AI-sourced or has never been set.
+            existing = await supabase.select(
+                "documents", columns="importance_source",
+                filters={"id": eq(document_id)}, limit=1,
+            )
+            if not existing or existing[0].get("importance_source") != "manual":
+                update["importance"] = importance
+                update["importance_source"] = "ai"
+
         await supabase.update(
             "documents", update, filters={"id": eq(document_id)}
         )

@@ -148,7 +148,7 @@ async def list_documents(course_id: str | None = None, user: CurrentUser = Depen
     return await supabase.select(
         "documents",
         columns="id,title,doc_type,summary,keywords,course_id,ingested,size_bytes,"
-                 "needs_review,course_confidence,created_at",
+                 "needs_review,course_confidence,importance,created_at",
         filters=filters, order="created_at.desc", limit=200,
     )
 
@@ -225,7 +225,9 @@ async def bulk_upload_documents(
 async def update_document(
     document_id: str, body: DocumentPatchRequest, user: CurrentUser = Depends(get_current_user),
 ):
-    """Used by the bulk-upload review screen to correct an auto-detected course."""
+    """Used by the bulk-upload review screen to correct an auto-detected
+    course, and by the documents page to rename a document or override its
+    importance rating."""
     patch = body.model_dump(exclude_unset=True)
     if not patch:
         raise HTTPException(400, "No fields to update.")
@@ -233,6 +235,10 @@ async def update_document(
     # explicitly says otherwise.
     if "course_id" in patch and "needs_review" not in patch:
         patch["needs_review"] = False
+    # A human set this, not the Archivist — record that so a later
+    # re-enrichment (see Archivist.enrich) never quietly overwrites it.
+    if "importance" in patch:
+        patch["importance_source"] = "manual"
     rows = await supabase.update(
         "documents", patch, filters={"user_id": eq(user.id), "id": eq(document_id)}
     )

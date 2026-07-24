@@ -1,7 +1,7 @@
 """Pydantic request/response models for Atlas's API."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -62,11 +62,14 @@ class IngestTextRequest(BaseModel):
 
 
 class DocumentPatchRequest(BaseModel):
-    """Used by the bulk-upload review screen to correct an auto-detected course."""
+    """Used by the bulk-upload review screen to correct an auto-detected
+    course, and by the documents page to re-title a document or override
+    its importance rating."""
 
     course_id: Optional[str] = None
     title: Optional[str] = None
     needs_review: Optional[bool] = None
+    importance: Optional[Literal["low", "normal", "high"]] = None
 
 
 # ---- Courses ----

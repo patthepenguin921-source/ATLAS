@@ -5,15 +5,15 @@ import asyncio
 import uuid
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 from app.agents.archivist import Archivist
 from app.config import settings
 from app.core.r2_client import r2, safe_object_name
-from app.core.security import CurrentUser, get_current_user
+from app.core.security import CurrentUser, check_cron_secret, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.schemas import DocumentPatchRequest, DriveImportRequest, IngestTextRequest
-from app.services import ingestion
+from app.services import ingestion, storage_cleanup
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -312,10 +312,25 @@ async def delete_document(document_id: str, user: CurrentUser = Depends(get_curr
         "documents", columns="storage_path",
         filters={"user_id": eq(user.id), "id": eq(document_id)}, limit=1,
     )
-    # Remove the file before the row so a storage failure leaves the document
-    # (and its file) intact for retry instead of orphaning the file forever.
+    # The document disappears from the app immediately (the row goes now),
+    # but the underlying R2 file itself isn't removed inline — it's queued
+    # for a scheduled sweep after a 24-hour grace window (see
+    # app.services.storage_cleanup) instead, so a delete isn't instantly
+    # unrecoverable.
     storage_path = rows[0].get("storage_path") if rows else None
-    if storage_path:
-        await r2.remove(storage_path)
     await supabase.delete("documents", filters={"user_id": eq(user.id), "id": eq(document_id)})
+    if storage_path:
+        await storage_cleanup.queue_deletion(storage_path)
     return None
+
+
+@router.post("/cron/purge-deleted")
+@router.get("/cron/purge-deleted")
+async def purge_deleted_documents(request: Request):
+    """Scheduled sweep that actually removes from R2 whatever `delete_document`
+    queued more than `storage_cleanup.GRACE_PERIOD_HOURS` ago. GET: Vercel Cron
+    Jobs always invoke via GET. POST: kept for n8n/curl/other schedulers that
+    prefer it — both do the same thing. Secured by ATLAS_CRON_SECRET, same as
+    the integrations sync cron routes — see `check_cron_secret`."""
+    check_cron_secret(request)
+    return await storage_cleanup.purge_expired()

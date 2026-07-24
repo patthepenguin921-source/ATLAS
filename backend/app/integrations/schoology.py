@@ -795,22 +795,38 @@ class SchoologyProvider(IntegrationProvider):
         )
         return bool(rows)
 
+    async def _existing_document(self, user_id: str, external_id: str) -> dict[str, Any] | None:
+        rows = await supabase.select(
+            "documents", columns="id,storage_path",
+            filters={"user_id": eq(user_id), "external_id": eq(external_id),
+                     "external_source": eq(self.name)}, limit=1,
+        )
+        return rows[0] if rows else None
+
     async def _ingest_file(
         self, *, user_id: str, course_id: str, external_id: str, title: str,
         content: bytes, filename: str, content_type: str, doc_type: str = "other",
         extra_meta: dict[str, Any] | None = None, report: dict[str, Any] | None = None,
     ) -> bool:
         """Store + text-extract + embed a binary file (pdf/pptx/doc/…). Returns
-        True if newly ingested, False if it already existed (idempotent).
+        True if newly ingested, False if nothing new happened — either it
+        already existed with its original file safely stored (idempotent),
+        or a prior sync got the metadata/text saved but the R2 upload itself
+        failed (e.g. a large file exceeding the storage client's timeout),
+        in which case this retries *just* the upload against the existing
+        row instead of skipping it forever: a plain external_id check alone
+        can't tell "fully ingested" apart from "ingested everything except
+        the original file."
 
         Uploads the original bytes to R2 the same way a direct upload does
         (`routers/documents.py`'s `_store_and_ingest`) so the file has a
         `storage_path` and is actually viewable/downloadable from the app,
         not just searchable as extracted text — best-effort, same as there:
         a storage failure still lets the document be recorded and indexed."""
-        if await self._document_exists(user_id, external_id):
+        existing = await self._existing_document(user_id, external_id)
+        if existing and existing.get("storage_path"):
             return False
-        doc_id = str(uuid.uuid4())
+        doc_id = existing["id"] if existing else str(uuid.uuid4())
         storage_path = f"{user_id}/{doc_id}/{safe_object_name(filename)}"
         try:
             await r2.upload(storage_path, content, content_type or "application/octet-stream")
@@ -820,6 +836,15 @@ class SchoologyProvider(IntegrationProvider):
                 report["errors"].append(
                     f"{title}: downloaded but couldn't store the original file ({e})"
                 )
+        if existing:
+            # Metadata/text/embeddings already exist from a prior sync —
+            # only the original file itself needed retrying.
+            if storage_path:
+                await supabase.update(
+                    "documents", {"storage_path": storage_path, "size_bytes": len(content)},
+                    filters={"id": eq(doc_id)},
+                )
+            return False
         text = ""
         try:
             # extract_text is a synchronous, CPU-bound call (PyMuPDF layout
@@ -1407,13 +1432,20 @@ class SchoologyProvider(IntegrationProvider):
         — this method neither logs in nor closes it."""
         try:
             existing = await supabase.select(
-                "documents", columns="metadata",
+                "documents", columns="metadata,mime_type,storage_path",
                 filters={"user_id": eq(user_id), "course_id": eq(course_id),
                          "external_source": eq(self.name)},
             ) or []
+            # A row with `mime_type` set but no `storage_path` came from
+            # `_ingest_file` but its R2 upload failed (see that method's
+            # docstring) — left out of `known_names` so `walk_materials`
+            # surfaces it again instead of the failed upload being treated
+            # as "already known" forever; `_ingest_file` retries just the
+            # upload against the existing row rather than duplicating it.
             known_names = {
                 str((row.get("metadata") or {}).get("material_name") or "").strip().lower()
                 for row in existing
+                if not (row.get("mime_type") and not row.get("storage_path"))
             } - {""}
 
             materials_url = course_mapping.materials_url_for(section.id)

@@ -1110,6 +1110,47 @@ def test_sync_scraped_materials_surfaces_r2_upload_failure(fake_db, monkeypatch)
     assert doc["storage_path"] is None
 
 
+def test_next_sync_retries_storage_for_a_file_that_failed_to_upload(fake_db, monkeypatch):
+    """A document row left with `storage_path = null` by a previous sync's
+    failed R2 upload must not be treated as "already fully ingested" —
+    otherwise the plain external_id existence check skips it forever and
+    the original file is never actually retrievable, even after R2 recovers
+    or the underlying cause (e.g. too short a timeout for a large file) is
+    fixed. The next sync should retry just the upload, not re-download or
+    duplicate the row."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                       kind="item", material_type="File", folder_path="Unit 1")],
+        files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
+
+    async def _failing_upload(key, content, content_type):
+        raise RuntimeError("timed out")
+
+    monkeypatch.setattr(r2, "upload", _failing_upload)
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+    assert fake_db.tables["documents"][0]["storage_path"] is None
+
+    # R2 (or whatever was wrong) is fine now — sync again.
+    monkeypatch.setattr(r2, "upload", fake_db.r2.upload)
+    report2: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report2,
+    ))
+
+    assert report2["errors"] == []
+    assert len(fake_db.tables["documents"]) == 1  # repaired in place, not duplicated
+    doc = fake_db.tables["documents"][0]
+    assert doc["storage_path"]
+    assert fake_db.r2.objects[doc["storage_path"]] == b"%PDF-1.4 fake pdf bytes"
+
+
 def test_sync_scraped_materials_enriches_downloaded_files_with_llm(fake_db, monkeypatch):
     """A downloaded file gets the same summary/keywords/concept enrichment a
     direct upload gets (`routers/documents.py`'s `_store_and_ingest`) — this

@@ -5,7 +5,9 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Badge, Empty, Loading, Section } from "@/components/ui";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPatch } from "@/lib/api";
+
+const IMPORTANCE_LABEL: Record<string, string> = { low: "Low", normal: "Normal", high: "High" };
 
 export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
@@ -19,6 +21,18 @@ export default function DocumentDetailPage() {
       .then(setDoc)
       .catch((e: any) => setError(e.message));
   }, [id]);
+
+  // Archivist suggests a starting importance level when the document is
+  // ingested; this is the "adjustable after the fact" override — picking a
+  // value here marks it manual so a later re-enrichment never reverts it.
+  async function setImportance(importance: string) {
+    setDoc((prev: any) => (prev ? { ...prev, importance } : prev));
+    try {
+      await apiPatch(`/documents/${id}`, { importance });
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
 
   if (error) {
     return (
@@ -53,6 +67,18 @@ export default function DocumentDetailPage() {
       <div className="flex flex-wrap items-center gap-2 mb-6">
         <Badge tone={doc.ingested ? "good" : "warn"}>{doc.ingested ? "indexed" : "pending"}</Badge>
         {doc.keywords?.map((k: string) => <Badge key={k}>{k}</Badge>)}
+        <label className="flex items-center gap-1.5 text-sm text-atlas-muted ml-auto">
+          Importance
+          <select
+            className="input !w-28 text-xs py-1"
+            value={doc.importance ?? "normal"}
+            onChange={(e) => setImportance(e.target.value)}
+          >
+            {Object.entries(IMPORTANCE_LABEL).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        </label>
       </div>
 
       {doc.summary && (

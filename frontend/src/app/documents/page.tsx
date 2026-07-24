@@ -9,6 +9,8 @@ import { pickFromDrive, driveConfigured } from "@/lib/googleDrive";
 
 const ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
 
+const IMPORTANCE_LABEL: Record<string, string> = { low: "Low", normal: "Normal", high: "High" };
+
 type BulkResult = {
   filename: string;
   id?: string;
@@ -157,6 +159,19 @@ export default function DocumentsPage() {
     load();
   }
 
+  // Archivist suggests an initial importance level when a document is
+  // ingested; this is the "adjustable after the fact" override — picking a
+  // value here marks it manual so a later re-enrichment never reverts it
+  // (see the backend's `importance_source` handling).
+  async function setImportance(id: string, importance: string) {
+    setDocs((prev) => prev?.map((d) => (d.id === id ? { ...d, importance } : d)) ?? prev);
+    try {
+      await apiPatch(`/documents/${id}`, { importance });
+    } catch {
+      load(); // revert the optimistic update on failure
+    }
+  }
+
   const courseName = (id: string) => courses.find((c) => c.id === id)?.name ?? "—";
   const driveReady = driveConfigured();
 
@@ -258,6 +273,19 @@ export default function DocumentsPage() {
               <div className="flex flex-col items-end gap-2 shrink-0">
                 <Badge tone={d.ingested ? "good" : "warn"}>{d.ingested ? "indexed" : "pending"}</Badge>
                 {d.needs_review && <Badge tone="warn">check class</Badge>}
+                {d.importance === "high" && <Badge tone="accent">important</Badge>}
+                {d.importance === "low" && <Badge>low priority</Badge>}
+                <select
+                  className="input !w-28 text-xs py-1"
+                  value={d.importance ?? "normal"}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setImportance(d.id, e.target.value)}
+                  title="Importance"
+                >
+                  {Object.entries(IMPORTANCE_LABEL).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
                 <button
                   className="text-xs text-atlas-bad hover:underline"
                   onClick={async (e) => {

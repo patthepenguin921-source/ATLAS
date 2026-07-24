@@ -42,7 +42,8 @@ async def dashboard(user: CurrentUser = Depends(get_current_user)):
             (a.get("estimated_minutes") or 30) for a in ctx["upcoming"][:8]
         ),
         "at_risk": await analytics.at_risk_assignments(user.id, limit=5),
-        "predicted_gpa": await analytics.predicted_gpa(user.id, True),
+        "predicted_gpa_unweighted": await analytics.predicted_gpa(user.id, False),
+        "predicted_gpa_weighted": await analytics.predicted_gpa(user.id, True),
         "calendar": events,
         "announcements": announcements,
         "daily_plan": plan_rows[0] if plan_rows else None,

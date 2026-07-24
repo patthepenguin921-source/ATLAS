@@ -296,42 +296,42 @@ export default function CoursesPage() {
       </div>
 
       {completedGroups.length > 0 && (
-        <div className="mt-8">
+        <section className="mt-10 pt-6 border-t border-atlas-border">
           <button
-            className="text-xs font-semibold text-atlas-muted uppercase tracking-wide hover:text-atlas-text"
+            className="flex items-center gap-2 text-sm font-semibold text-atlas-muted hover:text-atlas-text mb-3"
             onClick={() => setShowCompleted((s) => !s)}
           >
-            {showCompleted ? "Hide" : "Show"} completed classes ({completedGroups.length})
+            <span className="transition-transform inline-block" style={{ transform: showCompleted ? "rotate(90deg)" : "none" }}>
+              ▸
+            </span>
+            Completed classes ({completedGroups.length})
           </button>
           {showCompleted && (
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 mt-3">
+            <div className="rounded-xl border border-atlas-border divide-y divide-atlas-border overflow-hidden">
               {completedGroups.map((g) => {
                 const c = g.primary;
                 return (
                   <div
                     key={g.key}
                     onClick={() => onCardClick(c.id)}
-                    className="card cursor-pointer opacity-60 hover:opacity-90 transition-opacity"
+                    className="flex items-center justify-between gap-4 px-4 py-2.5 cursor-pointer hover:bg-atlas-panel2 transition-colors"
                   >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <div className="font-medium">{c.name}</div>
-                        <div className="text-xs text-atlas-muted">{c.code || c.subject || "—"}</div>
-                      </div>
-                      <Badge tone="default">Completed</Badge>
+                    <div className="min-w-0">
+                      <span className="text-sm text-atlas-muted">{c.name}</span>
+                      <span className="text-xs text-atlas-muted/70 ml-2">{c.code || c.subject || ""}</span>
                     </div>
-                    <div className="mt-4 flex items-center justify-between">
-                      <span className="text-xs text-atlas-muted">Final grade</span>
-                      <span className="text-lg font-semibold text-atlas-muted">
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="text-sm text-atlas-muted tabular-nums">
                         {c.current_grade != null ? `${c.current_grade}% ${c.current_letter ?? ""}` : "—"}
                       </span>
+                      <Badge tone="default">Completed</Badge>
                     </div>
                   </div>
                 );
               })}
             </div>
           )}
-        </div>
+        </section>
       )}
     </AppShell>
   );

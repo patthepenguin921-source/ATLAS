@@ -74,9 +74,13 @@ If the backend runs on Cloud Run instead:
 Uploading a document only stores the file and creates a row (shown as
 "processing…" in the UI) — indexing (chunk/embed) and AI enrichment run
 separately, via `GET/POST /api/v1/documents/cron/process-pending`, on
-whichever scheduler your host uses (Vercel Cron every 5 minutes per
-`vercel.json`; Cloud Scheduler every 2 minutes via
-`cloud-scheduler-setup.sh` above).
+whichever scheduler your host uses: Cloud Scheduler every 2 minutes via
+`cloud-scheduler-setup.sh` above (uploads finish promptly), or Vercel Cron
+once a day per `vercel.json` (Vercel's Hobby plan rejects any cron schedule
+that fires more than once a day — `*/5 * * * *` gets the deploy itself
+rejected outright, not just throttled — so a Vercel-only deployment's
+uploads can sit "processing" for up to 24h; tighten the `vercel.json`
+schedule if you're on a paid plan that allows finer-grained crons).
 
 This is deliberately **not** a FastAPI `BackgroundTask` kicked off inline
 with the upload request, even though that seems like the obvious way to

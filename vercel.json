@@ -57,7 +57,7 @@
     },
     {
       "path": "/api/backend/api/v1/documents/cron/process-pending",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 12 * * *"
     }
   ]
 }

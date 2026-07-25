@@ -91,9 +91,8 @@ export default function DashboardPage() {
       const form = new FormData();
       form.append("file", file);
       form.append("course_id", uploadCourseId);
-      const res = await apiUpload("/documents/upload", form, setUploadPct);
-      const title = res.enrichment?.title;
-      setUploadStatus({ ok: true, text: `Ingested${title ? ` “${title}”` : ""}.` });
+      await apiUpload("/documents/upload", form, setUploadPct);
+      setUploadStatus({ ok: true, text: "Uploaded — processing in the background." });
       if (uploadFileRef.current) uploadFileRef.current.value = "";
     } catch (err: any) {
       setUploadStatus({ ok: false, text: err.message });

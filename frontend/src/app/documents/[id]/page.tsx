@@ -34,6 +34,17 @@ export default function DocumentDetailPage() {
     }
   }
 
+  async function rename() {
+    const title = window.prompt("Rename document:", doc.title)?.trim();
+    if (!title || title === doc.title) return;
+    setDoc((prev: any) => (prev ? { ...prev, title } : prev));
+    try {
+      await apiPatch(`/documents/${id}`, { title });
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
   if (error) {
     return (
       <AppShell title="Document" subtitle="Something went wrong">
@@ -56,6 +67,7 @@ export default function DocumentDetailPage() {
       actions={
         <>
           <Link href="/documents" className="btn-ghost">Back to documents</Link>
+          <button className="btn-ghost" onClick={rename}>Rename</button>
           {doc.download_url && (
             <a href={doc.download_url} target="_blank" rel="noopener noreferrer" className="btn-primary">
               Open original

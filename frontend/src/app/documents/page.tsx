@@ -179,7 +179,23 @@ export default function DocumentsPage() {
   }
 
   const courseName = (id: string) => courses.find((c) => c.id === id)?.name ?? "—";
+  // Completed classes (Schoology flips `is_active` false once a grading
+  // period ends) shouldn't be offered as a destination for new files —
+  // existing documents already filed under one still show up fine via
+  // `courseName` above, which isn't filtered.
+  const activeCourses = courses.filter((c) => c.is_active !== false);
   const driveReady = driveConfigured();
+
+  async function renameDocument(id: string, currentTitle: string) {
+    const title = window.prompt("Rename document:", currentTitle)?.trim();
+    if (!title || title === currentTitle) return;
+    setDocs((prev) => prev?.map((d) => (d.id === id ? { ...d, title } : d)) ?? prev);
+    try {
+      await apiPatch(`/documents/${id}`, { title });
+    } catch {
+      load(); // revert the optimistic update on failure
+    }
+  }
 
   return (
     <AppShell title="Documents" subtitle="Upload once — searchable forever">
@@ -207,7 +223,7 @@ export default function DocumentsPage() {
               required
             >
               <option value="">Select a class…</option>
-              {courses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {activeCourses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
           <div>
@@ -303,6 +319,15 @@ export default function DocumentsPage() {
                   ))}
                 </select>
                 <button
+                  className="text-xs text-atlas-muted hover:underline"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    renameDocument(d.id, d.title);
+                  }}
+                >
+                  rename
+                </button>
+                <button
                   className="text-xs text-atlas-bad hover:underline"
                   onClick={async (e) => {
                     e.stopPropagation();
@@ -336,7 +361,7 @@ export default function DocumentsPage() {
                 onChange={(e) => setReviewChoice((c) => ({ ...c, [r.id!]: e.target.value }))}
               >
                 <option value="">Select a class…</option>
-                {courses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                {activeCourses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
               <button
                 className="btn-ghost text-xs"

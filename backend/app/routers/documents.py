@@ -43,6 +43,41 @@ _REVIEW_CONFIDENCE_THRESHOLD = 0.6
 _PROCESS_BATCH_SIZE = 10
 _STALE_CLAIM_MINUTES = 10
 
+# ingestion.extract_text's layout-aware PDF pass (pymupdf4llm) is a plain
+# CPU-bound call with no timeout of its own — its running time scales with
+# a page's visual complexity, not just its size, and a large/dense PDF (a
+# real College Board Course and Exam Description was the case that
+# surfaced this — 150+ pages, hit this repeatedly across every processing
+# approach tried, not just this one) can make it hang effectively forever.
+# Bounding it and falling back to extract_text_fast (pypdf's much faster,
+# if less layout-accurate, walk) is what actually stops a claimed document
+# from sitting stuck: everything downstream (chunk/embed/enrich) already
+# has its own HTTP timeouts, but this step had none.
+_TEXT_EXTRACTION_TIMEOUT_SECONDS = 60
+_TEXT_EXTRACTION_FAST_TIMEOUT_SECONDS = 30
+
+
+async def _extract_text_bounded(content: bytes, mime_type: str, filename: str) -> str:
+    """`ingestion.extract_text`, but bounded — falls back to
+    `ingestion.extract_text_fast` if the layout-aware pass doesn't finish in
+    time, and to no text at all if even that doesn't. See the module-level
+    comment above for why this exists instead of just calling extract_text
+    directly."""
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(ingestion.extract_text, content, mime_type, filename),
+            timeout=_TEXT_EXTRACTION_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        pass
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(ingestion.extract_text_fast, content, mime_type, filename),
+            timeout=_TEXT_EXTRACTION_FAST_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return ""
+
 
 async def _prepare_and_store(
     *, user_id: str, course_id: str | None, content: bytes, filename: str,
@@ -101,12 +136,8 @@ async def _prepare_and_store(
     needs_review = False
     course_confidence: float | None = None
     if not course_id:
-        text = ""
-        try:
-            text = await asyncio.to_thread(ingestion.extract_text, content, content_type or "", filename or "")
-            if not text.strip() and ocr_text.strip():
-                text = ocr_text
-        except Exception:
+        text = await _extract_text_bounded(content, content_type or "", filename or "")
+        if not text.strip() and ocr_text.strip():
             text = ocr_text
 
         courses = await supabase.select(
@@ -196,10 +227,7 @@ async def _process_document(
         return
 
     filename = storage_path.rsplit("/", 1)[-1]
-    try:
-        text = await asyncio.to_thread(ingestion.extract_text, content, mime_type or "", filename)
-    except Exception:
-        text = ""
+    text = await _extract_text_bounded(content, mime_type or "", filename)
 
     # The document record already exists at this point, so a parsing/
     # indexing failure here shouldn't be fatal — mark it unindexed instead

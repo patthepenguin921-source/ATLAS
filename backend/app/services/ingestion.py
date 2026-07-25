@@ -98,6 +98,19 @@ def _sanitize_text(text: str) -> str:
 
 
 def extract_text(content: bytes, mime_type: str, filename: str = "") -> str:
+    """Best available extraction. For PDFs this is the layout-aware pass
+    (`_extract_pdf`, via `pymupdf4llm`) — real page-layout reconstruction,
+    not just a fast walk, which means its running time scales with a page's
+    visual complexity (columns, tables, embedded images), not just its
+    character count. A large, densely-laid-out PDF (a multi-hundred-page
+    College Board Course and Exam Description was the real case that
+    surfaced this) can make it run for a very long time — it's a plain
+    CPU-bound call with no timeout of its own, so nothing stops it early on
+    its own. Callers with a time budget (i.e. anything not already running
+    in a one-off script) should call this via `asyncio.wait_for` and fall
+    back to `extract_text_fast` on a timeout instead of just giving up on
+    text entirely — see `app.routers.documents._process_document`, the
+    cron this exists for."""
     name = (filename or "").lower()
     mt = (mime_type or "").lower()
     try:
@@ -107,6 +120,28 @@ def extract_text(content: bytes, mime_type: str, filename: str = "") -> str:
             return _sanitize_text(_extract_pptx(content))
     except Exception:
         pass  # fall through to plain-text decode
+    try:
+        return _sanitize_text(content.decode("utf-8", errors="ignore"))
+    except Exception:
+        return ""
+
+
+def extract_text_fast(content: bytes, mime_type: str, filename: str = "") -> str:
+    """Same as `extract_text`, except a PDF only ever gets pypdf's plain
+    content-stream walk (`_extract_pdf_fast`) — never the slow layout-aware
+    pass. Reading order can come out wrong for a multi-column page (see
+    `_extract_pdf`'s docstring), but it finishes fast and reliably even on
+    a huge/complex PDF, which is what matters for a bounded-time fallback
+    after `extract_text` times out."""
+    name = (filename or "").lower()
+    mt = (mime_type or "").lower()
+    try:
+        if "pdf" in mt or name.endswith(".pdf"):
+            return _sanitize_text(_extract_pdf_fast(content))
+        if "presentation" in mt or name.endswith((".pptx", ".ppt")):
+            return _sanitize_text(_extract_pptx(content))
+    except Exception:
+        pass
     try:
         return _sanitize_text(content.decode("utf-8", errors="ignore"))
     except Exception:
@@ -141,6 +176,10 @@ def _extract_pdf(content: bytes) -> str:
     except Exception:
         pass
 
+    return _extract_pdf_fast(content)
+
+
+def _extract_pdf_fast(content: bytes) -> str:
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(content))

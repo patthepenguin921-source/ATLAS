@@ -66,7 +66,7 @@ async def courses_overview(user_id: str) -> list[dict]:
     return await supabase.select(
         "courses",
         columns="id,name,code,subject,course_level,has_hn_prep_lab,has_ap_prep_lab,"
-                 "current_grade,current_letter,teacher_id",
+                 "current_grade,current_letter,teacher_id,is_active",
         filters={"user_id": eq(user_id)},
         order="name.asc",
     ) or []

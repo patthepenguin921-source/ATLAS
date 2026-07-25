@@ -117,6 +117,7 @@ export default function DashboardPage() {
 
   const courseName = (id: string) =>
     data?.courses?.find((c: any) => c.id === id)?.name ?? "—";
+  const activeCourses = (data?.courses ?? []).filter((c: any) => c.is_active !== false);
 
   return (
     <AppShell
@@ -212,7 +213,7 @@ export default function DashboardPage() {
                     required
                   >
                     <option value="">Select a class…</option>
-                    {data.courses?.map((c: any) => (
+                    {activeCourses.map((c: any) => (
                       <option key={c.id} value={c.id}>{c.name}</option>
                     ))}
                   </select>

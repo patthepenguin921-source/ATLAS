@@ -181,6 +181,19 @@ class R2Client:
         if r.status_code >= 300:
             raise R2Error(r.status_code, r.text)
 
+    async def download(self, key: str) -> bytes:
+        """Fetch an object's raw bytes back — used by the document-processing
+        cron, which runs in a separate request from the one that uploaded the
+        file and so can't just keep the bytes in memory."""
+        self._check_url_components(key)
+        client = self._require()
+        payload_hash = hashlib.sha256(b"").hexdigest()
+        headers = self._sign_request("GET", key, payload_hash=payload_hash)
+        r = await client.get(f"https://{self._host}{self._canonical_uri(key)}", headers=headers)
+        if r.status_code >= 300:
+            raise R2Error(r.status_code, r.text)
+        return r.content
+
     async def list_objects(
         self, *, prefix: str = "", continuation_token: str | None = None, max_keys: int = 1000,
     ) -> dict[str, Any]:

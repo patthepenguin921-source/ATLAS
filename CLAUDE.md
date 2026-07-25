@@ -53,7 +53,36 @@ twice daily at ~7:00 AM and ~4:00 PM America/New_York:
   DST since Vercel Cron is UTC-only).
 - Cloud Run: `automation/cloud-scheduler-setup.sh` → creates
   `atlas-{powerschool,schoology}-sync-{morning,afternoon}` jobs plus
-  `atlas-storage-cleanup`.
+  `atlas-storage-cleanup` and `atlas-document-processing`.
 - n8n (fallback, works regardless of host): `automation/lms-sync.workflow.json`.
 
 Full details: `automation/README.md`.
+
+## Document upload/indexing is cron-driven, not inline — and NOT a background task
+
+`POST /documents/upload` (and bulk-upload/Drive-import) only stores the
+file + creates a row (`ingested: false`, shown as "processing…") — it does
+**not** chunk/embed or AI-enrich inline, and does **not** hand that off to a
+FastAPI `BackgroundTask` either, even though that looks like the obvious fix
+for "don't block the response." A `GET/POST
+/documents/cron/process-pending` cron (same `ATLAS_CRON_SECRET` pattern,
+scheduled every 2–5 min) claims pending documents and does the actual
+chunk/embed/enrich work.
+
+**Why not just a `BackgroundTask`**: tried that first — it made the upload
+response fast, but on Cloud Run the document would sit at `ingested: false`
+forever with no error. Cloud Run only allocates CPU to a container while
+it's actively serving a request; a background task still running after the
+response is sent can get frozen mid-task with no guarantee it's ever
+scheduled again, so the code path that would eventually set
+`ingest_error` never got to run. Vercel's serverless runtime has the same
+risk. A scheduler hitting a real endpoint on an interval always gets
+genuine CPU for that call — same reasoning as every other cron in this
+app — so don't reach for `BackgroundTasks` here again without solving that
+problem first (e.g. confirming "CPU always allocated" is on for the Cloud
+Run service).
+
+If someone reports an upload "stuck processing": first check whether the
+`process-pending` scheduler is actually configured/deployed (the most
+common cause) before suspecting the ingestion code itself — see
+`automation/README.md`'s "Document processing" section.

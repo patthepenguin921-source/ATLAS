@@ -1,11 +1,26 @@
-"""Documents — upload, ingest (chunk+embed), enrich, and manage files."""
+"""Documents — upload, ingest (chunk+embed), enrich, and manage files.
+
+Indexing (chunk/embed) and AI enrichment run on a schedule
+(`/documents/cron/process-pending`), not inline with the upload request and
+not as a FastAPI `BackgroundTask` either. That used to seem like a free win —
+respond fast, keep working after — but in production on Cloud Run a
+background task kept alive past the response getting sent would sometimes
+just never finish: Cloud Run only allocates CPU to a container while it's
+actively serving a request, so once the response goes out the process can be
+frozen mid-task with no guarantee it's ever scheduled again. (Vercel's
+serverless runtime carries the same risk.) A scheduler hitting a real
+endpoint on an interval always gets genuine CPU for that call, the same way
+the PowerSchool/Schoology sync and storage-cleanup crons already do — so
+that's what actually finishes the work now.
+"""
 from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 from app.agents.archivist import Archivist
 from app.config import settings
@@ -21,29 +36,23 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 # double-check rather than trusted outright.
 _REVIEW_CONFIDENCE_THRESHOLD = 0.6
 
-
-def _schedule_finish(background_tasks: BackgroundTasks, result: dict, user_id: str, enrich: bool) -> None:
-    """Queue `_finish_ingest` with the fields `_prepare_and_store` produced —
-    shared by all three upload paths so none of them has to spell out the
-    same eight-argument call."""
-    background_tasks.add_task(
-        _finish_ingest, result["id"], user_id, result["content"], result["filename"],
-        result["content_type"], result["storage_path"], result["text"], result["ocr_text"],
-        enrich=enrich, auto_title=result["auto_title"],
-    )
+# How many not-yet-indexed documents the cron claims per invocation, and how
+# long a claim is honored before a later run is allowed to retry the same
+# document (in case whatever claimed it died mid-processing without ever
+# reporting an error) — same idea as app.integrations' STALE_RUNNING_MINUTES.
+_PROCESS_BATCH_SIZE = 10
+_STALE_CLAIM_MINUTES = 10
 
 
 async def _prepare_and_store(
     *, user_id: str, course_id: str | None, content: bytes, filename: str,
-    content_type: str, title: str | None,
+    content_type: str, title: str | None, enrich: bool,
 ) -> dict:
-    """Fast half of the pipeline: (convert images→PDF) → classify → record.
-    Returns immediately once the document row exists — with ``ingested:
-    false`` ("pending" in the UI) — so the caller can send the upload
-    response back right away. ``_finish_ingest`` (the slow half — storing the
-    original to R2, extracting its text if that wasn't already needed here,
-    chunking/embedding, and AI enrichment) runs afterward as a background
-    task; none of that has to block the response.
+    """(Convert images→PDF) → store to R2 → classify → record. This is *all*
+    that happens before the upload response goes out — the document row is
+    created with ``ingested: false`` ("pending" in the UI) and nothing else,
+    since indexing/enrichment now always run later via the processing cron
+    (see the module docstring for why).
 
     Used by direct upload, bulk upload, and Google Drive import so they all
     behave identically. ``title`` is optional; when omitted, the Archivist
@@ -52,8 +61,8 @@ async def _prepare_and_store(
     student's existing classes and low-confidence guesses are flagged via
     ``needs_review`` instead of being left unfiled. Auto-detection needs the
     document's text, so bulk upload is the one case that still extracts text
-    synchronously here — a direct upload already has its course, so text
-    extraction (the slow part for a big PDF) is deferred entirely.
+    synchronously here (the cron re-extracts it later for indexing — a small
+    duplicate cost, not worth a second persisted copy just to skip it).
     """
     if not content:
         raise HTTPException(400, "Empty file")
@@ -62,9 +71,7 @@ async def _prepare_and_store(
     # searchable), then normalize them to PDF so every document is a uniform,
     # viewable file. Both are synchronous, CPU-bound calls (Tesseract
     # subprocess, Pillow) — run off the event loop thread so a slow one can't
-    # block the whole worker. Kept synchronous (unlike PDF text extraction
-    # below) because it determines the actual stored filename/content-type
-    # the document row needs, and is comparatively fast either way.
+    # block the whole worker.
     ocr_text = ""
     if ingestion.is_image(content_type, filename):
         ocr_text = await asyncio.to_thread(ingestion.ocr_image, content)
@@ -78,12 +85,23 @@ async def _prepare_and_store(
     safe_name = safe_object_name(filename)
     storage_path = f"{user_id}/{doc_id}/{safe_name}"
 
+    # Store the original now — the processing cron needs to read it back
+    # later from a separate request, so (unlike text extraction below) this
+    # can't be deferred; there's nowhere to keep the raw bytes in the
+    # meantime. Best-effort: a storage failure still lets the document be
+    # recorded, just flagged so the cron doesn't try to process a file it
+    # can't fetch (see `_process_document`).
+    try:
+        await r2.upload(storage_path, content, content_type or "application/octet-stream")
+    except Exception:
+        storage_path = None
+
     # Auto-detect the course when none was supplied — the only case where
     # text has to be extracted before the response can go out.
-    text = ""
     needs_review = False
     course_confidence: float | None = None
     if not course_id:
+        text = ""
         try:
             text = await asyncio.to_thread(ingestion.extract_text, content, content_type or "", filename or "")
             if not text.strip() and ocr_text.strip():
@@ -112,10 +130,9 @@ async def _prepare_and_store(
             needs_review = True  # no classes exist yet — nothing to assign
 
     # Create the document record (fall back to filename as a placeholder
-    # title). `storage_path` is recorded now even though the upload to R2
-    # hasn't happened yet (that's in `_finish_ingest`) — it's a deterministic
-    # key, and `get_document`'s signed-download-URL lookup degrades fine if
-    # asked for it a moment before the background upload actually lands.
+    # title). `auto_title`/`enrich` persist what this request knew for the
+    # cron to pick up later, since it runs in a completely separate request
+    # with no access to this function's local variables.
     auto_title = not (title and title.strip())
     await supabase.insert("documents", {
         "id": doc_id, "user_id": user_id, "course_id": course_id,
@@ -123,42 +140,66 @@ async def _prepare_and_store(
         "mime_type": content_type, "size_bytes": len(content),
         "storage_path": storage_path,
         "needs_review": needs_review, "course_confidence": course_confidence,
+        "auto_title": auto_title, "enrich": enrich,
     })
 
     return {
-        "id": doc_id, "content": content, "filename": filename,
-        "content_type": content_type, "storage_path": storage_path,
-        "text": text, "ocr_text": ocr_text, "auto_title": auto_title,
-        "course_id": course_id, "needs_review": needs_review,
-        "course_confidence": course_confidence,
+        "id": doc_id, "course_id": course_id,
+        "needs_review": needs_review, "course_confidence": course_confidence,
     }
 
 
-async def _finish_ingest(
-    doc_id: str, user_id: str, content: bytes, filename: str, content_type: str,
-    storage_path: str, text: str, ocr_text: str, *, enrich: bool, auto_title: bool,
-) -> None:
-    """Slow half of the pipeline — store the original to R2, extract its text
-    if a course was already given (so `_prepare_and_store` skipped it),
-    chunk/embed, then AI enrichment. Runs as a background task after the
-    upload response has already gone back to the client; the document stays
-    ``ingested: false`` ("pending" in the UI) until this finishes, so
-    re-fetching the documents list shows live progress instead of the
-    request just hanging."""
-    try:
-        await r2.upload(storage_path, content, content_type or "application/octet-stream")
-    except Exception:
-        await supabase.update(
-            "documents", {"storage_path": None}, filters={"id": eq(doc_id)}
-        )
+def _stale_claim_cutoff() -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=_STALE_CLAIM_MINUTES)).isoformat()
 
-    if not text.strip():
-        try:
-            text = await asyncio.to_thread(ingestion.extract_text, content, content_type or "", filename or "")
-            if not text.strip() and ocr_text.strip():
-                text = ocr_text
-        except Exception:
-            text = ocr_text
+
+async def _claim_document(doc_id: str) -> bool:
+    """Atomically claim a pending document for the processing cron — an
+    UPDATE conditioned on the row still actually being unclaimed (or its
+    claim having gone stale), so two overlapping cron runs can't both start
+    processing the same document. Mirrors app.integrations._claim's
+    conditional-UPDATE pattern; returns whether *this* call won the claim."""
+    claimed = await supabase.update(
+        "documents", {"processing_started_at": datetime.now(timezone.utc).isoformat()},
+        filters={
+            "id": eq(doc_id), "ingested": eq(False), "ingest_error": "is.null",
+            "or": f"(processing_started_at.is.null,processing_started_at.lt.{_stale_claim_cutoff()})",
+        },
+    )
+    return bool(claimed)
+
+
+async def _process_document(
+    doc_id: str, user_id: str, storage_path: str | None, mime_type: str,
+    *, enrich: bool, auto_title: bool,
+) -> None:
+    """The actual indexing + enrichment work for one claimed document:
+    fetch the original back from R2, extract its text, chunk/embed, then AI
+    enrichment. Only ever called from the processing cron, one document at a
+    time — never inline with an upload request."""
+    if not storage_path:
+        await supabase.update(
+            "documents",
+            {"ingested": False, "ingest_error": "the original file was never stored"},
+            filters={"id": eq(doc_id)},
+        )
+        return
+
+    try:
+        content = await r2.download(storage_path)
+    except Exception as e:
+        await supabase.update(
+            "documents",
+            {"ingested": False, "ingest_error": f"couldn't fetch the stored file: {e}"[:500]},
+            filters={"id": eq(doc_id)},
+        )
+        return
+
+    filename = storage_path.rsplit("/", 1)[-1]
+    try:
+        text = await asyncio.to_thread(ingestion.extract_text, content, mime_type or "", filename)
+    except Exception:
+        text = ""
 
     # The document record already exists at this point, so a parsing/
     # indexing failure here shouldn't be fatal — mark it unindexed instead
@@ -211,7 +252,6 @@ async def get_document(document_id: str, user: CurrentUser = Depends(get_current
 
 @router.post("/upload", status_code=201)
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     course_id: str = Form(...),
     title: str | None = Form(default=None),
@@ -225,20 +265,13 @@ async def upload_document(
         user_id=user.id, course_id=course_id, content=content,
         filename=file.filename or "document",
         content_type=file.content_type or "application/octet-stream",
-        title=title,
+        title=title, enrich=enrich,
     )
-    _schedule_finish(background_tasks, result, user.id, enrich)
-    return {
-        "id": result["id"], "course_id": result["course_id"],
-        "needs_review": result["needs_review"],
-        "course_confidence": result["course_confidence"],
-        "processing": True,
-    }
+    return {**result, "processing": True}
 
 
 @router.post("/bulk-upload", status_code=201)
 async def bulk_upload_documents(
-    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     enrich: bool = Form(default=True),
     user: CurrentUser = Depends(get_current_user),
@@ -249,7 +282,7 @@ async def bulk_upload_documents(
     (by content). A file is always assigned a class — even a low-confidence
     guess — but guesses under the confidence threshold come back with
     ``needs_review: true`` so the student can fix them from the documents page.
-    Chunk/embed + AI enrichment for every file runs in the background, same
+    Indexing + AI enrichment for every file run on the processing cron, same
     as a single upload — the response comes back once each file is stored
     and classified, not once every file is fully indexed.
     """
@@ -263,14 +296,9 @@ async def bulk_upload_documents(
                 user_id=user.id, course_id=None, content=content,
                 filename=file.filename or "document",
                 content_type=file.content_type or "application/octet-stream",
-                title=None,
+                title=None, enrich=enrich,
             )
-            _schedule_finish(background_tasks, result, user.id, enrich)
-            results.append({
-                "filename": file.filename, "id": result["id"],
-                "course_id": result["course_id"], "needs_review": result["needs_review"],
-                "course_confidence": result["course_confidence"],
-            })
+            results.append({"filename": file.filename, **result})
         except HTTPException as e:
             results.append({"filename": file.filename, "error": str(e.detail)})
         except Exception as e:
@@ -305,10 +333,7 @@ async def update_document(
 
 
 @router.post("/import-drive", status_code=201)
-async def import_from_drive(
-    body: DriveImportRequest, background_tasks: BackgroundTasks,
-    user: CurrentUser = Depends(get_current_user),
-):
+async def import_from_drive(body: DriveImportRequest, user: CurrentUser = Depends(get_current_user)):
     """Import a file the user selected in the Google Drive picker.
 
     The frontend obtains a short-lived OAuth access token via the Google
@@ -349,15 +374,9 @@ async def import_from_drive(
 
     result = await _prepare_and_store(
         user_id=user.id, course_id=body.course_id, content=r.content,
-        filename=filename, content_type=content_type, title=body.name,
+        filename=filename, content_type=content_type, title=body.name, enrich=body.enrich,
     )
-    _schedule_finish(background_tasks, result, user.id, body.enrich)
-    return {
-        "id": result["id"], "course_id": result["course_id"],
-        "needs_review": result["needs_review"],
-        "course_confidence": result["course_confidence"],
-        "processing": True,
-    }
+    return {**result, "processing": True}
 
 
 @router.post("/ingest-text", status_code=201)
@@ -394,6 +413,53 @@ async def delete_document(document_id: str, user: CurrentUser = Depends(get_curr
     if storage_path:
         await storage_cleanup.queue_deletion(storage_path)
     return None
+
+
+async def _process_pending_documents() -> dict:
+    candidates = await supabase.select(
+        "documents", columns="id,user_id,storage_path,mime_type,enrich,auto_title",
+        filters={
+            "ingested": eq(False), "ingest_error": "is.null",
+            "or": f"(processing_started_at.is.null,processing_started_at.lt.{_stale_claim_cutoff()})",
+        },
+        limit=_PROCESS_BATCH_SIZE,
+    ) or []
+
+    processed, skipped, errors = 0, 0, 0
+    for row in candidates:
+        if not await _claim_document(row["id"]):
+            skipped += 1
+            continue
+        try:
+            await _process_document(
+                row["id"], row["user_id"], row.get("storage_path"), row.get("mime_type") or "",
+                enrich=row.get("enrich", True), auto_title=row.get("auto_title", False),
+            )
+            processed += 1
+        except Exception as e:  # noqa: BLE001
+            errors += 1
+            await supabase.update(
+                "documents", {"ingested": False, "ingest_error": str(e)[:500]},
+                filters={"id": eq(row["id"])},
+            )
+    return {"checked": len(candidates), "processed": processed, "skipped": skipped, "errors": errors}
+
+
+@router.post("/cron/process-pending")
+@router.get("/cron/process-pending")
+async def process_pending_documents(request: Request):
+    """Scheduled sweep that finishes indexing (chunk/embed) + AI-enriching
+    every document still sitting at ``ingested: false`` — see the module
+    docstring for why this runs on a schedule instead of inline with the
+    upload request or as a background task. Claims up to
+    `_PROCESS_BATCH_SIZE` documents per call; run every couple of minutes
+    (see automation/cloud-scheduler-setup.sh) so an upload finishes
+    processing promptly. GET: Vercel Cron Jobs always invoke via GET. POST:
+    kept for n8n/curl/other schedulers that prefer it. Secured by
+    ATLAS_CRON_SECRET, same as the other cron routes — see
+    `check_cron_secret`."""
+    check_cron_secret(request)
+    return await _process_pending_documents()
 
 
 @router.post("/cron/purge-deleted")

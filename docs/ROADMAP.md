@@ -46,11 +46,12 @@ Every phase produces a usable application. Status reflects what's in this repo.
 - [x] Calendar synchronization — Schoology events + assignment due dates flow
       into `calendar_events` (week-at-a-glance).
 - [x] Automatic document ingestion pipeline (usable now via upload/ingest-text)
-- [x] Automated Schoology sync — a built-in Vercel Cron trigger
-      (`GET /integrations/cron/schoology/sync`, secret-protected) runs the
-      sync for every connected user twice a day with zero extra
-      infrastructure; n8n blueprints remain available for jobs without a
-      native scheduler yet (daily plan, weekly review, retention refresh)
+- [x] Automated PowerSchool + Schoology sync — built-in Vercel Cron triggers
+      (`GET /integrations/cron/{schoology,powerschool}/sync`, secret-protected)
+      run each provider's sync for every connected user twice a day
+      (~7am/4pm America/New_York) with zero extra infrastructure; n8n
+      blueprints remain available for jobs without a native scheduler yet
+      (daily plan, weekly review, retention refresh)
 - [x] Completed classes — Schoology's per-section `active` flag now persists
       to `courses.is_active`, so a class whose grading period ended moves out
       of the main courses grid into a collapsed "Completed classes" section

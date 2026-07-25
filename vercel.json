@@ -37,10 +37,18 @@
   "crons": [
     {
       "path": "/api/backend/api/v1/integrations/cron/schoology/sync",
-      "schedule": "0 10 * * *"
+      "schedule": "0 11 * * *"
     },
     {
       "path": "/api/backend/api/v1/integrations/cron/schoology/sync",
+      "schedule": "0 20 * * *"
+    },
+    {
+      "path": "/api/backend/api/v1/integrations/cron/powerschool/sync",
+      "schedule": "0 11 * * *"
+    },
+    {
+      "path": "/api/backend/api/v1/integrations/cron/powerschool/sync",
       "schedule": "0 20 * * *"
     },
     {

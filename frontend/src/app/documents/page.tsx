@@ -41,6 +41,7 @@ export default function DocumentsPage() {
     const [d, c] = await Promise.all([apiGet("/documents"), apiGet("/courses")]);
     setDocs(d);
     setCourses(c);
+    return d;
   }
   useEffect(() => {
     load();
@@ -50,6 +51,18 @@ export default function DocumentsPage() {
       .then((r) => setBackendDown(!r.ok))
       .catch(() => setBackendDown(true));
   }, []);
+
+  // Chunk/embed + AI enrichment happen in the background after an upload
+  // responds (see backend's `_finish_ingest`), so a freshly uploaded
+  // document sits at `ingested: false` ("pending") for a bit. Poll gently
+  // while anything is still pending so the list flips to "indexed" on its
+  // own instead of requiring a manual refresh.
+  useEffect(() => {
+    const stillPending = docs?.some((d) => !d.ingested && !d.ingest_error);
+    if (!stillPending) return;
+    const timer = setInterval(load, 4000);
+    return () => clearInterval(timer);
+  }, [docs]);
 
   function requireCourse(): boolean {
     if (!courseId) {
@@ -79,11 +92,10 @@ export default function DocumentsPage() {
       const form = new FormData();
       form.append("file", file);
       form.append("course_id", courseId);
-      const res = await apiUpload("/documents/upload", form, setUploadPct);
-      const title = res.enrichment?.title;
+      await apiUpload("/documents/upload", form, setUploadPct);
       setStatus({
         ok: true,
-        text: `Ingested ${res.chunks} chunks${title ? ` · titled “${title}”` : ""}.`,
+        text: "Uploaded — processing in the background. It'll show as “indexed” below shortly.",
       });
       if (fileRef.current) fileRef.current.value = "";
       load();
@@ -102,17 +114,16 @@ export default function DocumentsPage() {
     try {
       const picked = await pickFromDrive();
       if (!picked) return; // canceled
-      const res = await apiPost("/documents/import-drive", {
+      await apiPost("/documents/import-drive", {
         file_id: picked.id,
         access_token: picked.accessToken,
         course_id: courseId,
         name: picked.name,
         mime_type: picked.mimeType,
       });
-      const title = res.enrichment?.title;
       setStatus({
         ok: true,
-        text: `Imported “${picked.name}”${title ? ` · titled “${title}”` : ""}.`,
+        text: `Imported “${picked.name}” — processing in the background.`,
       });
       load();
     } catch (err: any) {
@@ -303,7 +314,9 @@ export default function DocumentsPage() {
                 ) : null}
               </div>
               <div className="flex flex-col items-end gap-2 shrink-0">
-                <Badge tone={d.ingested ? "good" : "warn"}>{d.ingested ? "indexed" : "pending"}</Badge>
+                <Badge tone={d.ingested ? "good" : d.ingest_error ? "bad" : "warn"}>
+                  {d.ingested ? "indexed" : d.ingest_error ? "failed" : "processing…"}
+                </Badge>
                 {d.needs_review && <Badge tone="warn">check class</Badge>}
                 {d.importance === "high" && <Badge tone="accent">important</Badge>}
                 {d.importance === "low" && <Badge>low priority</Badge>}

@@ -5,7 +5,7 @@ import asyncio
 import uuid
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 
 from app.agents.archivist import Archivist
 from app.config import settings
@@ -22,12 +22,17 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 _REVIEW_CONFIDENCE_THRESHOLD = 0.6
 
 
-async def _store_and_ingest(
+async def _prepare_and_store(
     *, user_id: str, course_id: str | None, content: bytes, filename: str,
-    content_type: str, title: str | None, enrich: bool,
+    content_type: str, title: str | None,
 ) -> dict:
-    """Shared pipeline: (convert images→PDF) → store → classify → record →
-    chunk/embed → enrich.
+    """Fast half of the pipeline: (convert images→PDF) → store → classify →
+    record. Returns immediately once the document row exists — with
+    ``ingested: false`` ("pending" in the UI) — so the caller can send the
+    upload response back right away instead of waiting on chunk/embed/AI
+    enrichment, which is what used to make "Processing…" hang on a large
+    file. ``_finish_ingest`` (the slow half) runs afterward as a background
+    task.
 
     Used by direct upload, bulk upload, and Google Drive import so they all
     behave identically. ``title`` is optional; when omitted, the Archivist
@@ -110,34 +115,37 @@ async def _store_and_ingest(
         "needs_review": needs_review, "course_confidence": course_confidence,
     })
 
-    # 4) chunk + embed. The document record already exists at this point, so
-    # a parsing/indexing failure here shouldn't fail the whole upload — mark
-    # the document unindexed instead and let the user still see/download it.
+    return {
+        "id": doc_id, "text": text, "auto_title": auto_title,
+        "course_id": course_id, "needs_review": needs_review,
+        "course_confidence": course_confidence,
+    }
+
+
+async def _finish_ingest(doc_id: str, user_id: str, text: str, *, enrich: bool, auto_title: bool) -> None:
+    """Slow half of the pipeline — chunk/embed then AI enrichment. Runs as a
+    background task after the upload response has already gone back to the
+    client; the document stays ``ingested: false`` ("pending" in the UI)
+    until this finishes, so re-fetching the documents list shows live
+    progress instead of the request just hanging."""
+    # The document record already exists at this point, so a parsing/
+    # indexing failure here shouldn't be fatal — mark it unindexed instead
+    # and let the student still see/download the original file.
     try:
-        report = await ingestion.ingest_document(doc_id, user_id, text)
+        await ingestion.ingest_document(doc_id, user_id, text)
     except Exception as e:
         await supabase.update(
             "documents",
             {"ingested": False, "ingest_error": str(e)[:500]},
             filters={"id": eq(doc_id)},
         )
-        report = {"chunks": 0}
+        return
 
-    # 5) enrich metadata + knowledge-graph links (best-effort, needs an LLM)
-    enrichment = None
     if enrich and settings.has_llm and text.strip():
         try:
-            enrichment = await Archivist().enrich(
-                user_id, doc_id, text, rename_untitled=auto_title
-            )
-        except Exception as e:
-            enrichment = {"error": str(e)}
-
-    return {
-        "id": doc_id, "chunks": report.get("chunks", 0), "enrichment": enrichment,
-        "course_id": course_id, "needs_review": needs_review,
-        "course_confidence": course_confidence,
-    }
+            await Archivist().enrich(user_id, doc_id, text, rename_untitled=auto_title)
+        except Exception:
+            pass  # enrichment (summary/keywords/importance) is best-effort
 
 
 @router.get("")
@@ -147,7 +155,7 @@ async def list_documents(course_id: str | None = None, user: CurrentUser = Depen
         filters["course_id"] = eq(course_id)
     return await supabase.select(
         "documents",
-        columns="id,title,doc_type,summary,keywords,course_id,ingested,size_bytes,"
+        columns="id,title,doc_type,summary,keywords,course_id,ingested,ingest_error,size_bytes,"
                  "needs_review,course_confidence,importance,created_at",
         filters=filters, order="created_at.desc", limit=200,
     )
@@ -171,6 +179,7 @@ async def get_document(document_id: str, user: CurrentUser = Depends(get_current
 
 @router.post("/upload", status_code=201)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     course_id: str = Form(...),
     title: str | None = Form(default=None),
@@ -180,16 +189,27 @@ async def upload_document(
     if not (course_id and course_id.strip()):
         raise HTTPException(422, "A course is required for every document.")
     content = await file.read()
-    return await _store_and_ingest(
+    result = await _prepare_and_store(
         user_id=user.id, course_id=course_id, content=content,
         filename=file.filename or "document",
         content_type=file.content_type or "application/octet-stream",
-        title=title, enrich=enrich,
+        title=title,
     )
+    background_tasks.add_task(
+        _finish_ingest, result["id"], user.id, result["text"],
+        enrich=enrich, auto_title=result["auto_title"],
+    )
+    return {
+        "id": result["id"], "course_id": result["course_id"],
+        "needs_review": result["needs_review"],
+        "course_confidence": result["course_confidence"],
+        "processing": True,
+    }
 
 
 @router.post("/bulk-upload", status_code=201)
 async def bulk_upload_documents(
+    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     enrich: bool = Form(default=True),
     user: CurrentUser = Depends(get_current_user),
@@ -200,6 +220,9 @@ async def bulk_upload_documents(
     (by content). A file is always assigned a class — even a low-confidence
     guess — but guesses under the confidence threshold come back with
     ``needs_review: true`` so the student can fix them from the documents page.
+    Chunk/embed + AI enrichment for every file runs in the background, same
+    as a single upload — the response comes back once each file is stored
+    and classified, not once every file is fully indexed.
     """
     if not files:
         raise HTTPException(400, "No files provided.")
@@ -207,13 +230,21 @@ async def bulk_upload_documents(
     for file in files:
         content = await file.read()
         try:
-            result = await _store_and_ingest(
+            result = await _prepare_and_store(
                 user_id=user.id, course_id=None, content=content,
                 filename=file.filename or "document",
                 content_type=file.content_type or "application/octet-stream",
-                title=None, enrich=enrich,
+                title=None,
             )
-            results.append({"filename": file.filename, **result})
+            background_tasks.add_task(
+                _finish_ingest, result["id"], user.id, result["text"],
+                enrich=enrich, auto_title=result["auto_title"],
+            )
+            results.append({
+                "filename": file.filename, "id": result["id"],
+                "course_id": result["course_id"], "needs_review": result["needs_review"],
+                "course_confidence": result["course_confidence"],
+            })
         except HTTPException as e:
             results.append({"filename": file.filename, "error": str(e.detail)})
         except Exception as e:
@@ -248,7 +279,10 @@ async def update_document(
 
 
 @router.post("/import-drive", status_code=201)
-async def import_from_drive(body: DriveImportRequest, user: CurrentUser = Depends(get_current_user)):
+async def import_from_drive(
+    body: DriveImportRequest, background_tasks: BackgroundTasks,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Import a file the user selected in the Google Drive picker.
 
     The frontend obtains a short-lived OAuth access token via the Google
@@ -287,11 +321,20 @@ async def import_from_drive(body: DriveImportRequest, user: CurrentUser = Depend
     if r.status_code >= 300:
         raise HTTPException(502, f"Google Drive download failed ({r.status_code}): {r.text[:200]}")
 
-    return await _store_and_ingest(
+    result = await _prepare_and_store(
         user_id=user.id, course_id=body.course_id, content=r.content,
-        filename=filename, content_type=content_type,
-        title=body.name, enrich=body.enrich,
+        filename=filename, content_type=content_type, title=body.name,
     )
+    background_tasks.add_task(
+        _finish_ingest, result["id"], user.id, result["text"],
+        enrich=body.enrich, auto_title=result["auto_title"],
+    )
+    return {
+        "id": result["id"], "course_id": result["course_id"],
+        "needs_review": result["needs_review"],
+        "course_confidence": result["course_confidence"],
+        "processing": True,
+    }
 
 
 @router.post("/ingest-text", status_code=201)

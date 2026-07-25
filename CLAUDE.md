@@ -6,29 +6,41 @@
   Cloudflare R2 for file storage (moved off Supabase Storage — see
   `docs/ARCHITECTURE.md`).
 - **Frontend**: Next.js (`frontend/`).
-- **No Firebase anywhere in this project.** Auth/DB is Supabase, not
-  Firebase/Firestore. If a task mentions Firebase, confirm with the user
-  whether they mean Supabase or an actual separate Firebase project before
-  assuming one exists.
+- **Auth/DB is Supabase, not Firebase/Firestore** — no Firestore, no
+  Firebase Auth anywhere. That said, **`frontend/apphosting.yaml` is a real
+  Firebase App Hosting config** (correcting an earlier wrong claim in this
+  file that "no Firebase exists" — it does, just for frontend hosting, not
+  data/auth). It deploys the Next.js frontend only and its
+  `NEXT_PUBLIC_API_BASE_URL` already points at a live Cloud Run backend URL
+  (`atlas-backend-*.us-east4.run.app`), meaning the backend in that
+  configuration is Cloud Run, not Vercel — check which `NEXT_PUBLIC_API_BASE_URL`
+  is actually live before assuming either hosting path.
 
 ## Deployment
 
-Two supported hosting paths for the backend — pick based on what's actually
-deployed before assuming Cron/scheduling behavior:
+Three hosting pieces can combine — figure out which are actually live
+before assuming Cron/scheduling behavior, since it changes which scheduler
+fires the sync jobs:
 
-1. **Vercel (default)** — `vercel.json` at repo root deploys both
-   `frontend` and `backend` as Vercel services, with `backend`'s FastAPI app
-   proxied under `/api/backend/*`. Scheduled jobs are Vercel Cron entries in
-   `vercel.json`'s `crons` array (UTC only, no IANA timezone support).
-2. **Google Cloud Run** — if the backend is moved off Vercel, Cloud Run has
-   no cron of its own, so **Google Cloud Scheduler** calls the endpoints
-   instead, via `automation/cloud-scheduler-setup.sh` (supports real
-   `America/New_York` scheduling, so it doesn't drift across DST the way
-   the Vercel UTC crons do).
+- **Frontend**: either Vercel (`vercel.json`'s `services.frontend`) or
+  **Firebase App Hosting** (`frontend/apphosting.yaml`). Both just serve the
+  Next.js app and point it at whatever `NEXT_PUBLIC_API_BASE_URL` is set to.
+- **Backend**: either a Vercel service (`vercel.json`'s `services.backend`,
+  FastAPI proxied under `/api/backend/*`) or **Google Cloud Run**
+  (`atlas-backend-*.us-east4.run.app` per `apphosting.yaml` — this is the
+  URL currently wired up as of this writing).
+- **Scheduler** (whichever calls the cron endpoints depends on where the
+  backend lives, not the frontend):
+  - Backend on Vercel → Vercel Cron entries in `vercel.json`'s `crons`
+    array (UTC only, no IANA timezone support, drifts an hour across DST).
+  - Backend on Cloud Run → Cloud Run has no cron of its own, so **Google
+    Cloud Scheduler** calls the endpoints instead, via
+    `automation/cloud-scheduler-setup.sh` (real `America/New_York`
+    scheduling, no DST drift).
 
-Both paths call the same backend endpoints, secured by `ATLAS_CRON_SECRET`
-(see `app.core.security.check_cron_secret`) — no code differs between the
-two, only which scheduler triggers the HTTP call.
+All paths call the same backend endpoints, secured by `ATLAS_CRON_SECRET`
+(see `app.core.security.check_cron_secret`) — no backend code differs
+between them, only which scheduler triggers the HTTP call.
 
 ## Automated PowerSchool + Schoology sync
 

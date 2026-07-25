@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Stat, RevealStat, Section, Empty, Loading, gradeTone, Badge, RiskBadge } from "@/components/ui";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiPost, apiUpload } from "@/lib/api";
+
+const UPLOAD_ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
 
 function dayLabel(dateStr: string, planDate: string): string {
   const d = new Date(dateStr + "T00:00:00");
@@ -31,6 +33,16 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [planning, setPlanning] = useState(false);
 
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState<{ assignments: any[]; documents: any[] } | null>(null);
+
+  const [uploadCourseId, setUploadCourseId] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [uploadPct, setUploadPct] = useState<number | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const uploadFileRef = useRef<HTMLInputElement>(null);
+
   async function load() {
     try {
       setData(await apiGet("/dashboard"));
@@ -41,6 +53,55 @@ export default function DashboardPage() {
   useEffect(() => {
     load();
   }, []);
+
+  // Debounced quick search across assignments + documents (trigram text
+  // search — fast enough to fire on typing, unlike the semantic endpoint).
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setResults(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        setResults(await apiGet(`/search/text?q=${encodeURIComponent(q)}&limit=6`));
+      } catch {
+        setResults(null);
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  async function uploadDocument(e: React.FormEvent) {
+    e.preventDefault();
+    const file = uploadFileRef.current?.files?.[0];
+    if (!file) return;
+    if (!uploadCourseId) {
+      setUploadStatus({ ok: false, text: "Pick a course first." });
+      return;
+    }
+    setUploading(true);
+    setUploadPct(0);
+    setUploadStatus(null);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("course_id", uploadCourseId);
+      const res = await apiUpload("/documents/upload", form, setUploadPct);
+      const title = res.enrichment?.title;
+      setUploadStatus({ ok: true, text: `Ingested${title ? ` “${title}”` : ""}.` });
+      if (uploadFileRef.current) uploadFileRef.current.value = "";
+    } catch (err: any) {
+      setUploadStatus({ ok: false, text: err.message });
+    } finally {
+      setUploading(false);
+      setUploadPct(null);
+    }
+  }
 
   async function generatePlan() {
     setPlanning(true);
@@ -95,6 +156,83 @@ export default function DashboardPage() {
               hint="today"
             />
           </div>
+
+          <Section title="Documents">
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="card">
+                <label className="label">Search assignments &amp; documents</label>
+                <input
+                  className="input w-full"
+                  placeholder="e.g. photosynthesis, unit 3 review…"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+                {searching && <div className="text-xs text-atlas-muted mt-2">Searching…</div>}
+                {results && !searching && (
+                  <div className="mt-3 space-y-1 max-h-56 overflow-auto">
+                    {!results.documents?.length && !results.assignments?.length && (
+                      <div className="text-xs text-atlas-muted">No matches.</div>
+                    )}
+                    {results.documents?.map((d: any) => (
+                      <button
+                        key={d.id}
+                        className="w-full text-left text-sm px-2 py-1.5 rounded-lg hover:bg-atlas-panel2 truncate"
+                        onClick={() => router.push(`/documents/${d.id}`)}
+                      >
+                        📄 {d.title} <span className="text-xs text-atlas-muted">· {courseName(d.course_id)}</span>
+                      </button>
+                    ))}
+                    {results.assignments?.map((a: any) => (
+                      <button
+                        key={a.id}
+                        className="w-full text-left text-sm px-2 py-1.5 rounded-lg hover:bg-atlas-panel2 truncate"
+                        onClick={() => router.push("/assignments")}
+                      >
+                        📝 {a.title} <span className="text-xs text-atlas-muted">· {courseName(a.course_id)}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <form className="card" onSubmit={uploadDocument}>
+                <label className="label">Quick upload</label>
+                <div className="flex flex-wrap items-end gap-2">
+                  <select
+                    className="input !w-40"
+                    value={uploadCourseId}
+                    onChange={(e) => setUploadCourseId(e.target.value)}
+                    required
+                  >
+                    <option value="">Select a class…</option>
+                    {data.courses?.map((c: any) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                  <input ref={uploadFileRef} type="file" className="text-sm" required accept={UPLOAD_ACCEPT} />
+                  <button className="btn-primary !py-1.5" disabled={uploading}>
+                    {uploading
+                      ? uploadPct != null && uploadPct < 100
+                        ? `Uploading… ${uploadPct}%`
+                        : "Processing…"
+                      : "Upload"}
+                  </button>
+                </div>
+                {uploadStatus && (
+                  <div className={`text-xs mt-2 ${uploadStatus.ok ? "text-atlas-good" : "text-atlas-bad"}`}>
+                    {uploadStatus.text}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  className="text-xs text-atlas-muted hover:text-atlas-text mt-2"
+                  onClick={() => router.push("/documents")}
+                >
+                  Manage all documents →
+                </button>
+              </form>
+            </div>
+          </Section>
 
           {data.daily_plan && (
             <Section title="What needs to happen">

@@ -176,10 +176,17 @@ export default function DashboardPage() {
                     {results.documents?.map((d: any) => (
                       <button
                         key={d.id}
-                        className="w-full text-left text-sm px-2 py-1.5 rounded-lg hover:bg-atlas-panel2 truncate"
+                        className="w-full text-left text-sm px-2 py-1.5 rounded-lg hover:bg-atlas-panel2"
                         onClick={() => router.push(`/documents/${d.id}`)}
                       >
-                        📄 {d.title} <span className="text-xs text-atlas-muted">· {courseName(d.course_id)}</span>
+                        <div className="truncate">
+                          📄 {d.title} <span className="text-xs text-atlas-muted">· {courseName(d.course_id)}</span>
+                        </div>
+                        {d.snippet && (
+                          <div className="text-xs text-atlas-muted truncate pl-5" title={d.snippet}>
+                            {d.snippet}
+                          </div>
+                        )}
                       </button>
                     ))}
                     {results.assignments?.map((a: any) => (

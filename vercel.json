@@ -54,6 +54,10 @@
     {
       "path": "/api/backend/api/v1/documents/cron/purge-deleted",
       "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/backend/api/v1/documents/cron/process-pending",
+      "schedule": "0 12 * * *"
     }
   ]
 }

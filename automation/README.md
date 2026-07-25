@@ -52,21 +52,54 @@ If the backend runs on Cloud Run instead:
    CRON_SECRET=the-same-value-as-ATLAS_CRON_SECRET \
    ./automation/cloud-scheduler-setup.sh
    ```
-   This creates five jobs: the twice-daily Schoology sync and the
+   This creates six jobs: the twice-daily Schoology sync and the
    twice-daily PowerSchool sync (each 7am/4pm America/New_York, real IANA
-   timezone — no UTC math needed), and a daily storage-cleanup sweep (9am)
+   timezone — no UTC math needed), a daily storage-cleanup sweep (9am)
    that finalizes document deletions — deleting a document in the app
    removes it immediately, but its R2 file itself is only queued for
    removal and stays recoverable for 24h (see `app.services.storage_cleanup`);
-   this job is what actually clears it out once that window passes. All
-   five call their endpoint with an `X-Cron-Secret` header — the same
-   endpoints accept either that header or Vercel's Bearer-token form, so no
-   code changes are needed either way.
+   this job is what actually clears it out once that window passes — and an
+   every-2-minutes document-processing sweep (see below). All six call
+   their endpoint with an `X-Cron-Secret` header — the same endpoints
+   accept either that header or Vercel's Bearer-token form, so no code
+   changes are needed either way.
 3. Once Cloud Run is live, the `crons` block in `vercel.json` becomes dead
    weight (nothing left on Vercel for it to call) — fine to leave or remove.
 4. Already ran this script before the storage-cleanup job existed? Re-run
    it (or just create that one job by hand) — it's additive, existing jobs
    are untouched.
+
+## Document processing (cron, not inline — important if uploads seem stuck)
+
+Uploading a document only stores the file and creates a row (shown as
+"processing…" in the UI) — indexing (chunk/embed) and AI enrichment run
+separately, via `GET/POST /api/v1/documents/cron/process-pending`, on
+whichever scheduler your host uses: Cloud Scheduler every 2 minutes via
+`cloud-scheduler-setup.sh` above (uploads finish promptly), or Vercel Cron
+once a day per `vercel.json` (Vercel's Hobby plan rejects any cron schedule
+that fires more than once a day — `*/5 * * * *` gets the deploy itself
+rejected outright, not just throttled — so a Vercel-only deployment's
+uploads can sit "processing" for up to 24h; tighten the `vercel.json`
+schedule if you're on a paid plan that allows finer-grained crons).
+
+This is deliberately **not** a FastAPI `BackgroundTask` kicked off inline
+with the upload request, even though that seems like the obvious way to
+"finish the rest after responding." In production on Cloud Run that
+silently never finished: Cloud Run only allocates CPU to a container while
+it's actively serving a request, so a background task still running after
+the response has been sent can get frozen mid-task with no guarantee it's
+ever scheduled again — the document just sits at `ingested: false` forever
+with no error, because the code that would set one never got to run.
+Vercel's serverless runtime carries the same risk. A scheduler hitting a
+real endpoint on an interval always gets genuine CPU for that call, so
+that's what actually finishes the work now — same reasoning as the sync and
+storage-cleanup crons above.
+
+If uploads seem permanently stuck on "processing" even after this is
+deployed, first suspect the scheduler itself isn't wired up (see "Check
+`GET /api/v1/integrations`" pattern above — same idea, just check whether
+`ingested` ever flips to `true` on a `GET /api/v1/documents` a few minutes
+after upload) before assuming the code regressed again.
 
 ## n8n blueprints (for jobs with no native scheduler yet)
 

@@ -74,6 +74,24 @@ gcloud scheduler jobs create http atlas-storage-cleanup \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
   --description="Atlas: purge R2 files whose 24h delete grace period has passed"
 
+# Finishes indexing (chunk/embed) + AI-enriching any document still sitting
+# at ingested:false. This used to happen inline with the upload request
+# (then, briefly, as a FastAPI BackgroundTask) — both failed in practice on
+# Cloud Run, which only allocates CPU to a container while it's actively
+# serving a request, so a background task kept alive past the response
+# being sent can simply never finish. A real request on a schedule always
+# gets genuine CPU. Every 2 minutes so an upload finishes processing
+# promptly without ever tying up a single request for long.
+gcloud scheduler jobs create http atlas-document-processing \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" \
+  --schedule="*/2 * * * *" \
+  --time-zone="America/New_York" \
+  --uri="${CLOUD_RUN_URL}/api/v1/documents/cron/process-pending" \
+  --http-method=GET \
+  --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --description="Atlas: finish indexing + AI-enriching any pending document"
+
 echo "Created. Verify with:"
 echo "  gcloud scheduler jobs list --project=$PROJECT_ID --location=$LOCATION"
 echo "Run one immediately with:"

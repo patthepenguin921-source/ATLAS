@@ -12,6 +12,19 @@ from app.services import memory
 router = APIRouter(prefix="/search", tags=["search"])
 
 
+def _snippet(text: str, query: str, *, radius: int = 80) -> str:
+    """A short excerpt of `text` centered on the first match of `query`, so a
+    body-text hit shows *why* it matched instead of just the document title."""
+    idx = text.lower().find(query.lower())
+    if idx == -1:
+        return text[: radius * 2].strip()
+    start = max(0, idx - radius)
+    end = min(len(text), idx + len(query) + radius)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{text[start:end].strip()}{suffix}"
+
+
 @router.post("/semantic")
 async def semantic(body: SearchRequest, user: CurrentUser = Depends(get_current_user)):
     results = await memory.semantic_search(
@@ -53,13 +66,30 @@ async def ask(body: SearchRequest, user: CurrentUser = Depends(get_current_user)
 
 @router.get("/text")
 async def text_search(q: str, limit: int = 20, user: CurrentUser = Depends(get_current_user)):
-    """Fast structured text search across assignments + documents (trigram)."""
+    """Fast structured text search across assignments + documents (trigram) —
+    documents match on title OR their extracted body text (`extracted_text`,
+    already trigram-indexed — see `idx_documents_text_trgm`), so a search for
+    a term that only appears inside the file still finds it."""
     assignments = await supabase.select(
         "assignments", columns="id,title,category,course_id,due_date",
         filters={"user_id": eq(user.id), "title": f"ilike.*{q}*"}, limit=limit,
     ) or []
-    documents = await supabase.select(
+    title_matches = await supabase.select(
         "documents", columns="id,title,doc_type,course_id",
         filters={"user_id": eq(user.id), "title": f"ilike.*{q}*"}, limit=limit,
     ) or []
+    content_matches = await supabase.select(
+        "documents", columns="id,title,doc_type,course_id,extracted_text",
+        filters={"user_id": eq(user.id), "extracted_text": f"ilike.*{q}*"}, limit=limit,
+    ) or []
+
+    documents = list(title_matches)
+    seen_ids = {d["id"] for d in title_matches}
+    for d in content_matches:
+        if d["id"] in seen_ids or len(documents) >= limit:
+            continue
+        seen_ids.add(d["id"])
+        snippet = _snippet(d.pop("extracted_text", "") or "", q)
+        documents.append({**d, "snippet": snippet})
+
     return {"assignments": assignments, "documents": documents}

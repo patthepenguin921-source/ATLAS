@@ -2,11 +2,11 @@
 
 The automation layer keeps Atlas continuously updated without manual work.
 
-## Schoology auto-sync (built in, no extra setup)
+## PowerSchool & Schoology auto-sync (built in, no extra setup)
 
 If Atlas is deployed on Vercel (`vercel.json` at the repo root already
-declares this), Schoology syncs itself automatically twice a day — no n8n,
-no separate service to run:
+declares this), both PowerSchool and Schoology sync themselves automatically
+twice a day — no n8n, no separate service to run:
 
 1. In the Vercel project settings, set an environment variable
    `CRON_SECRET` to a random string (16+ chars). Vercel automatically sends
@@ -14,20 +14,24 @@ no separate service to run:
 2. Set the **same** value as `ATLAS_CRON_SECRET` on the backend service's
    environment variables. The endpoint is disabled until this is set.
 3. Deploy. `vercel.json`'s `crons` entries hit
-   `GET /api/backend/api/v1/integrations/cron/schoology/sync` at 10:00 and
-   20:00 UTC — 6am/4pm US Eastern while daylight time is in effect (roughly
+   `GET /api/backend/api/v1/integrations/cron/schoology/sync` and
+   `GET /api/backend/api/v1/integrations/cron/powerschool/sync` at 11:00 and
+   20:00 UTC — 7am/4pm US Eastern while daylight time is in effect (roughly
    mid-March to early November). Vercel Cron schedules are UTC-only (no IANA
-   timezone support), so across the DST boundary this drifts to 5am/3pm
+   timezone support), so across the DST boundary this drifts to 6am/3pm
    Eastern until the entries are next adjusted by an hour — still the same
-   twice-daily cadence, just shifted. Syncs **every** user who has Schoology
-   connected and enabled, not just one student. If exact Eastern-time firing
-   across DST matters, use the Cloud Run + Cloud Scheduler path below
-   instead — Cloud Scheduler supports real `America/New_York` scheduling.
+   twice-daily cadence, just shifted. Each sync runs for **every** user who
+   has that provider connected and enabled, not just one student. If exact
+   Eastern-time firing across DST matters, use the Cloud Run + Cloud
+   Scheduler path below instead — Cloud Scheduler supports real
+   `America/New_York` scheduling.
 4. Check `GET /api/v1/integrations` (or the Integrations page) for
-   `last_synced_at` / `last_error` to confirm it's running.
+   `last_synced_at` / `last_error` to confirm it's running, for both
+   providers.
 
-Hitting the endpoint manually (e.g. from another scheduler) works the same
-way — `curl -X POST .../integrations/cron/schoology/sync -H "X-Cron-Secret: <value>"`.
+Hitting either endpoint manually (e.g. from another scheduler) works the
+same way — `curl -X POST .../integrations/cron/schoology/sync -H "X-Cron-Secret: <value>"`
+or `curl -X POST .../integrations/cron/powerschool/sync -H "X-Cron-Secret: <value>"`.
 
 ## Cloud Run + Cloud Scheduler (if you're moving the backend off Vercel)
 
@@ -48,15 +52,16 @@ If the backend runs on Cloud Run instead:
    CRON_SECRET=the-same-value-as-ATLAS_CRON_SECRET \
    ./automation/cloud-scheduler-setup.sh
    ```
-   This creates three jobs: the twice-daily Schoology sync (7am/4pm
-   America/New_York, real IANA timezone — no UTC math needed), and a daily
-   storage-cleanup sweep (9am) that finalizes document deletions — deleting
-   a document in the app removes it immediately, but its R2 file itself is
-   only queued for removal and stays recoverable for 24h (see
-   `app.services.storage_cleanup`); this job is what actually clears it out
-   once that window passes. All three call their endpoint with an
-   `X-Cron-Secret` header — the same endpoints accept either that header or
-   Vercel's Bearer-token form, so no code changes are needed either way.
+   This creates five jobs: the twice-daily Schoology sync and the
+   twice-daily PowerSchool sync (each 7am/4pm America/New_York, real IANA
+   timezone — no UTC math needed), and a daily storage-cleanup sweep (9am)
+   that finalizes document deletions — deleting a document in the app
+   removes it immediately, but its R2 file itself is only queued for
+   removal and stays recoverable for 24h (see `app.services.storage_cleanup`);
+   this job is what actually clears it out once that window passes. All
+   five call their endpoint with an `X-Cron-Secret` header — the same
+   endpoints accept either that header or Vercel's Bearer-token form, so no
+   code changes are needed either way.
 3. Once Cloud Run is live, the `crons` block in `vercel.json` becomes dead
    weight (nothing left on Vercel for it to call) — fine to leave or remove.
 4. Already ran this script before the storage-cleanup job existed? Re-run
@@ -90,7 +95,7 @@ setups not deployed on Vercel).
 | `daily-plan.workflow.json` | every day 06:00 | `POST /api/v1/agents/planner/daily-plan` → generates the day's plan |
 | `weekly-review.workflow.json` | Sundays 18:00 | `POST /api/v1/agents/coach/weekly-review` → weekend review |
 | `refresh-retention.workflow.json` | every day 03:00 | `POST /api/v1/knowledge/refresh-retention` → decays retention estimates |
-| `lms-sync.workflow.json` | 06:00 & 16:00 (America/New_York) | `POST /api/v1/integrations/schoology/sync` → morning & afternoon Schoology pull |
+| `lms-sync.workflow.json` | 07:00 & 16:00 (America/New_York) | `POST /api/v1/integrations/schoology/sync` and `POST /api/v1/integrations/powerschool/sync` → morning & afternoon PowerSchool + Schoology pull |
 
 Each is a minimal Schedule Trigger → HTTP Request. Extend them to fan out over
 multiple students, post results to Slack/email, or chain steps (e.g. sync →

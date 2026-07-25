@@ -1,16 +1,16 @@
 {
-  "name": "Atlas · LMS Sync (Schoology)",
+  "name": "Atlas · LMS Sync (PowerSchool + Schoology)",
   "nodes": [
     {
       "parameters": {
         "rule": {
           "interval": [
-            { "field": "cronExpression", "expression": "0 6,16 * * *" }
+            { "field": "cronExpression", "expression": "0 7,16 * * *" }
           ]
         }
       },
       "id": "trigger",
-      "name": "6am & 4pm (NY)",
+      "name": "7am & 4pm (NY)",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [260, 300]
@@ -23,16 +23,38 @@
         "genericAuthType": "httpHeaderAuth",
         "options": {}
       },
-      "id": "request",
+      "id": "request-schoology",
       "name": "Sync Schoology",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [520, 300],
+      "position": [520, 220],
+      "credentials": { "httpHeaderAuth": { "id": "atlas-backend", "name": "Atlas Backend" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ATLAS_API }}/api/v1/integrations/powerschool/sync",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "request-powerschool",
+      "name": "Sync PowerSchool",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 380],
       "credentials": { "httpHeaderAuth": { "id": "atlas-backend", "name": "Atlas Backend" } }
     }
   ],
   "connections": {
-    "6am & 4pm (NY)": { "main": [[{ "node": "Sync Schoology", "type": "main", "index": 0 }]] }
+    "7am & 4pm (NY)": {
+      "main": [
+        [
+          { "node": "Sync Schoology", "type": "main", "index": 0 },
+          { "node": "Sync PowerSchool", "type": "main", "index": 0 }
+        ]
+      ]
+    }
   },
   "settings": { "timezone": "America/New_York" },
   "active": true

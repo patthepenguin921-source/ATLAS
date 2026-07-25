@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Creates two Google Cloud Scheduler jobs that trigger Atlas's automated
-# Schoology sync on Cloud Run, twice a day. This is the Cloud Run equivalent
-# of the `crons` entries in vercel.json — Cloud Run has no cron of its own,
-# so Cloud Scheduler is what actually calls the endpoint on a schedule.
+# Creates Google Cloud Scheduler jobs that trigger Atlas's automated
+# PowerSchool + Schoology syncs on Cloud Run, twice a day each. This is the
+# Cloud Run equivalent of the `crons` entries in vercel.json — Cloud Run has
+# no cron of its own, so Cloud Scheduler is what actually calls the endpoint
+# on a schedule.
 #
 # Run this once your backend is deployed to Cloud Run and ATLAS_CRON_SECRET
 # is set on that service (see automation/README.md).
@@ -22,7 +23,7 @@ LOCATION="${LOCATION:-us-east1}"
 gcloud scheduler jobs create http atlas-schoology-sync-morning \
   --project="$PROJECT_ID" \
   --location="$LOCATION" \
-  --schedule="0 6 * * *" \
+  --schedule="0 7 * * *" \
   --time-zone="America/New_York" \
   --uri="${CLOUD_RUN_URL}/api/v1/integrations/cron/schoology/sync" \
   --http-method=GET \
@@ -38,6 +39,26 @@ gcloud scheduler jobs create http atlas-schoology-sync-afternoon \
   --http-method=GET \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
   --description="Atlas: afternoon Schoology sync (all connected users)"
+
+gcloud scheduler jobs create http atlas-powerschool-sync-morning \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" \
+  --schedule="0 7 * * *" \
+  --time-zone="America/New_York" \
+  --uri="${CLOUD_RUN_URL}/api/v1/integrations/cron/powerschool/sync" \
+  --http-method=GET \
+  --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --description="Atlas: morning PowerSchool sync (all connected users)"
+
+gcloud scheduler jobs create http atlas-powerschool-sync-afternoon \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" \
+  --schedule="0 16 * * *" \
+  --time-zone="America/New_York" \
+  --uri="${CLOUD_RUN_URL}/api/v1/integrations/cron/powerschool/sync" \
+  --http-method=GET \
+  --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --description="Atlas: afternoon PowerSchool sync (all connected users)"
 
 # Deleting a document in the app queues its R2 file for removal after a
 # 24-hour grace period instead of deleting it immediately (see

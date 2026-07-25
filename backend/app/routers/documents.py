@@ -22,35 +22,49 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 _REVIEW_CONFIDENCE_THRESHOLD = 0.6
 
 
+def _schedule_finish(background_tasks: BackgroundTasks, result: dict, user_id: str, enrich: bool) -> None:
+    """Queue `_finish_ingest` with the fields `_prepare_and_store` produced —
+    shared by all three upload paths so none of them has to spell out the
+    same eight-argument call."""
+    background_tasks.add_task(
+        _finish_ingest, result["id"], user_id, result["content"], result["filename"],
+        result["content_type"], result["storage_path"], result["text"], result["ocr_text"],
+        enrich=enrich, auto_title=result["auto_title"],
+    )
+
+
 async def _prepare_and_store(
     *, user_id: str, course_id: str | None, content: bytes, filename: str,
     content_type: str, title: str | None,
 ) -> dict:
-    """Fast half of the pipeline: (convert images→PDF) → store → classify →
-    record. Returns immediately once the document row exists — with
-    ``ingested: false`` ("pending" in the UI) — so the caller can send the
-    upload response back right away instead of waiting on chunk/embed/AI
-    enrichment, which is what used to make "Processing…" hang on a large
-    file. ``_finish_ingest`` (the slow half) runs afterward as a background
-    task.
+    """Fast half of the pipeline: (convert images→PDF) → classify → record.
+    Returns immediately once the document row exists — with ``ingested:
+    false`` ("pending" in the UI) — so the caller can send the upload
+    response back right away. ``_finish_ingest`` (the slow half — storing the
+    original to R2, extracting its text if that wasn't already needed here,
+    chunking/embedding, and AI enrichment) runs afterward as a background
+    task; none of that has to block the response.
 
     Used by direct upload, bulk upload, and Google Drive import so they all
     behave identically. ``title`` is optional; when omitted, the Archivist
     generates one from the document's content. ``course_id`` is optional —
     when omitted (bulk upload), the course is auto-detected from the
     student's existing classes and low-confidence guesses are flagged via
-    ``needs_review`` instead of being left unfiled.
+    ``needs_review`` instead of being left unfiled. Auto-detection needs the
+    document's text, so bulk upload is the one case that still extracts text
+    synchronously here — a direct upload already has its course, so text
+    extraction (the slow part for a big PDF) is deferred entirely.
     """
     if not content:
         raise HTTPException(400, "Empty file")
 
     # iPhone photos & scans come in as images — OCR the text (so it's
     # searchable), then normalize them to PDF so every document is a uniform,
-    # viewable file.
-    # ocr_image/convert_image_to_pdf/extract_text below are synchronous,
-    # CPU-bound calls (Tesseract subprocess, PyMuPDF layout reconstruction) —
-    # run off the event loop thread so a slow one can't block the whole
-    # worker for the duration.
+    # viewable file. Both are synchronous, CPU-bound calls (Tesseract
+    # subprocess, Pillow) — run off the event loop thread so a slow one can't
+    # block the whole worker. Kept synchronous (unlike PDF text extraction
+    # below) because it determines the actual stored filename/content-type
+    # the document row needs, and is comparatively fast either way.
     ocr_text = ""
     if ingestion.is_image(content_type, filename):
         ocr_text = await asyncio.to_thread(ingestion.ocr_image, content)
@@ -64,27 +78,19 @@ async def _prepare_and_store(
     safe_name = safe_object_name(filename)
     storage_path = f"{user_id}/{doc_id}/{safe_name}"
 
-    # 1) store the original file (best-effort; text ingest still works without it)
-    try:
-        await r2.upload(storage_path, content, content_type or "application/octet-stream")
-    except Exception:
-        storage_path = None
-
-    # 2) extract text up front — needed both for chunk/embed and (when no
-    # course was given) for auto-detecting which class this belongs to.
-    # Parsing failures are non-fatal; the original is already saved either way.
+    # Auto-detect the course when none was supplied — the only case where
+    # text has to be extracted before the response can go out.
     text = ""
-    try:
-        text = await asyncio.to_thread(ingestion.extract_text, content, content_type or "", filename or "")
-        if not text.strip() and ocr_text.strip():
-            text = ocr_text
-    except Exception:
-        text = ocr_text
-
-    # 2b) auto-detect the course when none was supplied
     needs_review = False
     course_confidence: float | None = None
     if not course_id:
+        try:
+            text = await asyncio.to_thread(ingestion.extract_text, content, content_type or "", filename or "")
+            if not text.strip() and ocr_text.strip():
+                text = ocr_text
+        except Exception:
+            text = ocr_text
+
         courses = await supabase.select(
             "courses", columns="id,name,subject", filters={"user_id": eq(user_id)}
         )
@@ -105,7 +111,11 @@ async def _prepare_and_store(
         else:
             needs_review = True  # no classes exist yet — nothing to assign
 
-    # 3) create the document record (fall back to filename as a placeholder title)
+    # Create the document record (fall back to filename as a placeholder
+    # title). `storage_path` is recorded now even though the upload to R2
+    # hasn't happened yet (that's in `_finish_ingest`) — it's a deterministic
+    # key, and `get_document`'s signed-download-URL lookup degrades fine if
+    # asked for it a moment before the background upload actually lands.
     auto_title = not (title and title.strip())
     await supabase.insert("documents", {
         "id": doc_id, "user_id": user_id, "course_id": course_id,
@@ -116,18 +126,40 @@ async def _prepare_and_store(
     })
 
     return {
-        "id": doc_id, "text": text, "auto_title": auto_title,
+        "id": doc_id, "content": content, "filename": filename,
+        "content_type": content_type, "storage_path": storage_path,
+        "text": text, "ocr_text": ocr_text, "auto_title": auto_title,
         "course_id": course_id, "needs_review": needs_review,
         "course_confidence": course_confidence,
     }
 
 
-async def _finish_ingest(doc_id: str, user_id: str, text: str, *, enrich: bool, auto_title: bool) -> None:
-    """Slow half of the pipeline — chunk/embed then AI enrichment. Runs as a
-    background task after the upload response has already gone back to the
-    client; the document stays ``ingested: false`` ("pending" in the UI)
-    until this finishes, so re-fetching the documents list shows live
-    progress instead of the request just hanging."""
+async def _finish_ingest(
+    doc_id: str, user_id: str, content: bytes, filename: str, content_type: str,
+    storage_path: str, text: str, ocr_text: str, *, enrich: bool, auto_title: bool,
+) -> None:
+    """Slow half of the pipeline — store the original to R2, extract its text
+    if a course was already given (so `_prepare_and_store` skipped it),
+    chunk/embed, then AI enrichment. Runs as a background task after the
+    upload response has already gone back to the client; the document stays
+    ``ingested: false`` ("pending" in the UI) until this finishes, so
+    re-fetching the documents list shows live progress instead of the
+    request just hanging."""
+    try:
+        await r2.upload(storage_path, content, content_type or "application/octet-stream")
+    except Exception:
+        await supabase.update(
+            "documents", {"storage_path": None}, filters={"id": eq(doc_id)}
+        )
+
+    if not text.strip():
+        try:
+            text = await asyncio.to_thread(ingestion.extract_text, content, content_type or "", filename or "")
+            if not text.strip() and ocr_text.strip():
+                text = ocr_text
+        except Exception:
+            text = ocr_text
+
     # The document record already exists at this point, so a parsing/
     # indexing failure here shouldn't be fatal — mark it unindexed instead
     # and let the student still see/download the original file.
@@ -195,10 +227,7 @@ async def upload_document(
         content_type=file.content_type or "application/octet-stream",
         title=title,
     )
-    background_tasks.add_task(
-        _finish_ingest, result["id"], user.id, result["text"],
-        enrich=enrich, auto_title=result["auto_title"],
-    )
+    _schedule_finish(background_tasks, result, user.id, enrich)
     return {
         "id": result["id"], "course_id": result["course_id"],
         "needs_review": result["needs_review"],
@@ -236,10 +265,7 @@ async def bulk_upload_documents(
                 content_type=file.content_type or "application/octet-stream",
                 title=None,
             )
-            background_tasks.add_task(
-                _finish_ingest, result["id"], user.id, result["text"],
-                enrich=enrich, auto_title=result["auto_title"],
-            )
+            _schedule_finish(background_tasks, result, user.id, enrich)
             results.append({
                 "filename": file.filename, "id": result["id"],
                 "course_id": result["course_id"], "needs_review": result["needs_review"],
@@ -325,10 +351,7 @@ async def import_from_drive(
         user_id=user.id, course_id=body.course_id, content=r.content,
         filename=filename, content_type=content_type, title=body.name,
     )
-    background_tasks.add_task(
-        _finish_ingest, result["id"], user.id, result["text"],
-        enrich=body.enrich, auto_title=result["auto_title"],
-    )
+    _schedule_finish(background_tasks, result, user.id, body.enrich)
     return {
         "id": result["id"], "course_id": result["course_id"],
         "needs_review": result["needs_review"],

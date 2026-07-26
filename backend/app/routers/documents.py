@@ -1,17 +1,23 @@
 """Documents — upload, ingest (chunk+embed), enrich, and manage files.
 
-Indexing (chunk/embed) and AI enrichment run on a schedule
-(`/documents/cron/process-pending`), not inline with the upload request and
-not as a FastAPI `BackgroundTask` either. That used to seem like a free win —
-respond fast, keep working after — but in production on Cloud Run a
+Indexing (chunk/embed) and AI enrichment never run inline with the upload
+request itself, and never as a FastAPI `BackgroundTask` either — a
 background task kept alive past the response getting sent would sometimes
-just never finish: Cloud Run only allocates CPU to a container while it's
-actively serving a request, so once the response goes out the process can be
-frozen mid-task with no guarantee it's ever scheduled again. (Vercel's
-serverless runtime carries the same risk.) A scheduler hitting a real
-endpoint on an interval always gets genuine CPU for that call, the same way
-the PowerSchool/Schoology sync and storage-cleanup crons already do — so
-that's what actually finishes the work now.
+just never finish in production on Cloud Run: Cloud Run only allocates CPU
+to a container while it's actively serving a request, so once the response
+goes out the process can be frozen mid-task with no guarantee it's ever
+scheduled again. (Vercel's serverless runtime carries the same risk.)
+
+Instead, `POST /documents/{id}/process` does the work — but as its own,
+separate live request, which gets genuine CPU the same way any request
+does. The frontend fires this immediately after an upload/bulk-upload/Drive
+import finishes (fire-and-forget — the upload response itself stays fast),
+and the same endpoint backs the documents page's "Index now" button for
+anything still pending or failed (e.g. the tab closed before the
+post-upload call landed). `/documents/cron/process-pending` still exists as
+a low-frequency safety net behind it (see automation/README.md) in case
+neither of those ever fires for a given document — not the primary path
+anymore.
 """
 from __future__ import annotations
 
@@ -262,6 +268,48 @@ async def list_documents(course_id: str | None = None, user: CurrentUser = Depen
     )
 
 
+@router.post("/{document_id}/process")
+async def process_document_now(document_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Index (chunk/embed) + AI-enrich one document synchronously, in this
+    request. Called by the frontend right after an upload finishes, and by
+    the documents page's "Index now" button for anything still pending or
+    that previously failed — see the module docstring for why this replaced
+    the cron as the primary path. A prior failure is cleared before
+    re-claiming so a retry can actually run instead of being skipped as
+    already-errored (the cron intentionally never auto-retries a failure;
+    this endpoint, triggered by a person, is the deliberate retry path)."""
+    rows = await supabase.select(
+        "documents",
+        columns="id,storage_path,mime_type,enrich,auto_title,ingested,ingest_error",
+        filters={"user_id": eq(user.id), "id": eq(document_id)}, limit=1,
+    )
+    if not rows:
+        raise HTTPException(404, "Not found")
+    doc = rows[0]
+    if doc["ingested"]:
+        return {"id": document_id, "ingested": True, "ingest_error": None}
+
+    if doc.get("ingest_error"):
+        await supabase.update(
+            "documents", {"ingest_error": None, "processing_started_at": None},
+            filters={"id": eq(document_id)},
+        )
+
+    if not await _claim_document(document_id):
+        raise HTTPException(409, "Already being processed")
+
+    await _process_document(
+        document_id, user.id, doc.get("storage_path"), doc.get("mime_type") or "",
+        enrich=doc.get("enrich", True), auto_title=doc.get("auto_title", False),
+    )
+
+    rows = await supabase.select(
+        "documents", columns="id,ingested,ingest_error",
+        filters={"id": eq(document_id)}, limit=1,
+    )
+    return rows[0] if rows else {"id": document_id}
+
+
 @router.get("/{document_id}")
 async def get_document(document_id: str, user: CurrentUser = Depends(get_current_user)):
     rows = await supabase.select(
@@ -476,16 +524,17 @@ async def _process_pending_documents() -> dict:
 @router.post("/cron/process-pending")
 @router.get("/cron/process-pending")
 async def process_pending_documents(request: Request):
-    """Scheduled sweep that finishes indexing (chunk/embed) + AI-enriching
-    every document still sitting at ``ingested: false`` — see the module
-    docstring for why this runs on a schedule instead of inline with the
-    upload request or as a background task. Claims up to
-    `_PROCESS_BATCH_SIZE` documents per call; run every couple of minutes
-    (see automation/cloud-scheduler-setup.sh) so an upload finishes
-    processing promptly. GET: Vercel Cron Jobs always invoke via GET. POST:
-    kept for n8n/curl/other schedulers that prefer it. Secured by
-    ATLAS_CRON_SECRET, same as the other cron routes — see
-    `check_cron_secret`."""
+    """Safety-net sweep that finishes indexing (chunk/embed) + AI-enriching
+    any document still sitting at ``ingested: false`` — normally the
+    frontend's post-upload call to `POST /documents/{id}/process` (or the
+    "Index now" button) already does this; this only catches documents
+    neither of those ever reached (tab closed mid-upload, network drop,
+    etc.), so it runs at a low frequency, not the every-couple-minutes
+    cadence this used to need when it was the only path — see the module
+    docstring. Claims up to `_PROCESS_BATCH_SIZE` documents per call. GET:
+    Vercel Cron Jobs always invoke via GET. POST: kept for n8n/curl/other
+    schedulers that prefer it. Secured by ATLAS_CRON_SECRET, same as the
+    other cron routes — see `check_cron_secret`."""
     check_cron_secret(request)
     return await _process_pending_documents()
 

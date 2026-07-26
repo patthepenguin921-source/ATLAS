@@ -58,16 +58,22 @@ twice daily at ~7:00 AM and ~4:00 PM America/New_York:
 
 Full details: `automation/README.md`.
 
-## Document upload/indexing is cron-driven, not inline — and NOT a background task
+## Document upload/indexing is triggered on-demand, not inline — and NOT a background task
 
 `POST /documents/upload` (and bulk-upload/Drive-import) only stores the
 file + creates a row (`ingested: false`, shown as "processing…") — it does
 **not** chunk/embed or AI-enrich inline, and does **not** hand that off to a
 FastAPI `BackgroundTask` either, even though that looks like the obvious fix
-for "don't block the response." A `GET/POST
-/documents/cron/process-pending` cron (same `ATLAS_CRON_SECRET` pattern,
-scheduled every 2–5 min) claims pending documents and does the actual
-chunk/embed/enrich work.
+for "don't block the response." Instead, `POST /documents/{id}/process`
+does the actual chunk/embed/enrich work, as its own separate request. The
+frontend fires it itself immediately after an upload finishes
+(fire-and-forget — the upload response stays fast), and the same endpoint
+backs the documents page's "Index now" button for anything still pending or
+that previously failed. `GET/POST /documents/cron/process-pending` (same
+`ATLAS_CRON_SECRET` pattern) still exists as a low-frequency **safety net**
+behind both — every 15 min on Cloud Run, once a day on Vercel — for
+whatever neither the post-upload call nor the button ever reaches (tab
+closed mid-upload, dropped network request).
 
 **Why not just a `BackgroundTask`**: tried that first — it made the upload
 response fast, but on Cloud Run the document would sit at `ingested: false`
@@ -76,13 +82,15 @@ it's actively serving a request; a background task still running after the
 response is sent can get frozen mid-task with no guarantee it's ever
 scheduled again, so the code path that would eventually set
 `ingest_error` never got to run. Vercel's serverless runtime has the same
-risk. A scheduler hitting a real endpoint on an interval always gets
-genuine CPU for that call — same reasoning as every other cron in this
-app — so don't reach for `BackgroundTasks` here again without solving that
-problem first (e.g. confirming "CPU always allocated" is on for the Cloud
-Run service).
+risk. Any real, separate request to a real endpoint — whether triggered by
+the frontend right after upload, a person clicking "Index now," or the
+safety-net cron — always gets genuine CPU for that call, so don't reach for
+`BackgroundTasks` here again without solving that problem first (e.g.
+confirming "CPU always allocated" is on for the Cloud Run service).
 
 If someone reports an upload "stuck processing": first check whether the
-`process-pending` scheduler is actually configured/deployed (the most
-common cause) before suspecting the ingestion code itself — see
-`automation/README.md`'s "Document processing" section.
+frontend's post-upload call and the "Index now" button are both actually
+failing (backend unreachable/erroring) before suspecting the ingestion code
+itself — the safety-net cron being unconfigured is no longer the main
+suspect now that it's not the primary path, though it's still worth
+checking — see `automation/README.md`'s "Document processing" section.

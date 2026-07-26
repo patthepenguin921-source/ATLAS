@@ -52,17 +52,27 @@ export default function DocumentsPage() {
       .catch(() => setBackendDown(true));
   }, []);
 
-  // Chunk/embed + AI enrichment happen in the background after an upload
-  // responds (see backend's `_finish_ingest`), so a freshly uploaded
-  // document sits at `ingested: false` ("pending") for a bit. Poll gently
-  // while anything is still pending so the list flips to "indexed" on its
-  // own instead of requiring a manual refresh.
+  // Chunk/embed + AI enrichment happen in a separate request that's kicked
+  // off right after upload (see `triggerProcessing` below), so a freshly
+  // uploaded document sits at `ingested: false` ("pending") for a bit. Poll
+  // gently while anything is still pending so the list flips to "indexed"
+  // on its own instead of requiring a manual refresh.
   useEffect(() => {
     const stillPending = docs?.some((d) => !d.ingested && !d.ingest_error);
     if (!stillPending) return;
     const timer = setInterval(load, 4000);
     return () => clearInterval(timer);
   }, [docs]);
+
+  // Fire-and-forget: ask the backend to index a document now. Called right
+  // after upload/bulk-upload/Drive-import, and by the "Index now" button for
+  // anything that missed that call or previously failed. Errors are silent
+  // here — the safety-net cron and the button both remain as fallbacks.
+  function triggerProcessing(id: string) {
+    apiPost(`/documents/${id}/process`, {}, 120000)
+      .catch(() => {})
+      .finally(load);
+  }
 
   function requireCourse(): boolean {
     if (!courseId) {
@@ -92,7 +102,8 @@ export default function DocumentsPage() {
       const form = new FormData();
       form.append("file", file);
       form.append("course_id", courseId);
-      await apiUpload("/documents/upload", form, setUploadPct);
+      const result = await apiUpload("/documents/upload", form, setUploadPct);
+      if (result?.id) triggerProcessing(result.id);
       setStatus({
         ok: true,
         text: "Uploaded — processing in the background. It'll show as “indexed” below shortly.",
@@ -114,13 +125,14 @@ export default function DocumentsPage() {
     try {
       const picked = await pickFromDrive();
       if (!picked) return; // canceled
-      await apiPost("/documents/import-drive", {
+      const result = await apiPost("/documents/import-drive", {
         file_id: picked.id,
         access_token: picked.accessToken,
         course_id: courseId,
         name: picked.name,
         mime_type: picked.mimeType,
       });
+      if (result?.id) triggerProcessing(result.id);
       setStatus({
         ok: true,
         text: `Imported “${picked.name}” — processing in the background.`,
@@ -145,6 +157,9 @@ export default function DocumentsPage() {
       Array.from(files).forEach((f) => form.append("files", f));
       const res = await apiUpload("/documents/bulk-upload", form, setBulkPct);
       const results: BulkResult[] = res.results ?? [];
+      results.forEach((r) => {
+        if (r.id) triggerProcessing(r.id);
+      });
       const flagged = results.filter((r) => r.needs_review && r.id);
       const failed = results.filter((r) => r.error);
       const filed = results.length - flagged.length - failed.length;
@@ -321,6 +336,9 @@ export default function DocumentsPage() {
                   <div onClick={(e) => e.stopPropagation()}>
                     <ActionMenu
                       items={[
+                        ...(!d.ingested
+                          ? [{ label: "Index now", onClick: () => triggerProcessing(d.id) }]
+                          : []),
                         { label: "Rename", onClick: () => renameDocument(d.id, d.title) },
                         {
                           label: "Delete",

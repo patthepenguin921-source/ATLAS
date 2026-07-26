@@ -172,7 +172,7 @@ async def _run_chunk(provider: str, user_id: str, impl: IntegrationProvider) -> 
                 "were skipped rather than saved as empty placeholders — they'll be "
                 "retried on the next sync."
             )
-        await _set_status(user_id, provider, "success", None)
+        await _set_status(user_id, provider, "success", "")
         return {"provider": provider, "status": "success", **result}
     except NotImplementedError as e:
         await _set_status(user_id, provider, "idle", str(e))

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Empty, Loading, Badge, gradeTone } from "@/components/ui";
+import { Empty, Loading, Badge, Ring, gradeTone } from "@/components/ui";
 import { apiGet, apiPatch, apiPost } from "@/lib/api";
 
 type CourseLevel = "regular" | "honors" | "ap" | "dual_enrollment" | "ib";
@@ -281,14 +281,18 @@ export default function CoursesPage() {
                   )}
                 </div>
               </div>
-              <div className="mt-4 flex items-center justify-between">
-                <span className="text-xs text-atlas-muted">Current grade</span>
-                <span className={`text-lg font-semibold ${
-                  gradeTone(c.current_grade) === "good" ? "text-atlas-good"
-                  : gradeTone(c.current_grade) === "warn" ? "text-atlas-warn"
-                  : gradeTone(c.current_grade) === "bad" ? "text-atlas-bad" : ""}`}>
-                  {c.current_grade != null ? `${c.current_grade}% ${c.current_letter ?? ""}` : "—"}
-                </span>
+              <div className="mt-4 flex items-center gap-3">
+                <Ring
+                  percent={c.current_grade ?? 0}
+                  tone={c.current_grade != null ? gradeTone(c.current_grade) : "default"}
+                  label={c.current_grade != null ? undefined : "—"}
+                />
+                <div className="min-w-0">
+                  <div className="text-xs text-atlas-muted">Current grade</div>
+                  <div className="text-sm font-medium">
+                    {c.current_grade != null ? `${c.current_grade}% ${c.current_letter ?? ""}` : "Not graded yet"}
+                  </div>
+                </div>
               </div>
             </div>
           );

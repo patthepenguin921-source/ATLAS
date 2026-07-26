@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Empty, Badge, Modal, SkeletonList } from "@/components/ui";
+import { Empty, Badge, Modal, SkeletonList, ActionMenu } from "@/components/ui";
 import { apiGet, apiUpload, apiPost, apiPatch, apiDelete, API_BASE } from "@/lib/api";
 import { pickFromDrive, driveConfigured } from "@/lib/googleDrive";
 
@@ -314,9 +314,26 @@ export default function DocumentsPage() {
                 ) : null}
               </div>
               <div className="flex flex-col items-end gap-2 shrink-0">
-                <Badge tone={d.ingested ? "good" : d.ingest_error ? "bad" : "warn"}>
-                  {d.ingested ? "indexed" : d.ingest_error ? "failed" : "processing…"}
-                </Badge>
+                <div className="flex items-center gap-2">
+                  <Badge tone={d.ingested ? "good" : d.ingest_error ? "bad" : "warn"}>
+                    {d.ingested ? "indexed" : d.ingest_error ? "failed" : "processing…"}
+                  </Badge>
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <ActionMenu
+                      items={[
+                        { label: "Rename", onClick: () => renameDocument(d.id, d.title) },
+                        {
+                          label: "Delete",
+                          danger: true,
+                          onClick: async () => {
+                            await apiDelete(`/documents/${d.id}`);
+                            load();
+                          },
+                        },
+                      ]}
+                    />
+                  </div>
+                </div>
                 {d.needs_review && <Badge tone="warn">check class</Badge>}
                 {d.importance === "high" && <Badge tone="accent">important</Badge>}
                 {d.importance === "low" && <Badge>low priority</Badge>}
@@ -331,25 +348,6 @@ export default function DocumentsPage() {
                     <option key={value} value={value}>{label}</option>
                   ))}
                 </select>
-                <button
-                  className="text-xs text-atlas-muted hover:underline"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    renameDocument(d.id, d.title);
-                  }}
-                >
-                  rename
-                </button>
-                <button
-                  className="text-xs text-atlas-bad hover:underline"
-                  onClick={async (e) => {
-                    e.stopPropagation();
-                    await apiDelete(`/documents/${d.id}`);
-                    load();
-                  }}
-                >
-                  delete
-                </button>
               </div>
             </div>
           </div>

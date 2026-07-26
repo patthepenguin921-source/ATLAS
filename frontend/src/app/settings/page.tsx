@@ -1,9 +1,9 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Empty, Loading, Badge, Modal, Section } from "@/components/ui";
+import { Empty, Loading, Badge, Modal, Section, Ring, ActionMenu } from "@/components/ui";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 
 interface Profile {
@@ -377,84 +377,6 @@ function syncHealth(integration: Integration | undefined): SyncHealth {
   return { tone: "good", percent, label: "Healthy" };
 }
 
-const RING_COLOR: Record<SyncHealth["tone"], string> = {
-  good: "#4ade80",
-  warn: "#fbbf24",
-  bad: "#f87171",
-  default: "#9096a3",
-};
-
-function SyncRing({ health }: { health: SyncHealth }) {
-  const color = RING_COLOR[health.tone];
-  return (
-    <div
-      className="relative w-11 h-11 rounded-full shrink-0"
-      style={{ background: `conic-gradient(${color} ${health.percent * 3.6}deg, var(--tw-ring-track, #252932) 0deg)` }}
-    >
-      <div
-        className="absolute inset-[5px] rounded-full bg-atlas-panel grid place-items-center text-[9px] font-bold"
-        style={{ color }}
-      >
-        {health.percent}%
-      </div>
-    </div>
-  );
-}
-
-/** Small "⋯" overflow menu for secondary provider actions (edit login, debug
- *  tools, disconnect) — keeps the primary row down to status + Sync now. */
-function ActionMenu({
-  items,
-}: {
-  items: { label: string; onClick: () => void; danger?: boolean; disabled?: boolean }[];
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
-
-  return (
-    <div className="relative shrink-0" ref={ref}>
-      <button
-        type="button"
-        className="btn-ghost px-2.5"
-        aria-label="More actions"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-      >
-        ⋯
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full mt-1 w-52 rounded-xl border border-atlas-border bg-atlas-panel shadow-soft z-20 py-1 text-sm overflow-hidden">
-          {items.map((it, i) => (
-            <button
-              key={i}
-              type="button"
-              disabled={it.disabled}
-              className={`w-full text-left px-3 py-1.5 transition-colors hover:bg-atlas-panel2 disabled:opacity-40 disabled:cursor-not-allowed ${
-                it.danger ? "text-atlas-bad" : "text-atlas-text"
-              }`}
-              onClick={() => {
-                setOpen(false);
-                it.onClick();
-              }}
-            >
-              {it.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 const STATUS_TONE: Record<string, "good" | "warn" | "bad" | "default"> = {
   success: "good",
   running: "warn",
@@ -755,7 +677,7 @@ function IntegrationsTab() {
       <Section title="Sync health">
         <div className="grid sm:grid-cols-2 gap-3">
           <div className="card flex items-center gap-4">
-            <SyncRing health={powerschoolHealth} />
+            <Ring percent={powerschoolHealth.percent} tone={powerschoolHealth.tone} />
             <div className="min-w-0">
               <div className="font-medium text-sm">PowerSchool</div>
               <div className={`text-xs mt-0.5 ${powerschoolHealth.tone === "bad" ? "text-atlas-bad" : "text-atlas-muted"}`}>
@@ -764,7 +686,7 @@ function IntegrationsTab() {
             </div>
           </div>
           <div className="card flex items-center gap-4">
-            <SyncRing health={schoologyHealth} />
+            <Ring percent={schoologyHealth.percent} tone={schoologyHealth.tone} />
             <div className="min-w-0">
               <div className="font-medium text-sm">Schoology</div>
               <div className={`text-xs mt-0.5 ${schoologyHealth.tone === "bad" ? "text-atlas-bad" : "text-atlas-muted"}`}>

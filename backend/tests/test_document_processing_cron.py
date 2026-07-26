@@ -109,6 +109,74 @@ def test_process_pending_documents_skips_a_document_it_cant_claim(monkeypatch):
     assert downloaded is False  # never even tried — the claim lost first
 
 
+def test_process_document_now_claims_and_processes(monkeypatch):
+    doc = {
+        "id": DOC_ID, "storage_path": f"{USER_ID}/{DOC_ID}/notes.pdf",
+        "mime_type": "application/pdf", "enrich": True, "auto_title": False,
+        "ingested": False, "ingest_error": None,
+    }
+    select_calls = []
+
+    async def _fake_select(table, *, columns="*", filters=None, order=None, limit=None, single=False):
+        select_calls.append(filters)
+        if len(select_calls) == 1:
+            return [doc]
+        return [{"id": DOC_ID, "ingested": True, "ingest_error": None}]
+
+    async def _fake_update(table, patch, *, filters):
+        return [{"id": DOC_ID}]  # claim always wins here
+
+    async def _fake_download(key):
+        return b"%PDF-1.4 fake bytes"
+
+    async def _fake_ingest_document(doc_id, user_id, text):
+        return {"chunks": 1}
+
+    monkeypatch.setattr(documents_module.supabase, "select", _fake_select)
+    monkeypatch.setattr(documents_module.supabase, "update", _fake_update)
+    monkeypatch.setattr(documents_module.r2, "download", _fake_download)
+    monkeypatch.setattr(documents_module.ingestion, "extract_text", lambda *a, **k: "some extracted text")
+    monkeypatch.setattr(documents_module.ingestion, "ingest_document", _fake_ingest_document)
+    monkeypatch.setattr(documents_module.settings, "groq_api_key", None)  # skip enrichment
+
+    class _User:
+        id = USER_ID
+
+    result = asyncio.run(documents_module.process_document_now(DOC_ID, user=_User()))
+
+    assert result == {"id": DOC_ID, "ingested": True, "ingest_error": None}
+    # scoped to the requesting user, not just any document id
+    assert select_calls[0]["user_id"] == f"eq.{USER_ID}"
+
+
+def test_process_document_now_returns_early_if_already_ingested(monkeypatch):
+    doc = {
+        "id": DOC_ID, "storage_path": f"{USER_ID}/{DOC_ID}/notes.pdf",
+        "mime_type": "application/pdf", "enrich": True, "auto_title": False,
+        "ingested": True, "ingest_error": None,
+    }
+    downloaded = False
+
+    async def _fake_select(table, *, columns="*", filters=None, order=None, limit=None, single=False):
+        return [doc]
+
+    async def _fake_download(key):
+        nonlocal downloaded
+        downloaded = True
+        return b""
+
+    monkeypatch.setattr(documents_module.supabase, "select", _fake_select)
+    monkeypatch.setattr(documents_module.r2, "download", _fake_download)
+
+    class _User:
+        id = USER_ID
+
+    result = asyncio.run(documents_module.process_document_now(DOC_ID, user=_User()))
+
+    assert result == {"id": DOC_ID, "ingested": True, "ingest_error": None}
+    assert downloaded is False  # already ingested — never touches the file
+
+
 def test_process_document_flags_an_error_when_the_original_was_never_stored(monkeypatch):
     updates = []
 

@@ -74,23 +74,24 @@ gcloud scheduler jobs create http atlas-storage-cleanup \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
   --description="Atlas: purge R2 files whose 24h delete grace period has passed"
 
-# Finishes indexing (chunk/embed) + AI-enriching any document still sitting
-# at ingested:false. This used to happen inline with the upload request
-# (then, briefly, as a FastAPI BackgroundTask) — both failed in practice on
-# Cloud Run, which only allocates CPU to a container while it's actively
-# serving a request, so a background task kept alive past the response
-# being sent can simply never finish. A real request on a schedule always
-# gets genuine CPU. Every 2 minutes so an upload finishes processing
-# promptly without ever tying up a single request for long.
+# Safety net only, not the primary path: the frontend now calls
+# POST /documents/{id}/process itself right after an upload finishes (and
+# via the documents page's "Index now" button), so most documents never
+# reach this job at all — see app.routers.documents' module docstring. This
+# only catches whatever neither of those ever reached (tab closed mid-
+# upload, a dropped network request, etc.), so it runs every 15 minutes
+# instead of the every-2-minutes cadence it needed back when it was the
+# only path — cuts Cloud Run invocations from this job by ~87% while still
+# catching a stuck document promptly.
 gcloud scheduler jobs create http atlas-document-processing \
   --project="$PROJECT_ID" \
   --location="$LOCATION" \
-  --schedule="*/2 * * * *" \
+  --schedule="*/15 * * * *" \
   --time-zone="America/New_York" \
   --uri="${CLOUD_RUN_URL}/api/v1/documents/cron/process-pending" \
   --http-method=GET \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
-  --description="Atlas: finish indexing + AI-enriching any pending document"
+  --description="Atlas: safety-net sweep for any document neither the post-upload call nor Index now button reached"
 
 echo "Created. Verify with:"
 echo "  gcloud scheduler jobs list --project=$PROJECT_ID --location=$LOCATION"

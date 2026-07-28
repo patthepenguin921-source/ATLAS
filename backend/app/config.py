@@ -84,6 +84,24 @@ class Settings(BaseSettings):
     # platform kills the function.
     vercel: str = ""
 
+    # ---- Google OAuth (persistent Drive access for Schoology-linked Google
+    # Docs, distinct from NEXT_PUBLIC_GOOGLE_CLIENT_ID's one-off Drive Picker
+    # grant) ----
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    # The backend's own public URL — Google's OAuth callback redirects here,
+    # and the exact value must be registered as an authorized redirect URI
+    # on the OAuth client (Google rejects a mismatch outright).
+    atlas_api_base_url: str = ""
+    # Where to send the browser after the OAuth callback finishes — a
+    # redirect can't return JSON, so this is where the consent flow lands
+    # the user back in the app (Settings' Integrations tab).
+    atlas_frontend_base_url: str = ""
+
+    @property
+    def has_google_oauth(self) -> bool:
+        return bool(self.google_oauth_client_id and self.google_oauth_client_secret)
+
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.atlas_cors_origins.split(",") if o.strip()]

@@ -228,7 +228,10 @@ interface Integration {
   last_synced_at?: string | null;
   last_error?: string | null;
   enabled: boolean;
-  config?: { auth_mode?: "password" | "cookie"; domain?: string; username?: string };
+  config?: {
+    auth_mode?: "password" | "cookie"; domain?: string; username?: string;
+    google_connected?: boolean;
+  };
 }
 
 interface SyncResult {
@@ -385,7 +388,12 @@ const STATUS_TONE: Record<string, "good" | "warn" | "bad" | "default"> = {
 };
 
 function IntegrationsTab() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [integrations, setIntegrations] = useState<Integration[] | null>(null);
+  const [googleConnecting, setGoogleConnecting] = useState(false);
+  const [googleDisconnecting, setGoogleDisconnecting] = useState(false);
+  const [googleStatus, setGoogleStatus] = useState<{ ok: boolean; text: string } | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [syncingProvider, setSyncingProvider] = useState<string | null>(null);
@@ -432,6 +440,45 @@ function IntegrationsTab() {
   useEffect(() => {
     load();
   }, []);
+
+  // Google's OAuth consent screen redirects the browser back here (a
+  // full-page navigation from the backend's /integrations/google/callback,
+  // not a fetch response) with ?google=connected|error&detail=... — surface
+  // it once, then strip the params so refreshing the page doesn't re-show it.
+  useEffect(() => {
+    const google = searchParams.get("google");
+    if (!google) return;
+    setGoogleStatus(
+      google === "connected"
+        ? { ok: true, text: "Google Drive connected." }
+        : { ok: false, text: searchParams.get("detail") || "Couldn't connect Google Drive." }
+    );
+    router.replace("/settings?tab=Integrations");
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  async function connectGoogle() {
+    setGoogleConnecting(true);
+    setGoogleStatus(null);
+    try {
+      const { url } = await apiGet<{ url: string }>("/integrations/google/connect");
+      window.location.href = url;
+    } catch (err: any) {
+      setGoogleStatus({ ok: false, text: err.message ?? "Couldn't start Google connect." });
+      setGoogleConnecting(false);
+    }
+  }
+
+  async function disconnectGoogle() {
+    setGoogleDisconnecting(true);
+    try {
+      await apiPost("/integrations/google/disconnect");
+      await load();
+    } finally {
+      setGoogleDisconnecting(false);
+    }
+  }
 
   const powerschool = integrations?.find((i) => i.provider === "powerschool");
   const schoology = integrations?.find((i) => i.provider === "schoology");
@@ -891,6 +938,32 @@ function IntegrationsTab() {
               )}
             </div>
           </div>
+          {schoology && (
+            <div className="mt-3 pt-3 border-t border-atlas-border flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">Google Drive</div>
+                <div className="text-xs text-atlas-muted mt-0.5">
+                  {schoology.config?.google_connected
+                    ? "Connected — Google Docs/Slides/Sheets found in course materials download automatically."
+                    : "Not connected — Google Docs found in your materials get flagged instead of downloaded."}
+                </div>
+              </div>
+              <button
+                className="btn-ghost shrink-0"
+                disabled={googleConnecting || googleDisconnecting}
+                onClick={schoology.config?.google_connected ? disconnectGoogle : connectGoogle}
+              >
+                {schoology.config?.google_connected
+                  ? googleDisconnecting ? "Disconnecting…" : "Disconnect"
+                  : googleConnecting ? "Connecting…" : "Connect Google Drive"}
+              </button>
+            </div>
+          )}
+          {googleStatus && (
+            <div className={`text-xs mt-2 ${googleStatus.ok ? "text-atlas-good" : "text-atlas-bad"}`}>
+              {googleStatus.text}
+            </div>
+          )}
           {schoology && (
             <div className="mt-3 pt-3 border-t border-atlas-border flex items-center gap-2">
               <input

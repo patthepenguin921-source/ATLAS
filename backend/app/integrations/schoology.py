@@ -1034,7 +1034,7 @@ class SchoologyProvider(IntegrationProvider):
 
     async def _existing_document(self, user_id: str, external_id: str) -> dict[str, Any] | None:
         rows = await supabase.select(
-            "documents", columns="id,storage_path",
+            "documents", columns="id,storage_path,metadata",
             filters={"user_id": eq(user_id), "external_id": eq(external_id),
                      "external_source": eq(self.name)}, limit=1,
         )
@@ -1056,6 +1056,18 @@ class SchoologyProvider(IntegrationProvider):
         can't tell "fully ingested" apart from "ingested everything except
         the original file."
 
+        A row flagged `needs_google_auth` (a prior sync found this same
+        Google link with no token on file, so `_ingest_text` recorded only a
+        title+URL stub — see `_ingest_scraped_material`) is different from
+        that upload-retry case: no text was ever extracted or indexed for
+        it, so once a real download succeeds here (the caller only reaches
+        this branch when a token is now available), it needs the *full*
+        pipeline run — not just an upload retried — or the document would
+        stay un-indexed and still flagged forever even after Google Drive
+        gets connected. Detected via `metadata.needs_google_auth` rather
+        than "no text extracted yet", since a legitimately empty extraction
+        (a scanned image, a corrupt file) must not be reprocessed forever.
+
         Uploads the original bytes to R2 the same way a direct upload does
         (`routers/documents.py`'s `_store_and_ingest`) so the file has a
         `storage_path` and is actually viewable/downloadable from the app,
@@ -1074,7 +1086,8 @@ class SchoologyProvider(IntegrationProvider):
                 report["errors"].append(
                     f"{title}: downloaded but couldn't store the original file ({e})"
                 )
-        if existing:
+        was_auth_stub = bool(existing and (existing.get("metadata") or {}).get("needs_google_auth"))
+        if existing and not was_auth_stub:
             # Metadata/text/embeddings already exist from a prior sync —
             # only the original file itself needed retrying.
             if storage_path:
@@ -1095,14 +1108,18 @@ class SchoologyProvider(IntegrationProvider):
             text = await asyncio.to_thread(ingestion.extract_text, content, content_type, filename)
         except Exception:  # noqa: BLE001
             text = ""
-        await supabase.insert("documents", {
-            "id": doc_id, "user_id": user_id, "course_id": course_id,
+        payload = {
             "title": title or filename or "Untitled", "doc_type": doc_type,
             "mime_type": content_type, "size_bytes": len(content),
             "storage_path": storage_path,
             "external_id": external_id, "external_source": self.name,
+            "needs_review": False,
             "metadata": extra_meta or {},
-        })
+        }
+        if was_auth_stub:
+            await supabase.update("documents", payload, filters={"id": eq(doc_id)})
+        else:
+            await supabase.insert("documents", {"id": doc_id, "user_id": user_id, "course_id": course_id, **payload})
         try:
             await ingestion.ingest_document(doc_id, user_id, text)
         except Exception as e:  # noqa: BLE001
@@ -1853,10 +1870,17 @@ class SchoologyProvider(IntegrationProvider):
             # surfaces it again instead of the failed upload being treated
             # as "already known" forever; `_ingest_file` retries just the
             # upload against the existing row rather than duplicating it.
+            # A row flagged `metadata.needs_google_auth` is left out the same
+            # way: it's only ever a title+URL stub (no file, no text) from a
+            # sync that ran before Google Drive was connected, so it needs
+            # the same "surface it again" treatment once a token is on
+            # file — otherwise a document stays flagged "connect Google
+            # Drive" forever even after the student actually connects it.
             known_names = {
                 str((row.get("metadata") or {}).get("material_name") or "").strip().lower()
                 for row in existing
                 if not (row.get("mime_type") and not row.get("storage_path"))
+                and not (row.get("metadata") or {}).get("needs_google_auth")
             } - {""}
 
             # A scraped "assignment"-type item is never recorded as a

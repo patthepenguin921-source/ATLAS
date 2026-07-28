@@ -2084,6 +2084,51 @@ def test_sync_scraped_materials_flags_needs_google_auth_for_embedded_viewer_with
     assert doc["metadata"]["review_reason"] == "needs_google_auth"
 
 
+def test_sync_retries_needs_google_auth_stub_once_a_token_is_connected(fake_db, monkeypatch):
+    """The reported gap: a Google link found (and flagged) before Google
+    Drive was ever connected must actually download and index once the
+    student connects it -- not stay flagged "connect Google Drive" forever.
+    Two syncs against the same item: first with no token (flags a stub),
+    second with a token now on file (must replace it with a real, indexed
+    document, not just skip it as "already known")."""
+    provider = SchoologyProvider()
+    item = MaterialLink(name="Reading Guide", href="https://docs.google.com/document/d/XYZ789/edit",
+                         kind="item", material_type="Link", folder_path="Unit 1")
+
+    scraper1 = _FakeScraperClient([item])
+    report1 = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper1, report=report1, google_token=None,
+    ))
+    stub = fake_db.tables["documents"][0]
+    assert stub["needs_review"] is True
+    assert stub["metadata"]["review_reason"] == "needs_google_auth"
+    assert stub.get("storage_path") is None
+
+    async def _fake_download_google_file(ref, token, name=None):
+        assert token == "tok123"
+        return b"fake doc bytes", "Reading Guide.pdf", "application/pdf"
+
+    import app.integrations.schoology as schoology_module
+    monkeypatch.setattr(schoology_module, "download_google_file", _fake_download_google_file)
+
+    scraper2 = _FakeScraperClient([item])  # a fresh walk, same item still there
+    report2 = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper2, report=report2, google_token="tok123",
+    ))
+
+    assert len(fake_db.tables["documents"]) == 1  # updated in place, not duplicated
+    doc = fake_db.tables["documents"][0]
+    assert doc["id"] == stub["id"]
+    assert doc["needs_review"] is False
+    assert doc["storage_path"]
+    assert doc["metadata"].get("needs_google_auth") is None
+    assert fake_db.r2.objects[doc["storage_path"]] == b"fake doc bytes"
+
+
 def test_sync_scraped_materials_extracts_schedule_from_glance_document(fake_db, monkeypatch):
     """A "Week at a Glance" item -- whether it's a Schoology Page with the
     content typed directly into it, a linked Google Doc, or an attached

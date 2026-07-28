@@ -807,10 +807,14 @@ class _FakeScraperClient:
         self, items: list[MaterialLink], *,
         files: dict[str, tuple[bytes, str]] | None = None,
         courses: list[dict[str, str]] | None = None,
+        google_pages: dict[str, str] | None = None,
+        page_texts: dict[str, str] | None = None,
     ):
         self._items = items
         self._files = files or {}
         self._courses = courses or []
+        self._google_pages = google_pages or {}
+        self._page_texts = page_texts or {}
         self.known_names_calls: list[set[str] | None] = []
         self.student_uid_calls: list[str | None] = []
         self.known_url_calls: list[str] = []
@@ -843,6 +847,18 @@ class _FakeScraperClient:
         to populate `files` for the specific hrefs it wants treated as a
         real downloadable file."""
         return self._files.get(url)
+
+    async def find_embedded_google_url(self, url):
+        """Mirrors the real client: None means "no Google Doc embedded in
+        this page" — a test populates `google_pages` for the specific hrefs
+        it wants treated as a Schoology-viewer wrapper around a Google Doc."""
+        return self._google_pages.get(url)
+
+    async def fetch_page_text(self, url):
+        """Mirrors the real client: None means "not HTML" (or nothing
+        configured) — a test populates `page_texts` for hrefs whose content
+        lives directly on the page rather than a downloadable file."""
+        return self._page_texts.get(url)
 
     async def aclose(self):
         self.closed = True
@@ -1914,3 +1930,227 @@ def test_debug_walk_materials_one_course_failing_does_not_blank_the_others(fake_
     assert by_id["known-1"]["items"] == []
     assert by_id["known-2"].get("error") is None
     assert by_id["known-2"]["items"][0]["name"] == "Notes"
+
+
+# ---------------------------------------------------------------------------
+# Assignment-type/href links, embedded Google viewers, glance-doc schedule
+# extraction, and unrecognized-link flagging -- the materials-tree items
+# that previously either got silently skipped (assignment links) or filed
+# as a plain, unflagged reference with no indication Atlas didn't actually
+# understand them.
+# ---------------------------------------------------------------------------
+
+def _full_report() -> dict[str, Any]:
+    return {
+        "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
+        "documents": 0, "links": 0, "announcements": 0, "skipped": 0, "errors": [],
+    }
+
+
+def test_sync_scraped_materials_creates_assignment_from_assignment_link(fake_db, monkeypatch):
+    """A materials-tree item Schoology itself typed "Assignment" must become
+    a real `assignments` row (title + instructions + due date), not be
+    silently skipped the way it was before -- the reported gap."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Lab Report", href="/course/123/assignment/456",
+                      kind="item", material_type="Assignment", folder_path="Unit 2")],
+        page_texts={"/course/123/assignment/456":
+                    "Lab Report\nWrite up your findings from Friday's lab.\nDue: 10/10/2025"},
+    )
+
+    from app.llm import claude
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {
+            "description": "Write up your findings from Friday's lab.",
+            "due_date": "2025-10-10", "category": "lab",
+        }
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["assignments"] == 1
+    assert report["errors"] == []
+    assert fake_db.tables["documents"] == []  # not filed as a document
+    a = fake_db.tables["assignments"][0]
+    assert a["title"] == "Lab Report"
+    assert a["due_date"] == "2025-10-10"
+    assert a["category"] == "lab"
+    assert a["description"] == "Write up your findings from Friday's lab."
+
+
+def test_sync_scraped_materials_skips_assignment_link_matching_existing_title(fake_db, monkeypatch):
+    """A scraped "assignment"-type item is never recorded as a `documents`
+    row, so it has no entry in `known_names` for dedupe. Without a separate
+    check it would be re-fetched (and re-run through the LLM) every single
+    sync forever -- guarded against by matching on an existing assignment's
+    title for the same course, regardless of how that assignment got there
+    (e.g. already imported via the real Assignments API)."""
+    provider = SchoologyProvider()
+    fake_db.tables["assignments"] = [{
+        "id": "existing-1", "user_id": USER_ID, "course_id": BIO_COURSE,
+        "title": "Lab Report", "external_source": "schoology", "external_id": "sec-1:99",
+    }]
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Lab Report", href="/course/123/assignment/456",
+                      kind="item", material_type="Assignment")],
+    )
+
+    async def _unexpected_fetch(url):
+        raise AssertionError("should not fetch the assignment page again once it's already known")
+
+    scraper.fetch_page_text = _unexpected_fetch  # type: ignore[assignment]
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["skipped"] == 1
+    assert len(fake_db.tables["assignments"]) == 1  # not duplicated
+
+
+def test_sync_scraped_materials_downloads_google_doc_embedded_in_viewer(fake_db, monkeypatch):
+    """A "Link"-type item whose href stays on schoology.com but whose detail
+    page embeds a Google Doc (an iframe preview, some districts' template)
+    must still be downloaded through the Google Drive path, not skipped or
+    filed as a dead reference."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Reading Guide", href="https://district.schoology.com/course/1/materials/gp/2",
+                      kind="item", material_type="Link", folder_path="Unit 1")],
+        google_pages={
+            "https://district.schoology.com/course/1/materials/gp/2":
+                "https://docs.google.com/document/d/XYZ789/edit",
+        },
+    )
+
+    async def _fake_download_google_file(ref, token, name=None):
+        assert ref.file_id == "XYZ789"
+        assert token == "tok123"
+        return b"fake doc bytes", "Reading Guide.pdf", "application/pdf"
+
+    import app.integrations.schoology as schoology_module
+    monkeypatch.setattr(schoology_module, "download_google_file", _fake_download_google_file)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report, google_token="tok123",
+    ))
+
+    assert report["documents"] == 1
+    assert report["errors"] == []
+    doc = fake_db.tables["documents"][0]
+    assert doc["metadata"]["google_file_id"] == "XYZ789"
+    assert doc["metadata"]["source_url"] == "https://docs.google.com/document/d/XYZ789/edit"
+
+
+def test_sync_scraped_materials_flags_needs_google_auth_for_embedded_viewer_without_token(fake_db):
+    """Same embedded-Google-viewer case as above, but with no Google token on
+    file: the link itself is still recorded (it's real, known content), but
+    flagged via `needs_review` so the student knows to connect Google Drive."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Reading Guide", href="https://district.schoology.com/course/1/materials/gp/2",
+                      kind="item", material_type="Link")],
+        google_pages={
+            "https://district.schoology.com/course/1/materials/gp/2":
+                "https://docs.google.com/document/d/XYZ789/edit",
+        },
+    )
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report, google_token=None,
+    ))
+
+    doc = fake_db.tables["documents"][0]
+    assert doc["needs_review"] is True
+    assert doc["metadata"]["review_reason"] == "needs_google_auth"
+
+
+def test_sync_scraped_materials_extracts_schedule_from_glance_document(fake_db, monkeypatch):
+    """A "Week at a Glance" item -- whether it's a Schoology Page with the
+    content typed directly into it, a linked Google Doc, or an attached
+    file -- must turn into day-by-day `calendar_events` (kind="class") plus
+    any assignment it mentions, not just a plain document."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Week at a Glance", href="/course/1/materials/page/5",
+                      kind="item", material_type="Page", folder_path="Unit 3")],
+        page_texts={
+            "/course/1/materials/page/5":
+                "Monday 10/6: Intro to photosynthesis.\n"
+                "Tuesday 10/7: Lab -- Chlorophyll extraction. Lab report due.",
+        },
+    )
+
+    from app.llm import claude
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {
+            "days": [
+                {
+                    "date": "2025-10-06", "topic": "Intro to photosynthesis",
+                    "assignments": [],
+                },
+                {
+                    "date": "2025-10-07", "topic": "Lab -- Chlorophyll extraction",
+                    "assignments": [
+                        {"title": "Chlorophyll Lab Report", "due_date": "2025-10-09", "category": "lab"},
+                    ],
+                },
+            ],
+        }
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["errors"] == []
+    events = fake_db.tables["calendar_events"]
+    assert {e["title"] for e in events} == {"Intro to photosynthesis", "Lab -- Chlorophyll extraction"}
+    assert all(e["kind"] == "class" for e in events)
+    assignment = fake_db.tables["assignments"][0]
+    assert assignment["title"] == "Chlorophyll Lab Report"
+    assert assignment["due_date"] == "2025-10-09"
+    assert assignment["category"] == "lab"
+
+
+def test_sync_scraped_materials_flags_unrecognized_external_link(fake_db):
+    """A genuine external link Atlas can't classify as Google, an
+    assignment, or a downloadable file must still be recorded (it's real
+    content worth keeping) but flagged for a manual look -- previously this
+    was filed silently with no indication Atlas didn't understand it."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Quizlet Set", href="https://quizlet.com/123/set",
+                      kind="item", material_type="Link")],
+    )
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    doc = fake_db.tables["documents"][0]
+    assert doc["needs_review"] is True
+    assert doc["metadata"]["review_reason"] == "unrecognized_link"

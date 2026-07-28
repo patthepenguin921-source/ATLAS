@@ -11,6 +11,14 @@ const ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
 
 const IMPORTANCE_LABEL: Record<string, string> = { low: "Low", normal: "Normal", high: "High" };
 
+// `metadata.review_reason` (set by the Schoology integration) explains *why*
+// a document needs a look — falls back to a generic label for the older
+// bulk-upload low-confidence-course-match case, which doesn't set a reason.
+const REVIEW_REASON_LABEL: Record<string, string> = {
+  needs_google_auth: "connect Google Drive",
+  unrecognized_link: "unrecognized link",
+};
+
 type BulkResult = {
   filename: string;
   id?: string;
@@ -352,7 +360,11 @@ export default function DocumentsPage() {
                     />
                   </div>
                 </div>
-                {d.needs_review && <Badge tone="warn">check class</Badge>}
+                {d.needs_review && (
+                  <Badge tone="warn">
+                    {REVIEW_REASON_LABEL[d.metadata?.review_reason] ?? "check class"}
+                  </Badge>
+                )}
                 {d.importance === "high" && <Badge tone="accent">important</Badge>}
                 {d.importance === "low" && <Badge>low priority</Badge>}
                 <select

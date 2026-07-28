@@ -263,7 +263,7 @@ async def list_documents(course_id: str | None = None, user: CurrentUser = Depen
     return await supabase.select(
         "documents",
         columns="id,title,doc_type,summary,keywords,course_id,ingested,ingest_error,size_bytes,"
-                 "needs_review,course_confidence,importance,created_at",
+                 "needs_review,course_confidence,importance,metadata,created_at",
         filters=filters, order="created_at.desc", limit=200,
     )
 

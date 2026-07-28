@@ -192,6 +192,15 @@ export default function CourseDetailPage() {
   const currentSemester = (course.semester ?? "full_year") as string;
   const isSplit = semesters.length > 1;
 
+  // "Class schedule" is the day-by-day rundown Atlas parses out of a
+  // teacher's "Week/Unit at a Glance" document (see the Schoology
+  // integration) — kept separate from "Upcoming events" below, which mixes
+  // in due dates/exams/other calendar kinds.
+  const classDays = events
+    .filter((ev) => ev.kind === "class")
+    .slice()
+    .sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
+
   return (
     <AppShell
       title={course.name}
@@ -417,6 +426,27 @@ export default function CourseDetailPage() {
           )}
         </Section>
       </div>
+
+      <Section title="Class schedule">
+        {classDays.length ? (
+          <div className="space-y-2">
+            {classDays.map((ev) => (
+              <div key={ev.id} className="card flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-xs text-atlas-muted">
+                    {new Date(ev.starts_at).toLocaleDateString(undefined, {
+                      weekday: "long", month: "short", day: "numeric",
+                    })}
+                  </div>
+                  <div className="text-sm font-medium truncate">{ev.title}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Empty>No day-by-day schedule found yet — Atlas builds this from a "Week/Unit at a Glance" document.</Empty>
+        )}
+      </Section>
 
       <div className="grid md:grid-cols-2 gap-6">
         <Section title="Upcoming events">

@@ -936,6 +936,125 @@ def test_download_file_returns_none_for_an_html_detail_page():
     asyncio.run(run())
 
 
+def test_find_embedded_google_url_finds_iframe_preview():
+    """Some districts' "Link"/"Page" materials open a Schoology-chrome detail
+    page that embeds the actual Google Doc in an iframe rather than linking
+    straight to docs.google.com -- `find_embedded_google_url` must dig that
+    out so the caller can route it through the Google Drive download path."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/materials/gp/9":
+                return httpx.Response(
+                    200,
+                    text='<html><body><iframe src="https://docs.google.com/document/d/ABC123/preview">'
+                         '</iframe></body></html>',
+                    headers={"content-type": "text/html; charset=utf-8"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.find_embedded_google_url(f"{BASE_URL}/materials/gp/9")
+            assert result == "https://docs.google.com/document/d/ABC123/preview"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_find_embedded_google_url_returns_none_without_a_google_embed():
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/materials/gp/9":
+                return httpx.Response(
+                    200, text="<html><body>Just some plain content, no embed.</body></html>",
+                    headers={"content-type": "text/html; charset=utf-8"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.find_embedded_google_url(f"{BASE_URL}/materials/gp/9")
+            assert result is None
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_fetch_page_text_strips_chrome_and_returns_visible_text():
+    """An assignment/page detail view whose real content is the page itself
+    (not a downloadable file) -- `fetch_page_text` must return just the
+    readable text, with script/style/nav chrome stripped out."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/course/1/assignment/2":
+                return httpx.Response(
+                    200,
+                    text=(
+                        "<html><head><style>.x{color:red}</style></head><body>"
+                        "<nav>Course nav</nav>"
+                        "<script>var x = 1;</script>"
+                        "<h1>Lab Report</h1><p>Write up your findings. Due Friday.</p>"
+                        "</body></html>"
+                    ),
+                    headers={"content-type": "text/html; charset=utf-8"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            text = await client.fetch_page_text(f"{BASE_URL}/course/1/assignment/2")
+            assert text is not None
+            assert "Lab Report" in text
+            assert "Write up your findings" in text
+            assert "Course nav" not in text
+            assert "var x = 1" not in text
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_fetch_page_text_returns_none_for_non_html():
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/attachment/download/1":
+                return httpx.Response(
+                    200, content=b"%PDF-1.4 fake bytes", headers={"content-type": "application/pdf"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            text = await client.fetch_page_text(f"{BASE_URL}/attachment/download/1")
+            assert text is None
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 HOME_COURSE_LIST_PAGE = """
 <html><body>
   <nav>

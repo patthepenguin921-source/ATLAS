@@ -56,10 +56,21 @@ Every phase produces a usable application. Status reflects what's in this repo.
       to `courses.is_active`, so a class whose grading period ended moves out
       of the main courses grid into a collapsed "Completed classes" section
       instead of staying mixed in with the current term
+- [x] Full Google OAuth connect (`GET/POST /integrations/google/{connect,
+      callback,disconnect}`, "Connect Google Drive" under Settings →
+      Schoology) — a one-time consent grants a long-lived refresh token, so
+      Schoology-linked Google Docs/Slides/Sheets download in the background
+      on every sync without the student re-authorizing, unlike the separate,
+      one-off Drive Picker token used by Documents → "Import from Drive"
+- [x] Schoology materials-tree gaps: assignment-typed links (previously
+      silently skipped) now become real `assignments` rows; Google Docs
+      embedded in a Schoology-chrome viewer page (not linked directly) are
+      detected and downloaded; "Week/Unit at a Glance" documents are parsed
+      into a day-by-day class schedule (course page) plus any assignments
+      they mention; any remaining unrecognized link is flagged
+      (`documents.needs_review`) instead of filed silently
 
-**Next:** implement the Blackboard provider through `integrations/base.py`, and
-add a full Google OAuth connect so Schoology-linked Drive files download in the
-background without a per-sync token.
+**Next:** implement the Blackboard provider through `integrations/base.py`.
 
 ## Phase 3 — Adaptive intelligence ✅ (largely implemented)
 - [x] Daily planning (Planner agent → `daily_plans`)

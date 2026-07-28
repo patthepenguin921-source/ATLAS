@@ -35,7 +35,7 @@ from app.config import settings
 from app.core.crypto import decrypt_json, encrypt_json
 from app.core.r2_client import r2, safe_object_name
 from app.core.supabase_client import eq, supabase
-from app.integrations import course_mapping
+from app.integrations import course_mapping, google_oauth
 from app.integrations.base import IntegrationProvider
 from app.integrations.google_files import (
     download_google_file,
@@ -286,6 +286,18 @@ def merge_scraper_credentials(existing_secret_ref: str, username: str, password:
     return encrypt_json(creds)
 
 
+def merge_google_refresh_token(existing_secret_ref: str, refresh_token: str) -> str:
+    """Add (or replace) a Google OAuth refresh token on top of an existing
+    encrypted secret blob, alongside whatever Schoology credentials are
+    already there — same "one encrypted blob per user" pattern as
+    `merge_scraper_credentials`. A refresh token is long-lived, effectively
+    persistent Drive access, so unlike the short-lived access token
+    (harmless in the plain `config` column) it belongs in `secret_ref`."""
+    creds = decrypt_json(existing_secret_ref) if existing_secret_ref else {}
+    creds["google_refresh_token"] = refresh_token
+    return encrypt_json(creds)
+
+
 def _map_category(text: str) -> str:
     low = (text or "").lower()
     for key in _CATEGORY_KEYWORDS:
@@ -338,6 +350,51 @@ class SchoologyProvider(IntegrationProvider):
                 "Schoology isn't connected yet — add your Schoology login first."
             )
         return rows[0]
+
+    async def _resolve_google_token(
+        self, user_id: str, integration: dict[str, Any]
+    ) -> str | None:
+        """A Google access token is only good for about an hour, but a sync
+        runs on its own schedule (twice a day) indefinitely — refresh from
+        the stored refresh token (see `merge_google_refresh_token`) whenever
+        the cached access token is missing or close to expiring, rather than
+        ever asking the student to re-authorize. Returns None when Google
+        Drive was never connected (or the refresh itself fails), in which
+        case Google links are just flagged for auth same as before."""
+        config = integration.get("config") or {}
+        access_token = config.get("google_access_token")
+        expires_at = config.get("google_token_expires_at")
+        if access_token and expires_at:
+            try:
+                if time.time() < float(expires_at):
+                    return access_token
+            except (TypeError, ValueError):
+                pass
+        secret_ref = integration.get("secret_ref") or ""
+        try:
+            refresh_token = decrypt_json(secret_ref).get("google_refresh_token") if secret_ref else None
+        except Exception:  # noqa: BLE001
+            refresh_token = None
+        if not refresh_token:
+            return None
+        try:
+            tokens = await google_oauth.refresh_access_token(refresh_token)
+        except Exception:  # noqa: BLE001
+            return None
+        new_access_token = tokens.get("access_token")
+        if not new_access_token:
+            return None
+        expires_at = time.time() + float(tokens.get("expires_in") or 3600) - 60
+        try:
+            await supabase.update(
+                "integrations",
+                {"config": {**config, "google_access_token": new_access_token,
+                             "google_token_expires_at": expires_at}},
+                filters={"id": eq(integration["id"])},
+            )
+        except Exception:  # noqa: BLE001
+            pass  # still usable for this run even if persisting the cache fails
+        return new_access_token
 
     def _has_api_key(self, integration: dict[str, Any]) -> bool:
         """Whether an optional personal API key was saved alongside the
@@ -1342,8 +1399,7 @@ class SchoologyProvider(IntegrationProvider):
             await self._sync_materials_only(user_id, integration, report, deadline=deadline)
             return report
 
-        config = integration.get("config") or {}
-        google_token = config.get("google_access_token")  # optional, for Drive downloads
+        google_token = await self._resolve_google_token(user_id, integration)
         client = await self._client(integration)
         # Materials still only ever come from the login-scraper session (see
         # module docstring), but logged in *once* here and reused for every
@@ -1455,7 +1511,7 @@ class SchoologyProvider(IntegrationProvider):
         automated-login pattern that risks tripping Schoology's own bot
         detection (see `export_cookies`'s docstring)."""
         config = integration.get("config") or {}
-        google_token = config.get("google_access_token")
+        google_token = await self._resolve_google_token(user_id, integration)
         progress = config.get("_sync_progress")
         resuming = bool(progress and progress.get("pending") is not None)
 

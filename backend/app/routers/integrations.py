@@ -6,15 +6,21 @@ Automation (n8n) can also call these endpoints on a schedule.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 
+from app.config import settings
+from app.core.crypto import decrypt_json, encrypt_json
 from app.core.security import CurrentUser, check_cron_secret, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.integrations import (
     PROVIDERS,
     cancel_sync,
+    google_oauth,
     reconcile_stale_syncs,
     run_sync,
     run_sync_for_all,
@@ -25,6 +31,7 @@ from app.integrations.powerschool_client import PowerSchoolClient
 from app.integrations.schoology import (
     SchoologyProvider,
     encrypt_api_key,
+    merge_google_refresh_token,
     merge_scraper_credentials,
 )
 from app.integrations.schoology_client import API_BASE as SCHOOLOGY_API_BASE
@@ -128,6 +135,111 @@ async def cron_sync_provider_post(provider: str, request: Request):
 @router.delete("/{provider}", status_code=204)
 async def disconnect_integration(provider: str, user: CurrentUser = Depends(get_current_user)):
     await supabase.delete("integrations", filters={"user_id": eq(user.id), "provider": eq(provider)})
+    return None
+
+
+def _google_redirect_uri() -> str:
+    if not settings.atlas_api_base_url:
+        raise HTTPException(503, "ATLAS_API_BASE_URL isn't set — required for Google OAuth's redirect.")
+    return f"{settings.atlas_api_base_url.rstrip('/')}/integrations/google/callback"
+
+
+@router.get("/google/connect")
+async def connect_google(user: CurrentUser = Depends(get_current_user)):
+    """Kicks off the one-time Google consent flow that lets the Schoology
+    sync download a Google Doc/Slides/Sheet it finds in course materials in
+    the background, without the student re-authorizing on any cadence — see
+    `google_oauth.py`'s docstring for how this differs from the Drive
+    Picker's one-off token. Returns the consent URL (rather than redirecting
+    server-side) since this is called via `fetch` with the app's normal
+    Bearer auth header; the frontend does the actual full-page navigation,
+    which a fetch response can't trigger on its own."""
+    if not settings.has_google_oauth:
+        raise HTTPException(503, "Google Drive connection isn't configured on this server yet.")
+    existing = await supabase.select(
+        "integrations", filters={"user_id": eq(user.id), "provider": eq("schoology")}, limit=1,
+    )
+    if not existing:
+        raise HTTPException(400, "Connect Schoology first — Google Drive access is used by its sync.")
+    state = encrypt_json({"user_id": user.id, "ts": time.time()})
+    return {"url": google_oauth.build_auth_url(state, _google_redirect_uri())}
+
+
+@router.get("/google/callback")
+async def google_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    """Google redirects the browser here after the consent screen — a
+    redirect can't carry the app's Bearer token, so the user is recovered
+    from `state` (the encrypted, short-lived blob `connect_google` minted)
+    instead of `get_current_user`. Always ends in a redirect back to the
+    frontend's Integrations tab, success or failure — there's no JSON caller
+    waiting on this response, only a browser tab that just left Google."""
+    frontend = (settings.atlas_frontend_base_url or "").rstrip("/")
+    if not frontend:
+        raise HTTPException(503, "ATLAS_FRONTEND_BASE_URL isn't set — required for Google OAuth's callback.")
+
+    def _redirect(status: str, detail: str = "") -> RedirectResponse:
+        params = {"google": status}
+        if detail:
+            params["detail"] = detail[:200]
+        return RedirectResponse(f"{frontend}/settings?tab=Integrations&{urlencode(params)}")
+
+    if error:
+        return _redirect("error", error)
+    if not code or not state:
+        return _redirect("error", "missing_code")
+    try:
+        user_id = decrypt_json(state)["user_id"]
+    except Exception:  # noqa: BLE001
+        return _redirect("error", "invalid_state")
+    try:
+        tokens = await google_oauth.exchange_code(code, _google_redirect_uri())
+    except google_oauth.GoogleOAuthError as e:
+        return _redirect("error", str(e))
+
+    rows = await supabase.select(
+        "integrations", filters={"user_id": eq(user_id), "provider": eq("schoology")}, limit=1,
+    )
+    if not rows:
+        return _redirect("error", "schoology_not_connected")
+    row = rows[0]
+    expires_in = tokens.get("expires_in") or 3600
+    config = {
+        **(row.get("config") or {}), "google_connected": True,
+        "google_access_token": tokens.get("access_token"),
+        "google_token_expires_at": time.time() + float(expires_in) - 60,
+    }
+    patch: dict[str, Any] = {"config": config}
+    refresh_token = tokens.get("refresh_token")
+    if refresh_token:  # Google omits this on a re-consent it treats as unchanged
+        patch["secret_ref"] = merge_google_refresh_token(row.get("secret_ref") or "", refresh_token)
+    await supabase.update("integrations", patch, filters={"id": eq(row["id"])})
+    return _redirect("connected")
+
+
+@router.post("/google/disconnect", status_code=204)
+async def disconnect_google(user: CurrentUser = Depends(get_current_user)):
+    """Clears the stored Google grant from the Schoology integration row —
+    Google links found in materials afterward go back to being flagged for
+    auth instead of downloaded, same as before this was ever connected."""
+    rows = await supabase.select(
+        "integrations", filters={"user_id": eq(user.id), "provider": eq("schoology")}, limit=1,
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    config = dict(row.get("config") or {})
+    config.pop("google_connected", None)
+    config.pop("google_access_token", None)
+    config.pop("google_token_expires_at", None)
+    patch: dict[str, Any] = {"config": config}
+    if row.get("secret_ref"):
+        try:
+            secret = decrypt_json(row["secret_ref"])
+        except Exception:  # noqa: BLE001
+            secret = None
+        if secret is not None and secret.pop("google_refresh_token", None) is not None:
+            patch["secret_ref"] = encrypt_json(secret)
+    await supabase.update("integrations", patch, filters={"id": eq(row["id"])})
     return None
 
 

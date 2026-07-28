@@ -12,6 +12,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -19,12 +20,15 @@ from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 
+import app.core.crypto as crypto_module
 from app.agents.archivist import Archivist
 from app.config import settings
+from app.core.crypto import encrypt_json
 from app.core.r2_client import r2
 from app.core.supabase_client import supabase
-from app.integrations import course_mapping, google_files
+from app.integrations import course_mapping, google_files, google_oauth as google_oauth_module
 from app.integrations.schoology import (
     SchoologyProvider,
     _is_schoology_url,
@@ -2154,3 +2158,81 @@ def test_sync_scraped_materials_flags_unrecognized_external_link(fake_db):
     doc = fake_db.tables["documents"][0]
     assert doc["needs_review"] is True
     assert doc["metadata"]["review_reason"] == "unrecognized_link"
+
+
+# ---------------------------------------------------------------------------
+# `_resolve_google_token` — refreshing a stored Google OAuth grant (see
+# `app.integrations.google_oauth`) so the sync never needs the student to
+# re-authorize on any cadence, unlike the old plain `config.get(
+# "google_access_token")` read this replaced.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def crypto_key(monkeypatch):
+    monkeypatch.setattr(settings, "atlas_secret_key", Fernet.generate_key().decode())
+    crypto_module._fernet.cache_clear()
+    yield
+    crypto_module._fernet.cache_clear()
+
+
+def test_resolve_google_token_returns_cached_token_without_refreshing(fake_db, crypto_key, monkeypatch):
+    provider = SchoologyProvider()
+    integration = {
+        "id": "int-1", "user_id": USER_ID,
+        "config": {"google_access_token": "cached-tok", "google_token_expires_at": time.time() + 3600},
+        "secret_ref": "",
+    }
+
+    async def _unexpected_refresh(refresh_token):
+        raise AssertionError("should not refresh a still-valid cached token")
+
+    monkeypatch.setattr(google_oauth_module, "refresh_access_token", _unexpected_refresh)
+
+    token = asyncio.run(provider._resolve_google_token(USER_ID, integration))
+    assert token == "cached-tok"
+
+
+def test_resolve_google_token_refreshes_when_expired(fake_db, crypto_key, monkeypatch):
+    provider = SchoologyProvider()
+    secret_ref = encrypt_json({"schoology_username": "u", "google_refresh_token": "rtok"})
+    fake_db.tables["integrations"] = [{
+        "id": "int-1", "user_id": USER_ID, "provider": "schoology",
+        "config": {"domain": "x", "google_access_token": "stale-tok", "google_token_expires_at": time.time() - 10},
+        "secret_ref": secret_ref,
+    }]
+    integration = fake_db.tables["integrations"][0]
+
+    async def _fake_refresh(refresh_token):
+        assert refresh_token == "rtok"
+        return {"access_token": "fresh-tok", "expires_in": 3600}
+
+    monkeypatch.setattr(google_oauth_module, "refresh_access_token", _fake_refresh)
+
+    token = asyncio.run(provider._resolve_google_token(USER_ID, integration))
+
+    assert token == "fresh-tok"
+    updated = fake_db.tables["integrations"][0]
+    assert updated["config"]["google_access_token"] == "fresh-tok"
+    assert updated["config"]["domain"] == "x"  # existing config preserved
+    assert updated["config"]["google_token_expires_at"] > time.time()
+
+
+def test_resolve_google_token_returns_none_without_a_refresh_token(fake_db, crypto_key):
+    provider = SchoologyProvider()
+    integration = {"id": "int-1", "user_id": USER_ID, "config": {}, "secret_ref": ""}
+    token = asyncio.run(provider._resolve_google_token(USER_ID, integration))
+    assert token is None
+
+
+def test_resolve_google_token_returns_none_when_refresh_fails(fake_db, crypto_key, monkeypatch):
+    provider = SchoologyProvider()
+    secret_ref = encrypt_json({"google_refresh_token": "revoked-token"})
+    integration = {"id": "int-1", "user_id": USER_ID, "config": {}, "secret_ref": secret_ref}
+
+    async def _fake_refresh(refresh_token):
+        raise google_oauth_module.GoogleOAuthError("token revoked")
+
+    monkeypatch.setattr(google_oauth_module, "refresh_access_token", _fake_refresh)
+
+    token = asyncio.run(provider._resolve_google_token(USER_ID, integration))
+    assert token is None

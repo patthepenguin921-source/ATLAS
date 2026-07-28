@@ -67,6 +67,31 @@ _CATEGORY_KEYWORDS = (
 
 _ASSIGNMENT_CATEGORY_VALUES = frozenset(_CATEGORY_KEYWORDS) | {"other"}
 
+# A materials-page item whose href contains "assignment" (Schoology's own
+# assignment detail pages are shaped like /course/{id}/assignment/{id}/...)
+# is real assignment content even when it only ever turns up during a
+# materials walk rather than the Assignments API -- some districts' API
+# keys can't see assignments at all (see this module's docstring), and even
+# when they can, the same assignment often also appears as a materials-tree
+# item. `_classify_link` already tags these "assignment" via Schoology's own
+# a11y type prefix when it survives; the href check is a fallback for when
+# it doesn't.
+_ASSIGNMENT_HREF_RE = re.compile(r"assignment", re.I)
+
+# A "Week at a Glance"/"Unit at a Glance" document is a teacher's own
+# day-by-day rundown of what happens in class -- topics, activities, and
+# often assignments due -- laid out however they wrote it (a table, a
+# bulleted list, prose). Matched by title regardless of material type: it
+# can arrive as an attached file, a linked Google Doc, or a Schoology Page
+# with the content typed directly into it.
+_GLANCE_TITLE_RE = re.compile(r"\b(?:week|unit|day)s?\s+at\s+a\s+glance\b", re.I)
+
+# Scraped material types most likely to be a Schoology-chrome wrapper around
+# an embedded Google Doc/Slides/Sheet rather than a direct docs.google.com
+# link -- probing every item type for an embed would cost an extra request
+# per item for types (discussion/quiz/album/...) where it's never the case.
+_PROBABLE_VIEWER_TYPES = frozenset({"", "link", "page"})
+
 
 async def _classify_google_doc(title: str, text: str) -> dict[str, Any] | None:
     """Not every Google Doc a teacher links from course materials is an
@@ -106,6 +131,108 @@ Return JSON with this exact shape:
         return result if isinstance(result, dict) else None
     except Exception:  # noqa: BLE001
         return None
+
+
+async def _extract_assignment_from_page(title: str, text: str) -> dict[str, Any]:
+    """An assignment-type materials item's own detail page has whatever
+    instructions + due date the teacher wrote, mixed in with however that
+    district's Schoology template lays the page out -- ask the reasoning
+    engine to pull a clean description/due date out rather than hand-writing
+    brittle selectors for every template variant. Falls back to the raw page
+    text as the description (no due date) when no LLM is configured or the
+    call fails, so the assignment still gets created either way."""
+    fallback: dict[str, Any] = {
+        "description": text.strip()[:8000] if text else None,
+        "due_date": None, "category": _map_category(title),
+    }
+    if not settings.has_llm or not (text or "").strip():
+        return fallback
+    excerpt = text.strip()[:4000]
+    prompt = f"""\
+A Schoology assignment titled "{title}" has this page content (instructions, \
+due date, and page chrome all mixed together):
+\"\"\"
+{excerpt}
+\"\"\"
+
+Return JSON with this exact shape:
+{{
+  "description": "just the instructions/prompt text a student needs, cleaned of navigation chrome -- or null if none is present",
+  "due_date": "YYYY-MM-DD if a due date is explicitly stated, else null",
+  "category": "one of homework/classwork/quiz/test/exam/project/essay/lab/discussion/presentation/reading/participation/other"
+}}"""
+    try:
+        result = await claude.complete_json(
+            system="You are Atlas's Archivist, precisely extracting assignment details.",
+            prompt=prompt, max_tokens=600, temperature=0.0,
+        )
+    except Exception:  # noqa: BLE001
+        return fallback
+    if not isinstance(result, dict):
+        return fallback
+    category = result.get("category")
+    if category not in _ASSIGNMENT_CATEGORY_VALUES:
+        category = fallback["category"]
+    return {
+        "description": result.get("description") or fallback["description"],
+        "due_date": result.get("due_date"),
+        "category": category,
+    }
+
+
+async def _extract_schedule_from_text(title: str, text: str) -> list[dict[str, Any]]:
+    """A 'Week/Unit at a Glance' document lays out what happens each day in
+    whatever shape the teacher wrote it in -- a table, a bulleted list,
+    prose -- so there's no reliable DOM/regex to hang a parser on. Ask the
+    reasoning engine to read it like a student would and return one entry
+    per day it actually names, each with the day's topic and any assignment
+    due. No LLM configured means no schedule -- there's no safe non-LLM
+    fallback for free-form date parsing here the way `_extract_assignment_
+    from_page` has one (a raw-text dump isn't useful as a "day")."""
+    if not settings.has_llm or not text.strip():
+        return []
+    excerpt = text.strip()[:6000]
+    today = date.today().isoformat()
+    prompt = f"""\
+A teacher posted a document titled "{title}" in a Schoology course. It lays \
+out what happens in class on specific days (a "week at a glance" or "unit \
+at a glance" schedule). Today's date is {today} -- use it only to resolve a \
+date that's missing its year, never to invent a date the document doesn't \
+state.
+
+Read the document and list every day it actually names, with what's \
+happening that day and any assignment due that day.
+
+Document text (may be truncated):
+\"\"\"
+{excerpt}
+\"\"\"
+
+Return JSON with this exact shape:
+{{
+  "days": [
+    {{
+      "date": "YYYY-MM-DD -- omit this entire entry if you can't resolve an actual calendar date for it",
+      "topic": "short summary of what happens this day in class",
+      "assignments": [
+        {{"title": "...", "due_date": "YYYY-MM-DD or null", "category": "one of homework/classwork/quiz/test/exam/project/essay/lab/discussion/presentation/reading/participation/other"}}
+      ]
+    }}
+  ]
+}}
+Omit assignments with no clear title."""
+    try:
+        result = await claude.complete_json(
+            system="You are Atlas's Archivist, precisely extracting a class schedule from a teacher's document.",
+            prompt=prompt, max_tokens=1500, temperature=0.0,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    days = result.get("days") if isinstance(result, dict) else None
+    if not isinstance(days, list):
+        return []
+    return [d for d in days if isinstance(d, dict) and d.get("date")]
+
 
 # How many courses' assignments/events/materials walks run at once. Was 4
 # (motivated by the original 45-60s request timeout — see git history), but
@@ -860,7 +987,7 @@ class SchoologyProvider(IntegrationProvider):
         self, *, user_id: str, course_id: str, external_id: str, title: str,
         content: bytes, filename: str, content_type: str, doc_type: str = "other",
         extra_meta: dict[str, Any] | None = None, report: dict[str, Any] | None = None,
-        classify_as_assignment: bool = False,
+        classify_as_assignment: bool = False, extract_schedule: bool = False,
     ) -> bool:
         """Store + text-extract + embed a binary file (pdf/pptx/doc/…). Returns
         True if newly ingested, False if nothing new happened — either it
@@ -942,6 +1069,11 @@ class SchoologyProvider(IntegrationProvider):
                 source_url=(extra_meta or {}).get("source_url") or "",
                 report=report,
             )
+        if extract_schedule and text.strip():
+            await self._apply_schedule_from_doc(
+                user_id=user_id, course_id=course_id, title=title, text=text,
+                report=report, source_document_id=doc_id,
+            )
         return True
 
     async def _link_assignment_from_google_doc(
@@ -979,9 +1111,107 @@ class SchoologyProvider(IntegrationProvider):
             if report is not None:
                 report["errors"].append(f"{title}: detected as assignment but couldn't save it ({e})")
 
+    async def _apply_schedule_from_doc(
+        self, *, user_id: str, course_id: str, title: str, text: str,
+        report: dict[str, Any] | None, source_document_id: str | None = None,
+    ) -> None:
+        """Turn a parsed 'at a glance' schedule into `calendar_events` rows
+        (`kind="class"`, so the course page can show a day-by-day view) plus
+        any assignments it mentions — teachers often only ever list an
+        assignment's due date in a schedule like this, never as a proper
+        Schoology Assignment."""
+        days = await _extract_schedule_from_text(title, text)
+        for day in days:
+            iso_date = day.get("date")
+            if not iso_date:
+                continue
+            try:
+                await self._upsert_calendar_event(
+                    user_id, f"schoology:class:{course_id}:{iso_date}", {
+                        "course_id": course_id, "title": day.get("topic") or title,
+                        "description": day.get("topic") or None,
+                        "starts_at": iso_date, "all_day": True, "kind": "class",
+                        "metadata": {
+                            "source_document_id": source_document_id,
+                            "detected_from": "glance_doc",
+                        },
+                    },
+                )
+                if report is not None:
+                    report["events"] += 1
+            except Exception as e:  # noqa: BLE001
+                if report is not None:
+                    report["errors"].append(f"{title} ({iso_date}): couldn't save class schedule ({e})")
+            for a in (day.get("assignments") or []):
+                a_title = (a.get("title") or "").strip() if isinstance(a, dict) else ""
+                if not a_title:
+                    continue
+                category = a.get("category")
+                if category not in _ASSIGNMENT_CATEGORY_VALUES:
+                    category = _map_category(a_title)
+                due = a.get("due_date") or iso_date
+                ext_id = f"schoology:glance-assignment:{course_id}:{_normalize_name(a_title)}"
+                try:
+                    await self.upsert_assignment(user_id, ext_id, {
+                        "course_id": course_id, "title": a_title, "category": category,
+                        "due_date": due, "status": "not_started",
+                        "metadata": {
+                            "source_document_id": source_document_id,
+                            "detected_from": "glance_doc",
+                        },
+                    })
+                    if report is not None:
+                        report["assignments"] += 1
+                except Exception as e:  # noqa: BLE001
+                    if report is not None:
+                        report["errors"].append(
+                            f"{a_title}: detected as assignment but couldn't save it ({e})"
+                        )
+
+    async def _ingest_scraped_assignment(
+        self, *, user_id: str, course_id: str, section: SchoologySection,
+        item: MaterialLink, scraper: SchoologyScraperClient,
+        known_assignment_titles: set[str], report: dict[str, Any],
+    ) -> None:
+        """A materials-page item Schoology itself typed "assignment" (or
+        whose href otherwise contains "assignment") is real assignment
+        content even though it only ever showed up during a materials walk
+        rather than through the Assignments API — some districts' API keys
+        can't see assignments any other way (see this module's docstring),
+        and even when they can, the same assignment often also appears in
+        the materials tree. Skips anything whose title already matches an
+        assignment on file for this course (regardless of how it got
+        there — the real Assignments API may have already imported the same
+        one): unlike file/document materials, a scraped assignment is never
+        recorded as a `documents` row, so it has no entry in the
+        `known_names` set `_sync_scraped_materials` dedupes against
+        otherwise, and would be re-fetched (and re-run through the LLM)
+        every single sync without this check."""
+        if _normalize_name(item.name) in known_assignment_titles:
+            report["skipped"] += 1
+            return
+        try:
+            text = await scraper.fetch_page_text(item.href)
+        except Exception as e:  # noqa: BLE001
+            text = None
+            report["errors"].append(f"{section.display_name} · {item.name}: {e}")
+        details = await _extract_assignment_from_page(item.name, text or "")
+        external_id = f"scrape:{section.id}:assignment:{_normalize_name(item.name)}"
+        try:
+            await self.upsert_assignment(user_id, external_id, {
+                "course_id": course_id, "title": item.name,
+                "description": details["description"], "category": details["category"],
+                "due_date": details["due_date"], "status": "not_started",
+                "metadata": {"web_url": item.href, "detected_from": "scraped_materials"},
+            })
+            report["assignments"] += 1
+        except Exception as e:  # noqa: BLE001
+            report["errors"].append(f"{item.name}: detected as assignment but couldn't save it ({e})")
+
     async def _ingest_text(
         self, *, user_id: str, course_id: str, external_id: str, title: str,
         text: str, doc_type: str = "other", extra_meta: dict[str, Any] | None = None,
+        needs_review: bool = False,
     ) -> bool:
         if await self._document_exists(user_id, external_id):
             return False
@@ -991,6 +1221,7 @@ class SchoologyProvider(IntegrationProvider):
             "title": title or "Untitled", "doc_type": doc_type,
             "size_bytes": len(text or ""),
             "external_id": external_id, "external_source": self.name,
+            "needs_review": needs_review,
             "metadata": extra_meta or {},
         })
         try:
@@ -1041,7 +1272,10 @@ class SchoologyProvider(IntegrationProvider):
     ) -> None:
         """A linked resource. Google Docs/Slides/Sheets are fully downloaded &
         ingested when a Google token is available; otherwise (and for other
-        links) the link itself is recorded as searchable knowledge and flagged."""
+        links) the link itself is recorded as searchable knowledge and
+        flagged (`needs_review`) since Atlas doesn't actually know what's
+        behind an un-downloaded link."""
+        is_glance = bool(_GLANCE_TITLE_RE.search(title))
         if is_google_url(url):
             ref = parse_google_url(url)
             if ref and google_token:
@@ -1054,7 +1288,7 @@ class SchoologyProvider(IntegrationProvider):
                         title=title, content=content, filename=filename,
                         content_type=content_type, doc_type="other",
                         extra_meta={"source_url": url, "google_file_id": ref.file_id},
-                        report=report,
+                        report=report, extract_schedule=is_glance,
                     ):
                         report["documents"] += 1
                     return
@@ -1065,15 +1299,19 @@ class SchoologyProvider(IntegrationProvider):
             if await self._ingest_text(
                 user_id=user_id, course_id=course_id, external_id=external_id,
                 title=title, text=f"{title}\n{url}", doc_type="other",
-                extra_meta={"source_url": url, "needs_google_auth": True},
+                extra_meta={"source_url": url, "needs_google_auth": True,
+                            "review_reason": "needs_google_auth"},
+                needs_review=True,
             ):
                 report["links"] += 1
             return
-        # Non-Google link: store the reference as knowledge.
+        # Non-Google link: store the reference as knowledge, flagged since
+        # Atlas can't otherwise tell what kind of link this is.
         if await self._ingest_text(
             user_id=user_id, course_id=course_id, external_id=external_id,
             title=title, text=f"{title}\n{url}", doc_type="other",
-            extra_meta={"source_url": url},
+            extra_meta={"source_url": url, "review_reason": "unrecognized_link"},
+            needs_review=True,
         ):
             report["links"] += 1
 
@@ -1565,6 +1803,19 @@ class SchoologyProvider(IntegrationProvider):
                 if not (row.get("mime_type") and not row.get("storage_path"))
             } - {""}
 
+            # A scraped "assignment"-type item is never recorded as a
+            # `documents` row (see `_ingest_scraped_assignment`), so it has
+            # no entry in `known_names` above — dedupe those separately
+            # against this course's existing assignment titles instead, so
+            # one isn't re-fetched (and re-run through the LLM) every sync.
+            existing_assignments = await supabase.select(
+                "assignments", columns="title",
+                filters={"user_id": eq(user_id), "course_id": eq(course_id)},
+            ) or []
+            known_assignment_titles = {
+                _normalize_name(row.get("title") or "") for row in existing_assignments
+            } - {""}
+
             materials_url = course_mapping.materials_url_for(section.id)
             if materials_url:
                 items = await scraper.walk_known_url(materials_url, known_names=known_names)
@@ -1575,7 +1826,8 @@ class SchoologyProvider(IntegrationProvider):
             for item in items:
                 await self._ingest_scraped_material(
                     user_id=user_id, course_id=course_id, section=section,
-                    item=item, scraper=scraper, google_token=google_token, report=report,
+                    item=item, scraper=scraper, google_token=google_token,
+                    known_assignment_titles=known_assignment_titles, report=report,
                 )
         except SchoologyScraperAuthError as e:
             report["errors"].append(f"{section.display_name} materials (scrape login): {e}")
@@ -1594,7 +1846,8 @@ class SchoologyProvider(IntegrationProvider):
     async def _ingest_scraped_material(
         self, *, user_id: str, course_id: str, section: SchoologySection,
         item: MaterialLink, scraper: SchoologyScraperClient,
-        google_token: str | None, report: dict[str, Any],
+        google_token: str | None, known_assignment_titles: set[str],
+        report: dict[str, Any],
     ) -> None:
         """Download and record one new scraped item — but only when there's
         something real behind it. Reported failure modes this guards
@@ -1608,6 +1861,9 @@ class SchoologyProvider(IntegrationProvider):
             `_ingest_link`) when a Google token is available; without one
             it's recorded as a reference and flagged for auth — it's still
             a real Google Drive link even though nothing's downloaded yet.
+          - Anything Schoology itself labeled "Assignment" (or whose href
+            otherwise contains "assignment") is real assignment content —
+            see `_ingest_scraped_assignment`.
           - Anything Schoology itself labeled a "File"/"Document" (see
             `MaterialLink.material_type`) is fetched through the
             authenticated scraper session and ingested like any other
@@ -1618,13 +1874,25 @@ class SchoologyProvider(IntegrationProvider):
             with no real content; it'll be retried on the next sync since
             skipping it (unlike ingesting a stub) never adds its name to
             the known-items set.
+          - A "Link"/"Page"/unlabeled item that isn't any of the above gets
+            probed for a Google Doc/Slides/Sheet embedded inside it — some
+            districts' templates open a Google Doc in a Schoology-chrome
+            viewer instead of linking straight to docs.google.com — before
+            falling through to the generic cases below.
+          - A "Week/Unit at a Glance" title (see `_GLANCE_TITLE_RE`) that
+            isn't a downloadable file or a Google Doc gets its own page text
+            fetched directly (it's often a Schoology Page with the schedule
+            typed straight into it) and run through `_apply_schedule_from_doc`.
           - Everything else is recorded as a reference only if the link
             actually goes somewhere off schoology.com — a genuine external
-            link is worth keeping even without downloading it. A link that
-            stays on schoology.com (a folder, page, discussion, or other
-            internal placeholder — including a folder that slipped past
-            `_classify_link`'s folder detection) has nothing real behind it
-            and is skipped instead of being filed as an empty document.
+            link is worth keeping even without downloading it, but since
+            Atlas can't tell what it actually is, it's flagged
+            (`needs_review`/`review_reason="unrecognized_link"`) for a
+            manual look. A link that stays on schoology.com (a folder, page,
+            discussion, or other internal placeholder — including a folder
+            that slipped past `_classify_link`'s folder detection) has
+            nothing real behind it and is skipped instead of being filed as
+            an empty document.
         `material_name` is always set in metadata for anything actually
         ingested — `_sync_scraped_materials` reads it back to build the
         already-known set for the next scan's dedupe."""
@@ -1634,6 +1902,7 @@ class SchoologyProvider(IntegrationProvider):
             "material_name": item.name, "folder": item.folder_path or None,
             "material_type": item.material_type or None, "source_url": item.href,
         }
+        is_glance = bool(_GLANCE_TITLE_RE.search(item.name))
 
         if is_google_url(item.href):
             ref = parse_google_url(item.href)
@@ -1648,6 +1917,7 @@ class SchoologyProvider(IntegrationProvider):
                         content_type=content_type, doc_type="other",
                         extra_meta={**base_meta, "google_file_id": ref.file_id},
                         report=report, classify_as_assignment=True,
+                        extract_schedule=is_glance,
                     ):
                         report["documents"] += 1
                     return
@@ -1658,10 +1928,23 @@ class SchoologyProvider(IntegrationProvider):
                 if await self._ingest_text(
                     user_id=user_id, course_id=course_id, external_id=external_id,
                     title=title, text=f"{title}\n{item.href}", doc_type="other",
-                    extra_meta={**base_meta, "needs_google_auth": True},
+                    extra_meta={**base_meta, "needs_google_auth": True,
+                                "review_reason": "needs_google_auth"},
+                    needs_review=True,
                 ):
                     report["documents"] += 1
                 return
+
+        elif (
+            (item.material_type or "").lower() == "assignment"
+            or _ASSIGNMENT_HREF_RE.search(item.href or "")
+        ):
+            await self._ingest_scraped_assignment(
+                user_id=user_id, course_id=course_id, section=section, item=item,
+                scraper=scraper, known_assignment_titles=known_assignment_titles,
+                report=report,
+            )
+            return
 
         elif (item.material_type or "").lower() in self._SCRAPED_FILE_TYPES:
             try:
@@ -1675,7 +1958,7 @@ class SchoologyProvider(IntegrationProvider):
                     user_id=user_id, course_id=course_id, external_id=external_id,
                     title=title, content=content, filename=item.name,
                     content_type=content_type, doc_type="other", extra_meta=base_meta,
-                    report=report,
+                    report=report, extract_schedule=is_glance,
                 ):
                     report["documents"] += 1
                 return
@@ -1685,13 +1968,82 @@ class SchoologyProvider(IntegrationProvider):
             report["skipped"] += 1
             return
 
-        # Not a Google link, not a downloadable file — only worth a
-        # reference if it actually leads somewhere off schoology.com.
+        # Not a direct Google link, not an assignment, not a downloadable
+        # file — check for a Google Doc embedded in a Schoology-chrome
+        # viewer page before falling through to the generic cases.
+        embedded_google_href: str | None = None
+        if (item.material_type or "").lower() in _PROBABLE_VIEWER_TYPES:
+            try:
+                embedded_google_href = await scraper.find_embedded_google_url(item.href)
+            except Exception:  # noqa: BLE001
+                embedded_google_href = None
+        if embedded_google_href:
+            ref = parse_google_url(embedded_google_href)
+            if ref and google_token:
+                try:
+                    content, filename, content_type = await download_google_file(
+                        ref, google_token, name=title,
+                    )
+                    if await self._ingest_file(
+                        user_id=user_id, course_id=course_id, external_id=external_id,
+                        title=title, content=content, filename=filename,
+                        content_type=content_type, doc_type="other",
+                        extra_meta={**base_meta, "google_file_id": ref.file_id,
+                                    "source_url": embedded_google_href},
+                        report=report, classify_as_assignment=True,
+                        extract_schedule=is_glance,
+                    ):
+                        report["documents"] += 1
+                    return
+                except Exception as e:  # noqa: BLE001
+                    report["errors"].append(f"{section.display_name} · {item.name}: {e}")
+            elif ref:
+                if await self._ingest_text(
+                    user_id=user_id, course_id=course_id, external_id=external_id,
+                    title=title, text=f"{title}\n{embedded_google_href}", doc_type="other",
+                    extra_meta={**base_meta, "needs_google_auth": True,
+                                "review_reason": "needs_google_auth",
+                                "source_url": embedded_google_href},
+                    needs_review=True,
+                ):
+                    report["documents"] += 1
+                return
+
+        # A "Week/Unit at a Glance" schedule whose content lives directly on
+        # a Schoology page rather than a file or Google Doc.
+        if is_glance:
+            try:
+                page_text = await scraper.fetch_page_text(item.href)
+            except Exception as e:  # noqa: BLE001
+                page_text = None
+                report["errors"].append(f"{section.display_name} · {item.name}: {e}")
+            if page_text and page_text.strip():
+                if await self._ingest_text(
+                    user_id=user_id, course_id=course_id, external_id=external_id,
+                    title=title, text=page_text, doc_type="other", extra_meta=base_meta,
+                ):
+                    report["documents"] += 1
+                await self._apply_schedule_from_doc(
+                    user_id=user_id, course_id=course_id, title=title, text=page_text,
+                    report=report,
+                )
+                return
+
+        # Nothing recognized — only worth a reference if it actually leads
+        # somewhere off schoology.com. A link that stays on schoology.com (a
+        # folder, page, discussion, or other internal placeholder) has
+        # nothing real behind it and is skipped instead of being filed as an
+        # empty document.
         if _is_schoology_url(item.href):
             report["skipped"] += 1
             return
+        # A genuine external link Atlas can't otherwise classify — keep it
+        # as a reference, but flag it for a quick manual look rather than
+        # silently filing it as if it were fully understood.
         if await self._ingest_text(
             user_id=user_id, course_id=course_id, external_id=external_id,
-            title=title, text=f"{title}\n{item.href}", doc_type="other", extra_meta=base_meta,
+            title=title, text=f"{title}\n{item.href}", doc_type="other",
+            extra_meta={**base_meta, "review_reason": "unrecognized_link"},
+            needs_review=True,
         ):
             report["documents"] += 1

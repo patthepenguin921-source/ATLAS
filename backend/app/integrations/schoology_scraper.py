@@ -44,6 +44,8 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 import httpx
 from bs4 import BeautifulSoup
 
+from app.integrations.google_files import is_google_url
+
 _LOGIN_PATH = "/login"
 _APP_DOMAIN = "https://app.schoology.com"
 _MAX_MATERIALS_DEPTH = 8
@@ -865,3 +867,54 @@ class SchoologyScraperClient:
             if any(p.search(a["href"]) for p in _FILE_HREF_PATTERNS):
                 _add(a["href"])
         return candidates
+
+    async def find_embedded_google_url(self, url: str) -> str | None:
+        """Some districts' "Link"/"Page" materials don't point straight at
+        `docs.google.com` -- they open a Schoology-chrome detail/viewer page
+        that embeds the actual Google Doc/Slides/Sheet inside an iframe (or,
+        less often, just links to it from within the page body). A caller
+        that's already ruled out a direct Google URL and a direct file
+        download can use this to check for that wrapper case before giving
+        up and filing the item as a plain, un-downloaded reference. Returns
+        the Google URL found, or None if `url` isn't an HTML page or
+        doesn't embed/link to one."""
+        if not self._logged_in:
+            await self.login()
+        r = await self._client.get(url)
+        content_type = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type != "text/html":
+            return None
+        return self._extract_google_url(str(r.url), r.text)
+
+    @staticmethod
+    def _extract_google_url(page_url: str, html: str) -> str | None:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup.find_all(["iframe", "embed", "object"]):
+            src = tag.get("src") or tag.get("data")
+            if src:
+                resolved = urljoin(page_url, src)
+                if is_google_url(resolved):
+                    return resolved
+        for a in soup.find_all("a", href=True):
+            resolved = urljoin(page_url, a["href"])
+            if is_google_url(resolved):
+                return resolved
+        return None
+
+    async def fetch_page_text(self, url: str) -> str | None:
+        """Fetch an authenticated Schoology page and return its main
+        readable text, stripped of script/style/nav chrome -- for material
+        types whose real content is the page itself rather than a
+        downloadable file (an assignment's own instructions page, or a
+        "week/unit at a glance" schedule posted as a Schoology Page instead
+        of an attached document). None if the response isn't HTML."""
+        if not self._logged_in:
+            await self.login()
+        r = await self._client.get(url)
+        content_type = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type != "text/html":
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup.find_all(["script", "style", "nav", "header", "footer"]):
+            tag.decompose()
+        return soup.get_text("\n", strip=True)

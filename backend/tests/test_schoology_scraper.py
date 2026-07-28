@@ -992,6 +992,95 @@ def test_find_embedded_google_url_returns_none_without_a_google_embed():
     asyncio.run(run())
 
 
+def test_find_external_link_target_follows_redirect_off_schoology():
+    """Confirmed against a real account: a Schoology "Link" material's own
+    href is very often itself a Schoology-hosted wrapper page
+    (`.../materials/link/view/{id}`) that just redirects straight through
+    to the real destination -- `find_external_link_target` must land on
+    that final URL rather than treating the wrapper's own schoology.com
+    href as "nothing real behind it"."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/materials/link/view/1":
+                return httpx.Response(302, headers={"location": "https://schoolai.com/tutor/abc"})
+            if str(request.url) == "https://schoolai.com/tutor/abc":
+                return httpx.Response(200, text="<html><body>SchoolAI</body></html>")
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.find_external_link_target(f"{BASE_URL}/materials/link/view/1")
+            assert result == "https://schoolai.com/tutor/abc"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_find_external_link_target_finds_an_off_schoology_anchor():
+    """No redirect this time -- the wrapper page is a static page whose one
+    real piece of content is a "Visit Website"-style link pointing off
+    schoology.com."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/materials/link/view/2":
+                return httpx.Response(
+                    200,
+                    text='<html><body><a href="https://www.desmos.com/calculator">Visit Website</a></body></html>',
+                    headers={"content-type": "text/html; charset=utf-8"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.find_external_link_target(f"{BASE_URL}/materials/link/view/2")
+            assert result == "https://www.desmos.com/calculator"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_find_external_link_target_returns_none_for_genuinely_internal_page():
+    """A wrapper page with nothing external at all (every link on it also
+    stays on schoology.com) must return None so the caller falls back to
+    reading the page's own text instead of a nonexistent external target."""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/login" and request.method == "GET":
+                return httpx.Response(200, text=LOGIN_PAGE)
+            if request.url.path == "/login" and request.method == "POST":
+                return httpx.Response(200, text=DASHBOARD_PAGE)
+            if request.url.path == "/materials/link/view/3":
+                return httpx.Response(
+                    200,
+                    text=f'<html><body><a href="{BASE_URL}/course/1">Back to course</a>'
+                         '<p>Bring a calculator on day one.</p></body></html>',
+                    headers={"content-type": "text/html; charset=utf-8"},
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = SchoologyScraperClient(BASE_URL, VALID_USER, VALID_PASS, transport=transport)
+        try:
+            result = await client.find_external_link_target(f"{BASE_URL}/materials/link/view/3")
+            assert result is None
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_fetch_page_text_strips_chrome_and_returns_visible_text():
     """An assignment/page detail view whose real content is the page itself
     (not a downloadable file) -- `fetch_page_text` must return just the

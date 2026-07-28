@@ -813,12 +813,14 @@ class _FakeScraperClient:
         courses: list[dict[str, str]] | None = None,
         google_pages: dict[str, str] | None = None,
         page_texts: dict[str, str] | None = None,
+        external_targets: dict[str, str] | None = None,
     ):
         self._items = items
         self._files = files or {}
         self._courses = courses or []
         self._google_pages = google_pages or {}
         self._page_texts = page_texts or {}
+        self._external_targets = external_targets or {}
         self.known_names_calls: list[set[str] | None] = []
         self.student_uid_calls: list[str | None] = []
         self.known_url_calls: list[str] = []
@@ -857,6 +859,14 @@ class _FakeScraperClient:
         this page" — a test populates `google_pages` for the specific hrefs
         it wants treated as a Schoology-viewer wrapper around a Google Doc."""
         return self._google_pages.get(url)
+
+    async def find_external_link_target(self, url):
+        """Mirrors the real client: None means "this Schoology-hosted
+        wrapper page (a 'Link' material's own href) has no real external
+        destination discoverable inside it" — a test populates
+        `external_targets` for the specific hrefs it wants treated as
+        resolving (via redirect or an in-page link) to a real destination."""
+        return self._external_targets.get(url)
 
     async def fetch_page_text(self, url):
         """Mirrors the real client: None means "not HTML" (or nothing
@@ -2480,3 +2490,70 @@ def test_sync_scraped_materials_still_skips_file_typed_item_when_nothing_is_reac
 
     assert report["skipped"] == 1
     assert fake_db.tables["documents"] == []
+
+
+def test_sync_scraped_materials_resolves_link_wrapper_page_to_its_real_destination(
+    fake_db, monkeypatch,
+):
+    """The reported real-account bug: a Schoology "Link" material's own
+    href is itself a Schoology-hosted wrapper page
+    (`.../materials/link/view/{id}`), not the destination -- e.g. a class
+    tool link the wrapper redirects straight through to. Previously this
+    was indistinguishable from a genuine internal placeholder (a folder, a
+    plain nav page) and silently skipped every single sync. Must now visit
+    the wrapper and use the real destination it resolves to."""
+    provider = SchoologyProvider()
+    wrapper_url = "https://app.schoology.com/course/8435669068/materials/link/view/8448626675"
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="SchoolAI Tutor", href=wrapper_url, kind="item", material_type="Link")],
+        external_targets={wrapper_url: "https://schoolai.com/tutor/abc123"},
+    )
+
+    import app.integrations.schoology as schoology_module
+
+    async def _fake_fetch(url):
+        assert url == "https://schoolai.com/tutor/abc123"
+        return b"<html><body><p>SchoolAI is an AI tutoring tool for students.</p></body></html>", "text/html"
+
+    monkeypatch.setattr(schoology_module, "_fetch_external_url", _fake_fetch)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["skipped"] == 0
+    assert report["documents"] == 1
+    doc = fake_db.tables["documents"][0]
+    assert doc["needs_review"] is False
+    assert doc["metadata"]["source_url"] == "https://schoolai.com/tutor/abc123"
+
+
+def test_sync_scraped_materials_captures_inline_text_of_a_link_wrapper_with_no_external_target(
+    fake_db, monkeypatch,
+):
+    """A "Link"/"Page" wrapper page with no real external destination
+    (confirmed against a real account: several "Link"-typed items, like a
+    "first day of class" info page, had nothing external at all -- the
+    page's own text *was* the content) must still capture that inline text
+    as a real, summarized document rather than being skipped."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+    wrapper_url = "https://app.schoology.com/course/8435669068/materials/link/view/8448626674"
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="1st Day Informations", href=wrapper_url, kind="item", material_type="Link")],
+        page_texts={wrapper_url: "Bring a graphing calculator and a 3-ring binder on the first day."},
+    )
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["skipped"] == 0
+    assert report["documents"] == 1
+    doc = fake_db.tables["documents"][0]
+    assert doc["needs_review"] is False
+    assert doc.get("storage_path") is None

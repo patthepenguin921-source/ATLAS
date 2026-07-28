@@ -2414,3 +2414,69 @@ def test_resolve_google_token_returns_none_when_refresh_fails(fake_db, crypto_ke
 
     token = asyncio.run(provider._resolve_google_token(USER_ID, integration))
     assert token is None
+
+
+def test_sync_scraped_materials_falls_back_to_external_fetch_when_file_typed_item_wont_download(
+    fake_db, monkeypatch,
+):
+    """A materials item Schoology itself typed "File"/"Document" whose
+    authenticated-session download never resolves to a real file (the
+    reported "still not pulled in" case) must still be tried as a plain
+    external fetch before giving up — some "File"-typed items are actually
+    off-site links the authenticated scraper session has no special
+    handling for, but a normal unauthenticated request can still reach."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Reading Packet", href="https://cdn.example.com/reading",
+                      kind="item", material_type="File")],
+        files={},  # scraper.download_file returns None -- couldn't resolve a direct download
+    )
+
+    import app.integrations.schoology as schoology_module
+
+    async def _fake_fetch(url):
+        assert url == "https://cdn.example.com/reading"
+        return b"<html><body><p>The reading packet's actual content.</p></body></html>", "text/html"
+
+    monkeypatch.setattr(schoology_module, "_fetch_external_url", _fake_fetch)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["skipped"] == 0
+    assert report["documents"] == 1
+    doc = fake_db.tables["documents"][0]
+    assert doc["needs_review"] is False
+
+
+def test_sync_scraped_materials_still_skips_file_typed_item_when_nothing_is_reachable(
+    fake_db, monkeypatch,
+):
+    """Both the authenticated scraper download and the plain external fetch
+    coming up empty must still result in a clean skip (retried next sync),
+    not a stub with nothing behind it."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Broken Link", href="https://cdn.example.com/gone",
+                      kind="item", material_type="File")],
+        files={},
+    )
+
+    import app.integrations.schoology as schoology_module
+
+    async def _fake_fetch_fails(url):
+        return None
+
+    monkeypatch.setattr(schoology_module, "_fetch_external_url", _fake_fetch_fails)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["skipped"] == 1
+    assert fake_db.tables["documents"] == []

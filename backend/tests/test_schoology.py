@@ -2183,16 +2183,24 @@ def test_sync_scraped_materials_extracts_schedule_from_glance_document(fake_db, 
     assert assignment["category"] == "lab"
 
 
-def test_sync_scraped_materials_flags_unrecognized_external_link(fake_db):
-    """A genuine external link Atlas can't classify as Google, an
-    assignment, or a downloadable file must still be recorded (it's real
-    content worth keeping) but flagged for a manual look -- previously this
-    was filed silently with no indication Atlas didn't understand it."""
+def test_sync_scraped_materials_flags_unrecognized_link_it_cannot_fetch(fake_db, monkeypatch):
+    """A genuine external link Atlas can't classify as Google or an
+    assignment, and can't actually fetch/read either (unreachable, blocked,
+    nothing readable), must still be recorded (it's real content worth
+    keeping) but flagged for a manual look -- previously this was filed
+    silently with no indication Atlas didn't understand it."""
     provider = SchoologyProvider()
     scraper = _FakeScraperClient(
         [MaterialLink(name="Quizlet Set", href="https://quizlet.com/123/set",
                       kind="item", material_type="Link")],
     )
+
+    import app.integrations.schoology as schoology_module
+
+    async def _fake_fetch(url):
+        return None  # unreachable/blocked
+
+    monkeypatch.setattr(schoology_module, "_fetch_external_url", _fake_fetch)
 
     report = _full_report()
     asyncio.run(provider._sync_scraped_materials(
@@ -2203,6 +2211,131 @@ def test_sync_scraped_materials_flags_unrecognized_external_link(fake_db):
     doc = fake_db.tables["documents"][0]
     assert doc["needs_review"] is True
     assert doc["metadata"]["review_reason"] == "unrecognized_link"
+
+
+def test_sync_scraped_materials_reads_unrecognized_html_link_and_summarizes(fake_db, monkeypatch):
+    """The reported feature: an external link that's neither Google nor an
+    assignment (a course reading page, a study-tool page, ...) must
+    actually be visited and its content captured as a real, searchable,
+    AI-summarized document -- not just a flagged bare-URL stub."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Cell Structure Reading", href="https://example.com/cell-structure",
+                      kind="item", material_type="Link", folder_path="Unit 1")],
+    )
+
+    import app.integrations.schoology as schoology_module
+
+    async def _fake_fetch(url):
+        assert url == "https://example.com/cell-structure"
+        html = (
+            b"<html><head><style>.x{}</style></head><body>"
+            b"<nav>Site nav</nav><script>var x=1;</script>"
+            b"<h1>Cell Structure</h1><p>Every cell has a membrane, cytoplasm, and DNA.</p>"
+            b"</body></html>"
+        )
+        return html, "text/html; charset=utf-8"
+
+    monkeypatch.setattr(schoology_module, "_fetch_external_url", _fake_fetch)
+
+    from app.llm import claude
+
+    async def _fake_complete_json(*, system, prompt, max_tokens=1500, fast=False, model=None, temperature=0.2):
+        assert "Cell Structure" in prompt
+        return {
+            "title": "Cell Structure Overview", "summary": "An overview of basic cell components.",
+            "keywords": ["cell", "membrane"], "doc_type": "notes", "importance": "normal", "concepts": [],
+        }
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["errors"] == []
+    doc = fake_db.tables["documents"][0]
+    assert doc["needs_review"] is False
+    assert "review_reason" not in (doc.get("metadata") or {})
+    assert doc["summary"] == "An overview of basic cell components."
+    assert doc.get("storage_path") is None  # a page's text, not an original file to store
+
+
+def test_sync_scraped_materials_downloads_direct_pdf_from_unrecognized_link(fake_db, monkeypatch):
+    """An "unrecognized" link that turns out to be a direct link to a PDF
+    (hosted somewhere other than Schoology or Google Drive) must be
+    downloaded and indexed through the normal file pipeline, original bytes
+    included -- not just read as a page or left as a bare reference."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Reading Packet", href="https://cdn.example.com/reading.pdf",
+                      kind="item", material_type="Link")],
+    )
+
+    import app.integrations.schoology as schoology_module
+
+    async def _fake_fetch(url):
+        assert url == "https://cdn.example.com/reading.pdf"
+        return b"%PDF-1.4 fake pdf bytes", "application/pdf"
+
+    monkeypatch.setattr(schoology_module, "_fetch_external_url", _fake_fetch)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    doc = fake_db.tables["documents"][0]
+    assert doc["needs_review"] is False
+    assert doc["mime_type"] == "application/pdf"
+    assert doc["storage_path"]
+    assert fake_db.r2.objects[doc["storage_path"]] == b"%PDF-1.4 fake pdf bytes"
+
+
+def test_sync_retries_unrecognized_link_once_it_becomes_readable(fake_db, monkeypatch):
+    """Mirrors the Google-auth retry: a link flagged unrecognized on one
+    sync (couldn't be fetched) must actually be re-tried on the next sync,
+    not stay flagged forever once it does become reachable/readable."""
+    provider = SchoologyProvider()
+    item = MaterialLink(name="Study Guide", href="https://example.com/study-guide",
+                         kind="item", material_type="Link")
+
+    import app.integrations.schoology as schoology_module
+
+    async def _fake_fetch_fails(url):
+        return None
+
+    monkeypatch.setattr(schoology_module, "_fetch_external_url", _fake_fetch_fails)
+    scraper1 = _FakeScraperClient([item])
+    report1 = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper1, report=report1,
+    ))
+    stub = fake_db.tables["documents"][0]
+    assert stub["needs_review"] is True
+    assert stub["metadata"]["review_reason"] == "unrecognized_link"
+
+    async def _fake_fetch_succeeds(url):
+        return b"<html><body><p>Now readable content about photosynthesis.</p></body></html>", "text/html"
+
+    monkeypatch.setattr(schoology_module, "_fetch_external_url", _fake_fetch_succeeds)
+    scraper2 = _FakeScraperClient([item])
+    report2 = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper2, report=report2,
+    ))
+
+    assert len(fake_db.tables["documents"]) == 1  # updated in place, not duplicated
+    doc = fake_db.tables["documents"][0]
+    assert doc["id"] == stub["id"]
+    assert doc["needs_review"] is False
+    assert "review_reason" not in (doc.get("metadata") or {})
 
 
 # ---------------------------------------------------------------------------

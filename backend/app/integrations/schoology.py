@@ -30,6 +30,9 @@ from datetime import date, datetime
 from urllib.parse import urlsplit
 from typing import Any
 
+import httpx
+from bs4 import BeautifulSoup
+
 from app.agents.archivist import Archivist
 from app.config import settings
 from app.core.crypto import decrypt_json, encrypt_json
@@ -268,6 +271,51 @@ def _is_schoology_url(href: str) -> bool:
     (an external site, or Google Drive, handled separately)."""
     host = (urlsplit(href).netloc or "").lower()
     return host == "schoology.com" or host.endswith(".schoology.com")
+
+
+# Content-types worth treating as a real downloadable file (the normal
+# `_ingest_file` pipeline) rather than a page to read — a link Atlas can't
+# otherwise classify is often just a direct link to a PDF/slide deck hosted
+# somewhere other than Schoology or Google Drive. Limited to what
+# `ingestion.extract_text` actually knows how to parse (PDF, PPTX) — anything
+# else would just fall through to a raw byte-to-text decode there and come
+# out as garbage, so it's read as a page instead (see `_ingest_external_link`).
+_DOWNLOADABLE_CONTENT_TYPES = frozenset({
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.ms-powerpoint",
+})
+
+
+async def _fetch_external_url(url: str) -> tuple[bytes, str] | None:
+    """Fetch a materials-tree link Atlas can't otherwise classify — visiting
+    it directly rather than only ever recording the bare URL. Returns
+    `(content, content_type)`, or None if it's unreachable, blocked, or
+    errors outright, so the caller can fall back to a flagged reference
+    exactly like before this existed."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=15.0, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AtlasBot/1.0)"},
+        ) as client:
+            r = await client.get(url)
+    except Exception:  # noqa: BLE001
+        return None
+    if r.status_code >= 400:
+        return None
+    content_type = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+    return r.content, content_type
+
+
+def _extract_readable_text(html: bytes) -> str:
+    """Strip an arbitrary external HTML page down to its visible reading
+    content — same script/style/nav/header/footer chrome removal as the
+    scraper's own `fetch_page_text`, just against unauthenticated external
+    HTML rather than a Schoology page."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(["script", "style", "nav", "header", "footer"]):
+        tag.decompose()
+    return soup.get_text("\n", strip=True)
 
 
 def encrypt_api_key(consumer_key: str, consumer_secret: str) -> str:
@@ -1056,17 +1104,20 @@ class SchoologyProvider(IntegrationProvider):
         can't tell "fully ingested" apart from "ingested everything except
         the original file."
 
-        A row flagged `needs_google_auth` (a prior sync found this same
-        Google link with no token on file, so `_ingest_text` recorded only a
-        title+URL stub — see `_ingest_scraped_material`) is different from
-        that upload-retry case: no text was ever extracted or indexed for
-        it, so once a real download succeeds here (the caller only reaches
-        this branch when a token is now available), it needs the *full*
-        pipeline run — not just an upload retried — or the document would
-        stay un-indexed and still flagged forever even after Google Drive
-        gets connected. Detected via `metadata.needs_google_auth` rather
-        than "no text extracted yet", since a legitimately empty extraction
-        (a scanned image, a corrupt file) must not be reprocessed forever.
+        A row flagged `needs_google_auth` or a `review_reason` (a prior sync
+        found this same link but couldn't do anything with it yet — no
+        Google token on file, or Atlas couldn't classify it at all — so
+        `_ingest_text` recorded only a title+URL stub, see
+        `_ingest_scraped_material`) is different from that upload-retry
+        case: no text was ever extracted or indexed for it, so once a real
+        download succeeds here (the caller only reaches this branch once
+        that's actually possible — a token now on file, or the link turned
+        out to be a direct file after all), it needs the *full* pipeline
+        run — not just an upload retried — or the document would stay
+        un-indexed and still flagged forever even after the underlying
+        problem is resolved. Detected via the metadata flags rather than
+        "no text extracted yet", since a legitimately empty extraction (a
+        scanned image, a corrupt file) must not be reprocessed forever.
 
         Uploads the original bytes to R2 the same way a direct upload does
         (`routers/documents.py`'s `_store_and_ingest`) so the file has a
@@ -1086,8 +1137,11 @@ class SchoologyProvider(IntegrationProvider):
                 report["errors"].append(
                     f"{title}: downloaded but couldn't store the original file ({e})"
                 )
-        was_auth_stub = bool(existing and (existing.get("metadata") or {}).get("needs_google_auth"))
-        if existing and not was_auth_stub:
+        existing_meta = (existing.get("metadata") or {}) if existing else {}
+        was_flagged_stub = bool(existing) and bool(
+            existing_meta.get("needs_google_auth") or existing_meta.get("review_reason")
+        )
+        if existing and not was_flagged_stub:
             # Metadata/text/embeddings already exist from a prior sync —
             # only the original file itself needed retrying.
             if storage_path:
@@ -1116,7 +1170,7 @@ class SchoologyProvider(IntegrationProvider):
             "needs_review": False,
             "metadata": extra_meta or {},
         }
-        if was_auth_stub:
+        if was_flagged_stub:
             await supabase.update("documents", payload, filters={"id": eq(doc_id)})
         else:
             await supabase.insert("documents", {"id": doc_id, "user_id": user_id, "course_id": course_id, **payload})
@@ -1149,6 +1203,89 @@ class SchoologyProvider(IntegrationProvider):
                 report=report, source_document_id=doc_id,
             )
         return True
+
+    async def _ingest_external_page(
+        self, *, user_id: str, course_id: str, external_id: str, title: str,
+        text: str, extra_meta: dict[str, Any] | None = None,
+    ) -> bool:
+        """Record an external web page as real, searchable content — same
+        idempotent/stub-upgrade handling as `_ingest_file`, but for a page
+        that was read rather than downloaded: there's no original file
+        worth storing to R2 (a raw HTML blob isn't usefully "the document"
+        the way a PDF is), so this only ever writes the extracted text and
+        runs it through the normal chunk/embed/enrich pipeline."""
+        existing = await self._existing_document(user_id, external_id)
+        existing_meta = (existing.get("metadata") or {}) if existing else {}
+        was_flagged_stub = bool(existing) and bool(
+            existing_meta.get("needs_google_auth") or existing_meta.get("review_reason")
+        )
+        if existing and not was_flagged_stub:
+            return False  # already a real, ingested page — nothing to do
+        doc_id = existing["id"] if existing else str(uuid.uuid4())
+        payload = {
+            "title": title or "Untitled", "doc_type": "other",
+            "size_bytes": len(text or ""),
+            "external_id": external_id, "external_source": self.name,
+            "needs_review": False,
+            "metadata": extra_meta or {},
+        }
+        if existing:
+            await supabase.update("documents", payload, filters={"id": eq(doc_id)})
+        else:
+            await supabase.insert("documents", {"id": doc_id, "user_id": user_id, "course_id": course_id, **payload})
+        try:
+            await ingestion.ingest_document(doc_id, user_id, text)
+        except Exception as e:  # noqa: BLE001
+            await supabase.update(
+                "documents", {"ingested": False, "ingest_error": str(e)[:400]},
+                filters={"id": eq(doc_id)},
+            )
+        if settings.has_llm and text.strip():
+            try:
+                await Archivist().enrich(user_id, doc_id, text)
+            except Exception:  # noqa: BLE001
+                pass
+        return True
+
+    async def _ingest_external_link(
+        self, *, user_id: str, course_id: str, external_id: str, title: str,
+        url: str, extra_meta: dict[str, Any], report: dict[str, Any],
+    ) -> bool:
+        """A link Atlas can't otherwise classify (not Google, not a
+        Schoology-recognized assignment/file/document type) — visit it
+        directly and record what's actually there instead of just the bare
+        URL, so a course reading link, a study-tool page, or a directly-
+        hosted PDF becomes real searchable knowledge (with an AI summary
+        via `Archivist.enrich`, same as any other document) rather than a
+        stub the student has to open themselves. A direct file link (PDF,
+        slide deck) goes through the normal file pipeline; an HTML page
+        gets its readable text extracted first (raw HTML through
+        `ingestion.extract_text` would just decode to tag soup, not prose).
+        Returns True if real content was captured; False if the page
+        couldn't be fetched or had nothing readable, in which case the
+        caller falls back to a flagged bare-URL reference exactly like
+        before this existed."""
+        fetched = await _fetch_external_url(url)
+        if not fetched:
+            return False
+        content, content_type = fetched
+        if content_type in _DOWNLOADABLE_CONTENT_TYPES:
+            filename = urlsplit(url).path.rsplit("/", 1)[-1] or title
+            return await self._ingest_file(
+                user_id=user_id, course_id=course_id, external_id=external_id,
+                title=title, content=content, filename=filename,
+                content_type=content_type, doc_type="other",
+                extra_meta=extra_meta, report=report,
+            )
+        if content_type and "html" not in content_type:
+            return False  # some other binary Atlas doesn't know how to read
+        text = _extract_readable_text(content)
+        if not text.strip():
+            return False
+        return await self._ingest_external_page(
+            user_id=user_id, course_id=course_id, external_id=external_id,
+            title=title, text=text, extra_meta=extra_meta,
+        )
 
     async def _link_assignment_from_google_doc(
         self, *, user_id: str, course_id: str, doc_id: str, doc_external_id: str,
@@ -1379,7 +1516,18 @@ class SchoologyProvider(IntegrationProvider):
             ):
                 report["links"] += 1
             return
-        # Non-Google link: store the reference as knowledge, flagged since
+        # Non-Google link — visit it directly and record what's actually
+        # there (with an AI summary) rather than just the bare URL.
+        try:
+            if await self._ingest_external_link(
+                user_id=user_id, course_id=course_id, external_id=external_id,
+                title=title, url=url, extra_meta={"source_url": url}, report=report,
+            ):
+                report["links"] += 1
+                return
+        except Exception as e:  # noqa: BLE001
+            report["errors"].append(f"{title}: {e}")
+        # Couldn't fetch/read it — store the bare reference, flagged since
         # Atlas can't otherwise tell what kind of link this is.
         if await self._ingest_text(
             user_id=user_id, course_id=course_id, external_id=external_id,
@@ -1870,17 +2018,23 @@ class SchoologyProvider(IntegrationProvider):
             # surfaces it again instead of the failed upload being treated
             # as "already known" forever; `_ingest_file` retries just the
             # upload against the existing row rather than duplicating it.
-            # A row flagged `metadata.needs_google_auth` is left out the same
-            # way: it's only ever a title+URL stub (no file, no text) from a
-            # sync that ran before Google Drive was connected, so it needs
-            # the same "surface it again" treatment once a token is on
-            # file — otherwise a document stays flagged "connect Google
-            # Drive" forever even after the student actually connects it.
+            # A row carrying `metadata.needs_google_auth` or a
+            # `review_reason` is left out the same way: it's only ever a
+            # title+URL stub (no file, no text) from a sync that couldn't do
+            # anything with the link yet — no Google token on file, or
+            # nothing Atlas could classify at the time — so it needs the
+            # same "surface it again" treatment on the next sync, in case a
+            # token is now connected or `_ingest_external_link` can now
+            # actually read the page. Otherwise a document would stay
+            # flagged forever even after the underlying problem is fixed.
             known_names = {
                 str((row.get("metadata") or {}).get("material_name") or "").strip().lower()
                 for row in existing
                 if not (row.get("mime_type") and not row.get("storage_path"))
-                and not (row.get("metadata") or {}).get("needs_google_auth")
+                and not (
+                    (row.get("metadata") or {}).get("needs_google_auth")
+                    or (row.get("metadata") or {}).get("review_reason")
+                )
             } - {""}
 
             # A scraped "assignment"-type item is never recorded as a
@@ -2117,9 +2271,21 @@ class SchoologyProvider(IntegrationProvider):
         if _is_schoology_url(item.href):
             report["skipped"] += 1
             return
-        # A genuine external link Atlas can't otherwise classify — keep it
-        # as a reference, but flag it for a quick manual look rather than
-        # silently filing it as if it were fully understood.
+        # A genuine external link Atlas can't otherwise classify — visit it
+        # directly and record what's actually there (with an AI summary)
+        # rather than just the bare URL.
+        try:
+            if await self._ingest_external_link(
+                user_id=user_id, course_id=course_id, external_id=external_id,
+                title=title, url=item.href, extra_meta=base_meta, report=report,
+            ):
+                report["documents"] += 1
+                return
+        except Exception as e:  # noqa: BLE001
+            report["errors"].append(f"{section.display_name} · {item.name}: {e}")
+        # Couldn't fetch/read it (unreachable, blocked, nothing readable) —
+        # keep it as a reference, but flag it for a quick manual look rather
+        # than silently filing it as if it were fully understood.
         if await self._ingest_text(
             user_id=user_id, course_id=course_id, external_id=external_id,
             title=title, text=f"{title}\n{item.href}", doc_type="other",

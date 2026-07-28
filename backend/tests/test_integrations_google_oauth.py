@@ -80,7 +80,7 @@ def test_connect_returns_auth_url(oauth_configured, authed, monkeypatch, crypto_
     assert r.status_code == 200
     url = r.json()["url"]
     assert url.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
-    assert "redirect_uri=https%3A%2F%2Fapi.example.com%2Fintegrations%2Fgoogle%2Fcallback" in url
+    assert "redirect_uri=https%3A%2F%2Fapi.example.com%2Fapi%2Fv1%2Fintegrations%2Fgoogle%2Fcallback" in url
 
 
 def test_callback_passes_through_error_param(oauth_configured):
@@ -141,7 +141,7 @@ def test_callback_stores_tokens_and_redirects_connected(oauth_configured, crypto
 
     async def _fake_exchange_code(code, redirect_uri):
         assert code == "abc"
-        assert redirect_uri == "https://api.example.com/integrations/google/callback"
+        assert redirect_uri == "https://api.example.com/api/v1/integrations/google/callback"
         return {"access_token": "atok", "refresh_token": "rtok", "expires_in": 3600}
 
     updates: list[tuple[dict, dict]] = []

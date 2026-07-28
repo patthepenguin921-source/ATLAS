@@ -141,7 +141,11 @@ async def disconnect_integration(provider: str, user: CurrentUser = Depends(get_
 def _google_redirect_uri() -> str:
     if not settings.atlas_api_base_url:
         raise HTTPException(503, "ATLAS_API_BASE_URL isn't set — required for Google OAuth's redirect.")
-    return f"{settings.atlas_api_base_url.rstrip('/')}/integrations/google/callback"
+    # This router is mounted under /api/v1 (see main.py's include_router) —
+    # the actual callback route is /api/v1/integrations/google/callback, not
+    # /integrations/google/callback, and Google requires an exact match with
+    # whatever's registered as the client's Authorized redirect URI.
+    return f"{settings.atlas_api_base_url.rstrip('/')}/api/v1/integrations/google/callback"
 
 
 @router.get("/google/connect")

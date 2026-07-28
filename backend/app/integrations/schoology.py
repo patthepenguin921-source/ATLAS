@@ -2196,9 +2196,24 @@ class SchoologyProvider(IntegrationProvider):
                 ):
                     report["documents"] += 1
                 return
-            # Not actually a direct file (or the download failed) — skip
-            # rather than filing a stub with no original to open. Not added
-            # to the known-names set, so the next sync tries it again.
+            # The authenticated scraper session couldn't resolve this to a
+            # direct download (its multi-hop detail-page-following is
+            # Schoology-specific — see `download_file`'s docstring). Some
+            # "File"/"Document"-typed items are actually plain off-site
+            # links a normal unauthenticated fetch can still reach, so try
+            # that before giving up on it entirely.
+            try:
+                if await self._ingest_external_link(
+                    user_id=user_id, course_id=course_id, external_id=external_id,
+                    title=title, url=item.href, extra_meta=base_meta, report=report,
+                ):
+                    report["documents"] += 1
+                    return
+            except Exception as e:  # noqa: BLE001
+                report["errors"].append(f"{section.display_name} · {item.name}: {e}")
+            # Still nothing real to save — skip rather than filing a stub
+            # with no original to open. Not added to the known-names set,
+            # so the next sync tries it again.
             report["skipped"] += 1
             return
 

@@ -179,6 +179,15 @@ _FILE_HREF_PATTERNS = (
 )
 
 
+def _is_schoology_host(url: str) -> bool:
+    """True for a URL that stays on schoology.com itself (the district
+    subdomain or app.schoology.com) — mirrors `schoology.py`'s
+    `_is_schoology_url`, duplicated here rather than imported to avoid a
+    circular import (`schoology.py` already imports this module)."""
+    host = (urlsplit(url).netloc or "").lower()
+    return host == "schoology.com" or host.endswith(".schoology.com")
+
+
 @dataclass
 class MaterialLink:
     """A single real course-materials item or folder, already filtered clear
@@ -898,6 +907,44 @@ class SchoologyScraperClient:
         for a in soup.find_all("a", href=True):
             resolved = urljoin(page_url, a["href"])
             if is_google_url(resolved):
+                return resolved
+        return None
+
+    async def find_external_link_target(self, url: str) -> str | None:
+        """A Schoology "Link" material's own href is often itself a
+        Schoology-hosted wrapper page (`.../materials/link/view/{id}`),
+        not the destination — confirmed against a real account: a whole
+        course's worth of "Link" items (a syllabus, a class-tool link, a
+        policy page) all shared this shape, and every one of them was being
+        treated as an internal placeholder with "nothing real behind it"
+        and silently skipped, since the href itself never leaves
+        schoology.com. Visiting the item's own page reveals the real
+        target one of two ways: either the page redirects straight there
+        (`self._client` already follows redirects — the final URL lands
+        off schoology.com), or it's a static page whose one real piece of
+        content is a "Visit Website"-style link/iframe pointing there.
+        Returns the first such off-schoology.com URL found, or None for a
+        page that's genuinely just Schoology content (a discussion, a
+        plain info page) with nothing external to point at."""
+        if not self._logged_in:
+            await self.login()
+        r = await self._client.get(url)
+        final_url = str(r.url)
+        if not _is_schoology_host(final_url):
+            return final_url
+        content_type = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type != "text/html":
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup.find_all(["iframe", "embed", "object"]):
+            src = tag.get("src") or tag.get("data")
+            if src:
+                resolved = urljoin(final_url, src)
+                if not _is_schoology_host(resolved):
+                    return resolved
+        for a in soup.find_all("a", href=True):
+            resolved = urljoin(final_url, a["href"])
+            if not _is_schoology_host(resolved):
                 return resolved
         return None
 

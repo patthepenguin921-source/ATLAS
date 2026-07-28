@@ -2219,13 +2219,30 @@ class SchoologyProvider(IntegrationProvider):
 
         # Not a direct Google link, not an assignment, not a downloadable
         # file — check for a Google Doc embedded in a Schoology-chrome
-        # viewer page before falling through to the generic cases.
+        # viewer page, or (more generally) any real destination a
+        # Schoology "Link"/"Page" wrapper actually points to, before
+        # falling through to the generic cases. A "Link" material's own
+        # href is very often itself a Schoology-hosted wrapper page
+        # (`.../materials/link/view/{id}`) rather than the destination —
+        # confirmed against a real account: a whole course's "Link" items
+        # (syllabus, class-tool links, policy pages) all shared this shape
+        # and were being treated as internal placeholders with nothing
+        # real behind them, silently skipped without ever visiting the
+        # page to see where it actually points.
         embedded_google_href: str | None = None
+        resolved_target_href: str | None = None
         if (item.material_type or "").lower() in _PROBABLE_VIEWER_TYPES:
             try:
                 embedded_google_href = await scraper.find_embedded_google_url(item.href)
             except Exception:  # noqa: BLE001
                 embedded_google_href = None
+            if not embedded_google_href and _is_schoology_url(item.href):
+                try:
+                    resolved_target_href = await scraper.find_external_link_target(item.href)
+                except Exception:  # noqa: BLE001
+                    resolved_target_href = None
+                if resolved_target_href and is_google_url(resolved_target_href):
+                    embedded_google_href, resolved_target_href = resolved_target_href, None
         if embedded_google_href:
             ref = parse_google_url(embedded_google_href)
             if ref and google_token:
@@ -2258,41 +2275,54 @@ class SchoologyProvider(IntegrationProvider):
                     report["documents"] += 1
                 return
 
-        # A "Week/Unit at a Glance" schedule whose content lives directly on
-        # a Schoology page rather than a file or Google Doc.
-        if is_glance:
+        # No Google/external destination was found — the wrapper page
+        # itself might still have real inline content worth capturing
+        # instead of being skipped: either a "Week/Unit at a Glance"
+        # schedule typed directly into a Schoology Page (parsed into a
+        # day-by-day schedule + assignments below), or any other Page/Link
+        # item whose only real content is its own text (a policy page, a
+        # "first day of class" info page, ...) rather than an external
+        # destination — confirmed against a real account: several "Link"-
+        # typed items had no real external target at all, just page text,
+        # and were being skipped entirely rather than captured.
+        if not resolved_target_href and (item.material_type or "").lower() in _PROBABLE_VIEWER_TYPES:
             try:
                 page_text = await scraper.fetch_page_text(item.href)
             except Exception as e:  # noqa: BLE001
                 page_text = None
                 report["errors"].append(f"{section.display_name} · {item.name}: {e}")
             if page_text and page_text.strip():
-                if await self._ingest_text(
+                if await self._ingest_external_page(
                     user_id=user_id, course_id=course_id, external_id=external_id,
-                    title=title, text=page_text, doc_type="other", extra_meta=base_meta,
+                    title=title, text=page_text, extra_meta=base_meta,
                 ):
                     report["documents"] += 1
-                await self._apply_schedule_from_doc(
-                    user_id=user_id, course_id=course_id, title=title, text=page_text,
-                    report=report,
-                )
+                if is_glance:
+                    await self._apply_schedule_from_doc(
+                        user_id=user_id, course_id=course_id, title=title, text=page_text,
+                        report=report,
+                    )
                 return
 
         # Nothing recognized — only worth a reference if it actually leads
-        # somewhere off schoology.com. A link that stays on schoology.com (a
-        # folder, page, discussion, or other internal placeholder) has
-        # nothing real behind it and is skipped instead of being filed as an
-        # empty document.
-        if _is_schoology_url(item.href):
+        # somewhere off schoology.com, whether that's the item's own href
+        # or the real destination just resolved out of its wrapper page
+        # above. A link that stays on schoology.com with no real
+        # destination discoverable inside it (a folder, a plain info page,
+        # a discussion with no real content) has nothing real behind it and
+        # is skipped instead of being filed as an empty document.
+        target_href = resolved_target_href or (None if _is_schoology_url(item.href) else item.href)
+        if not target_href:
             report["skipped"] += 1
             return
-        # A genuine external link Atlas can't otherwise classify — visit it
-        # directly and record what's actually there (with an AI summary)
-        # rather than just the bare URL.
+        target_meta = {**base_meta, "source_url": target_href}
+        # A genuine external destination Atlas can't otherwise classify —
+        # visit it directly and record what's actually there (with an AI
+        # summary) rather than just the bare URL.
         try:
             if await self._ingest_external_link(
                 user_id=user_id, course_id=course_id, external_id=external_id,
-                title=title, url=item.href, extra_meta=base_meta, report=report,
+                title=title, url=target_href, extra_meta=target_meta, report=report,
             ):
                 report["documents"] += 1
                 return
@@ -2303,8 +2333,8 @@ class SchoologyProvider(IntegrationProvider):
         # than silently filing it as if it were fully understood.
         if await self._ingest_text(
             user_id=user_id, course_id=course_id, external_id=external_id,
-            title=title, text=f"{title}\n{item.href}", doc_type="other",
-            extra_meta={**base_meta, "review_reason": "unrecognized_link"},
+            title=title, text=f"{title}\n{target_href}", doc_type="other",
+            extra_meta={**target_meta, "review_reason": "unrecognized_link"},
             needs_review=True,
         ):
             report["documents"] += 1

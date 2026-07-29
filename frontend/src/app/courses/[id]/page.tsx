@@ -192,10 +192,11 @@ export default function CourseDetailPage() {
   const currentSemester = (course.semester ?? "full_year") as string;
   const isSplit = semesters.length > 1;
 
-  // "Class schedule" is the day-by-day rundown Atlas parses out of a
-  // teacher's "Week/Unit at a Glance" document (see the Schoology
-  // integration) — kept separate from "Upcoming events" below, which mixes
-  // in due dates/exams/other calendar kinds.
+  // "Class schedule" is the day-by-day rundown Atlas parses out of an "at a
+  // glance" document — whether it arrived via the Schoology integration or
+  // was uploaded directly (see app.services.schedule_extraction) — kept
+  // separate from "Upcoming events" below, which mixes in due dates/exams/
+  // other calendar kinds.
   const classDays = events
     .filter((ev) => ev.kind === "class")
     .slice()

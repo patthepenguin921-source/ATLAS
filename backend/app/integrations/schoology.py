@@ -61,6 +61,8 @@ from app.integrations.schoology_scraper import (
 )
 from app.llm import claude
 from app.services import ingestion
+from app.services.schedule_extraction import GLANCE_TITLE_RE as _GLANCE_TITLE_RE
+from app.services.schedule_extraction import apply_schedule_from_doc as _apply_schedule_from_doc_shared
 
 # Assignment/material title keywords → Atlas assignment_category enum values.
 _CATEGORY_KEYWORDS = (
@@ -86,8 +88,9 @@ _ASSIGNMENT_HREF_RE = re.compile(r"assignment", re.I)
 # often assignments due -- laid out however they wrote it (a table, a
 # bulleted list, prose). Matched by title regardless of material type: it
 # can arrive as an attached file, a linked Google Doc, or a Schoology Page
-# with the content typed directly into it.
-_GLANCE_TITLE_RE = re.compile(r"\b(?:week|unit|day)s?\s+at\s+a\s+glance\b", re.I)
+# with the content typed directly into it. `_GLANCE_TITLE_RE` and the
+# extraction/apply logic below live in `app.services.schedule_extraction`,
+# shared with the generic (non-Schoology) document upload pipeline.
 
 # Scraped material types most likely to be a Schoology-chrome wrapper around
 # an embedded Google Doc/Slides/Sheet rather than a direct docs.google.com
@@ -181,60 +184,6 @@ Return JSON with this exact shape:
         "due_date": result.get("due_date"),
         "category": category,
     }
-
-
-async def _extract_schedule_from_text(title: str, text: str) -> list[dict[str, Any]]:
-    """A 'Week/Unit at a Glance' document lays out what happens each day in
-    whatever shape the teacher wrote it in -- a table, a bulleted list,
-    prose -- so there's no reliable DOM/regex to hang a parser on. Ask the
-    reasoning engine to read it like a student would and return one entry
-    per day it actually names, each with the day's topic and any assignment
-    due. No LLM configured means no schedule -- there's no safe non-LLM
-    fallback for free-form date parsing here the way `_extract_assignment_
-    from_page` has one (a raw-text dump isn't useful as a "day")."""
-    if not settings.has_llm or not text.strip():
-        return []
-    excerpt = text.strip()[:6000]
-    today = date.today().isoformat()
-    prompt = f"""\
-A teacher posted a document titled "{title}" in a Schoology course. It lays \
-out what happens in class on specific days (a "week at a glance" or "unit \
-at a glance" schedule). Today's date is {today} -- use it only to resolve a \
-date that's missing its year, never to invent a date the document doesn't \
-state.
-
-Read the document and list every day it actually names, with what's \
-happening that day and any assignment due that day.
-
-Document text (may be truncated):
-\"\"\"
-{excerpt}
-\"\"\"
-
-Return JSON with this exact shape:
-{{
-  "days": [
-    {{
-      "date": "YYYY-MM-DD -- omit this entire entry if you can't resolve an actual calendar date for it",
-      "topic": "short summary of what happens this day in class",
-      "assignments": [
-        {{"title": "...", "due_date": "YYYY-MM-DD or null", "category": "one of homework/classwork/quiz/test/exam/project/essay/lab/discussion/presentation/reading/participation/other"}}
-      ]
-    }}
-  ]
-}}
-Omit assignments with no clear title."""
-    try:
-        result = await claude.complete_json(
-            system="You are Atlas's Archivist, precisely extracting a class schedule from a teacher's document.",
-            prompt=prompt, max_tokens=1500, temperature=0.0,
-        )
-    except Exception:  # noqa: BLE001
-        return []
-    days = result.get("days") if isinstance(result, dict) else None
-    if not isinstance(days, list):
-        return []
-    return [d for d in days if isinstance(d, dict) and d.get("date")]
 
 
 # How many courses' assignments/events/materials walks run at once. Was 4
@@ -1326,58 +1275,14 @@ class SchoologyProvider(IntegrationProvider):
         self, *, user_id: str, course_id: str, title: str, text: str,
         report: dict[str, Any] | None, source_document_id: str | None = None,
     ) -> None:
-        """Turn a parsed 'at a glance' schedule into `calendar_events` rows
-        (`kind="class"`, so the course page can show a day-by-day view) plus
-        any assignments it mentions — teachers often only ever list an
-        assignment's due date in a schedule like this, never as a proper
-        Schoology Assignment."""
-        days = await _extract_schedule_from_text(title, text)
-        for day in days:
-            iso_date = day.get("date")
-            if not iso_date:
-                continue
-            try:
-                await self._upsert_calendar_event(
-                    user_id, f"schoology:class:{course_id}:{iso_date}", {
-                        "course_id": course_id, "title": day.get("topic") or title,
-                        "description": day.get("topic") or None,
-                        "starts_at": iso_date, "all_day": True, "kind": "class",
-                        "metadata": {
-                            "source_document_id": source_document_id,
-                            "detected_from": "glance_doc",
-                        },
-                    },
-                )
-                if report is not None:
-                    report["events"] += 1
-            except Exception as e:  # noqa: BLE001
-                if report is not None:
-                    report["errors"].append(f"{title} ({iso_date}): couldn't save class schedule ({e})")
-            for a in (day.get("assignments") or []):
-                a_title = (a.get("title") or "").strip() if isinstance(a, dict) else ""
-                if not a_title:
-                    continue
-                category = a.get("category")
-                if category not in _ASSIGNMENT_CATEGORY_VALUES:
-                    category = _map_category(a_title)
-                due = a.get("due_date") or iso_date
-                ext_id = f"schoology:glance-assignment:{course_id}:{_normalize_name(a_title)}"
-                try:
-                    await self.upsert_assignment(user_id, ext_id, {
-                        "course_id": course_id, "title": a_title, "category": category,
-                        "due_date": due, "status": "not_started",
-                        "metadata": {
-                            "source_document_id": source_document_id,
-                            "detected_from": "glance_doc",
-                        },
-                    })
-                    if report is not None:
-                        report["assignments"] += 1
-                except Exception as e:  # noqa: BLE001
-                    if report is not None:
-                        report["errors"].append(
-                            f"{a_title}: detected as assignment but couldn't save it ({e})"
-                        )
+        """Thin wrapper over the shared `apply_schedule_from_doc` (see
+        `app.services.schedule_extraction`), scoped to this provider's
+        external-id namespace so it can't collide with a directly-uploaded
+        document's own glance-schedule extraction for the same course/date."""
+        await _apply_schedule_from_doc_shared(
+            user_id=user_id, course_id=course_id, title=title, text=text,
+            source=self.name, source_document_id=source_document_id, report=report,
+        )
 
     async def _ingest_scraped_assignment(
         self, *, user_id: str, course_id: str, section: SchoologySection,

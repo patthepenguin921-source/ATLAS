@@ -35,6 +35,7 @@ from app.core.security import CurrentUser, check_cron_secret, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.schemas import DocumentPatchRequest, DriveImportRequest, IngestTextRequest
 from app.services import ingestion, storage_cleanup
+from app.services.schedule_extraction import apply_schedule_from_doc, is_glance_title
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -208,7 +209,7 @@ async def _claim_document(doc_id: str) -> bool:
 
 async def _process_document(
     doc_id: str, user_id: str, storage_path: str | None, mime_type: str,
-    *, enrich: bool, auto_title: bool,
+    *, enrich: bool, auto_title: bool, course_id: str | None = None, title: str | None = None,
 ) -> None:
     """The actual indexing + enrichment work for one claimed document:
     fetch the original back from R2, extract its text, chunk/embed, then AI
@@ -254,6 +255,19 @@ async def _process_document(
         except Exception:
             pass  # enrichment (summary/keywords/importance) is best-effort
 
+    # A document whose title/filename marks it as an "at a glance" schedule
+    # (e.g. "Week at a Glance", "Unit 4 - At a Glance.pdf") gets mined for a
+    # day-by-day class schedule the same way a Schoology-synced one does —
+    # see app.services.schedule_extraction, shared with that sync path.
+    if course_id and text.strip() and is_glance_title(title or filename):
+        try:
+            await apply_schedule_from_doc(
+                user_id=user_id, course_id=course_id, title=title or filename,
+                text=text, source="manual", source_document_id=doc_id,
+            )
+        except Exception:
+            pass  # best-effort, same as enrichment above
+
 
 @router.get("")
 async def list_documents(course_id: str | None = None, user: CurrentUser = Depends(get_current_user)):
@@ -280,7 +294,7 @@ async def process_document_now(document_id: str, user: CurrentUser = Depends(get
     this endpoint, triggered by a person, is the deliberate retry path)."""
     rows = await supabase.select(
         "documents",
-        columns="id,storage_path,mime_type,enrich,auto_title,ingested,ingest_error",
+        columns="id,course_id,title,storage_path,mime_type,enrich,auto_title,ingested,ingest_error",
         filters={"user_id": eq(user.id), "id": eq(document_id)}, limit=1,
     )
     if not rows:
@@ -301,6 +315,7 @@ async def process_document_now(document_id: str, user: CurrentUser = Depends(get
     await _process_document(
         document_id, user.id, doc.get("storage_path"), doc.get("mime_type") or "",
         enrich=doc.get("enrich", True), auto_title=doc.get("auto_title", False),
+        course_id=doc.get("course_id"), title=doc.get("title"),
     )
 
     rows = await supabase.select(
@@ -493,7 +508,7 @@ async def delete_document(document_id: str, user: CurrentUser = Depends(get_curr
 
 async def _process_pending_documents() -> dict:
     candidates = await supabase.select(
-        "documents", columns="id,user_id,storage_path,mime_type,enrich,auto_title",
+        "documents", columns="id,user_id,course_id,title,storage_path,mime_type,enrich,auto_title",
         filters={
             "ingested": eq(False), "ingest_error": "is.null",
             "or": f"(processing_started_at.is.null,processing_started_at.lt.{_stale_claim_cutoff()})",
@@ -510,6 +525,7 @@ async def _process_pending_documents() -> dict:
             await _process_document(
                 row["id"], row["user_id"], row.get("storage_path"), row.get("mime_type") or "",
                 enrich=row.get("enrich", True), auto_title=row.get("auto_title", False),
+                course_id=row.get("course_id"), title=row.get("title"),
             )
             processed += 1
         except Exception as e:  # noqa: BLE001

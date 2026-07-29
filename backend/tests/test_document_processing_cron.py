@@ -192,3 +192,63 @@ def test_process_document_flags_an_error_when_the_original_was_never_stored(monk
 
     assert updates[-1]["ingested"] is False
     assert "never stored" in updates[-1]["ingest_error"]
+
+
+def test_process_document_extracts_schedule_for_an_at_a_glance_document(monkeypatch):
+    """A document whose title marks it as an "at a glance" schedule must get
+    mined for a day-by-day class schedule (same as a Schoology-synced one),
+    even though it went through the plain upload pipeline, not a sync."""
+    course_id = str(uuid.uuid4())
+    calls = []
+
+    async def _fake_apply_schedule_from_doc(**kwargs):
+        calls.append(kwargs)
+
+    async def _fake_download(key):
+        return b"%PDF-1.4 fake bytes"
+
+    async def _fake_ingest_document(doc_id, user_id, text):
+        return {"chunks": 1}
+
+    monkeypatch.setattr(documents_module.r2, "download", _fake_download)
+    monkeypatch.setattr(documents_module.ingestion, "extract_text", lambda *a, **k: "Monday: intro. Lab due Friday.")
+    monkeypatch.setattr(documents_module.ingestion, "ingest_document", _fake_ingest_document)
+    monkeypatch.setattr(documents_module.settings, "groq_api_key", None)  # enrichment off, irrelevant here
+    monkeypatch.setattr(documents_module, "apply_schedule_from_doc", _fake_apply_schedule_from_doc)
+
+    asyncio.run(documents_module._process_document(
+        DOC_ID, USER_ID, f"{USER_ID}/{DOC_ID}/glance.pdf", "application/pdf",
+        enrich=True, auto_title=False, course_id=course_id, title="Unit 3 - At a Glance.pdf",
+    ))
+
+    assert len(calls) == 1
+    assert calls[0]["course_id"] == course_id
+    assert calls[0]["source"] == "manual"
+    assert calls[0]["source_document_id"] == DOC_ID
+
+
+def test_process_document_skips_schedule_extraction_for_a_normal_document(monkeypatch):
+    course_id = str(uuid.uuid4())
+    calls = []
+
+    async def _fake_apply_schedule_from_doc(**kwargs):
+        calls.append(kwargs)
+
+    async def _fake_download(key):
+        return b"%PDF-1.4 fake bytes"
+
+    async def _fake_ingest_document(doc_id, user_id, text):
+        return {"chunks": 1}
+
+    monkeypatch.setattr(documents_module.r2, "download", _fake_download)
+    monkeypatch.setattr(documents_module.ingestion, "extract_text", lambda *a, **k: "Some notes.")
+    monkeypatch.setattr(documents_module.ingestion, "ingest_document", _fake_ingest_document)
+    monkeypatch.setattr(documents_module.settings, "groq_api_key", None)
+    monkeypatch.setattr(documents_module, "apply_schedule_from_doc", _fake_apply_schedule_from_doc)
+
+    asyncio.run(documents_module._process_document(
+        DOC_ID, USER_ID, f"{USER_ID}/{DOC_ID}/syllabus.pdf", "application/pdf",
+        enrich=True, auto_title=False, course_id=course_id, title="Syllabus.pdf",
+    ))
+
+    assert calls == []

@@ -183,6 +183,49 @@ def test_apply_schedule_from_doc_creates_class_events_and_assignments(fake_db, m
     assert assignments[0]["external_source"] == "manual"
 
 
+def test_apply_schedule_from_doc_skips_an_assignment_already_on_file(fake_db, monkeypatch):
+    """A glance doc restating a due date for an assignment the real LMS
+    sync already imported (e.g. via the Assignments API) must not create a
+    second, duplicate row for it -- see `apply_schedule_from_doc`'s
+    docstring. Only the class-schedule calendar event should still be
+    created; the already-known assignment is skipped."""
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {
+            "days": [
+                {
+                    "date": "2025-10-06", "topic": "Intro to photosynthesis",
+                    "assignments": [
+                        {"title": "Lab Report", "due_date": "2025-10-09", "category": "lab"},
+                    ],
+                },
+            ],
+        }
+
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    fake_db.tables["assignments"].append({
+        "id": str(uuid.uuid4()), "user_id": USER_ID, "course_id": COURSE_ID,
+        "title": "Lab Report", "external_id": f"{COURSE_ID}:12345", "external_source": "schoology",
+    })
+
+    report: dict[str, Any] = {"events": 0, "assignments": 0, "skipped": 0, "errors": []}
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Unit 3 - At a Glance.pdf",
+        text="Monday 10/6: Intro to photosynthesis. Lab report due 10/9.",
+        source="schoology", source_document_id="doc-1", report=report,
+    ))
+
+    assert len(fake_db.tables["calendar_events"]) == 1
+    assignments = fake_db.tables["assignments"]
+    assert len(assignments) == 1  # still just the one pre-existing row, no duplicate
+    assert report["skipped"] == 1
+    assert report["assignments"] == 0
+
+
 def test_apply_schedule_from_doc_is_a_noop_without_llm(fake_db, monkeypatch):
     from app.config import settings
 

@@ -206,8 +206,30 @@ async def apply_schedule_from_doc(
     `source` scopes the external ids/`external_source` this writes (e.g.
     "schoology" for a materials-sync import, "manual" for a directly
     uploaded document) so two different origins never collide or stomp each
-    other's rows for the same course/date."""
+    other's rows for the same course/date.
+
+    An assignment a glance doc mentions is often *also* already on file for
+    this course -- imported for real via the LMS's own assignments API/scrape
+    (see `SchoologyProvider._import_assignment`/`_ingest_scraped_assignment`)
+    -- since a teacher's schedule doc routinely just restates a due date
+    that's already tracked elsewhere. Dedupe by normalized title against
+    every assignment already on file for this course before inserting a new
+    one, the same way `_ingest_scraped_assignment` does, so a title match
+    from any source counts and it's pulled once, not twice. A title that
+    already belongs to *this* glance doc's own previously-created row is
+    exempted so a re-sync still updates it (via `_upsert_assignment`'s
+    upsert-by-external_id below) instead of being skipped as a false
+    duplicate of itself."""
     days = await extract_schedule_from_text(title, text)
+    existing_assignments = await supabase.select(
+        "assignments", columns="external_id,title",
+        filters={"user_id": eq(user_id), "course_id": eq(course_id)},
+    ) or []
+    other_assignment_titles = {
+        _normalize_name(row.get("title") or "")
+        for row in existing_assignments
+        if not str(row.get("external_id") or "").startswith(f"{source}:glance-assignment:{course_id}:")
+    } - {""}
     for day in days:
         iso_date = day.get("date")
         if not iso_date:
@@ -232,6 +254,10 @@ async def apply_schedule_from_doc(
         for a in (day.get("assignments") or []):
             a_title = (a.get("title") or "").strip() if isinstance(a, dict) else ""
             if not a_title:
+                continue
+            if _normalize_name(a_title) in other_assignment_titles:
+                if report is not None:
+                    report["skipped"] = report.get("skipped", 0) + 1
                 continue
             category = a.get("category")
             if category not in _ASSIGNMENT_CATEGORY_VALUES:

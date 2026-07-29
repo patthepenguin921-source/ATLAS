@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.agents.base import Agent
+from app.config import settings
 from app.core.supabase_client import eq, supabase
 from app.embeddings.embedder import embed_text
 from app.llm import claude
@@ -86,6 +87,37 @@ DOCUMENT:
                 linked.append(concept["name"])
         return {"title": update.get("title"), "summary": data.get("summary"),
                 "keywords": data.get("keywords", []), "concepts_linked": linked}
+
+    async def enrich_or_fallback(
+        self, user_id: str, document_id: str, text: str, *,
+        rename_untitled: bool = False, fallback_title: str | None = None,
+    ) -> None:
+        """`enrich`, but guarantees the document ends up with *some* summary
+        rather than staying blank forever. Runs the real AI enrichment when
+        there's actual text and an LLM configured; otherwise -- or if that
+        call itself fails -- falls back to a plain, literal one-liner (just
+        naming what the document is) so even a no-text stub (a scanned image
+        OCR couldn't read, a link Atlas hasn't downloaded yet, ...) is never
+        left without a summary a student can see at a glance."""
+        if settings.has_llm and text.strip():
+            try:
+                await self.enrich(user_id, document_id, text, rename_untitled=rename_untitled)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        rows = await supabase.select(
+            "documents", columns="summary,title,doc_type",
+            filters={"id": eq(document_id)}, limit=1,
+        )
+        if rows and rows[0].get("summary"):
+            return
+        title = (rows[0].get("title") if rows else None) or fallback_title or "Untitled document"
+        doc_type = (rows[0].get("doc_type") if rows else None) or "other"
+        label = doc_type.replace("_", " ") if doc_type != "other" else "document"
+        await supabase.update(
+            "documents", {"summary": f'A {label} titled "{title}".'},
+            filters={"id": eq(document_id)},
+        )
 
     async def classify_course(self, text: str, courses: list[dict[str, Any]]) -> dict[str, Any]:
         """Guess which of the student's existing courses a document belongs to.

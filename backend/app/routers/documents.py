@@ -249,11 +249,13 @@ async def _process_document(
         )
         return
 
-    if enrich and settings.has_llm and text.strip():
-        try:
-            await Archivist().enrich(user_id, doc_id, text, rename_untitled=auto_title)
-        except Exception:
-            pass  # enrichment (summary/keywords/importance) is best-effort
+    if enrich:
+        # Best-effort: real AI enrichment (summary/keywords/importance) when
+        # there's text and an LLM configured, otherwise a trivial fallback
+        # summary so the document is never left without one at all.
+        await Archivist().enrich_or_fallback(
+            user_id, doc_id, text, rename_untitled=auto_title, fallback_title=title,
+        )
 
     # A document whose title/filename marks it as an "at a glance" schedule
     # (e.g. "Week at a Glance", "Unit 4 - At a Glance.pdf") gets mined for a
@@ -479,13 +481,9 @@ async def ingest_text(body: IngestTextRequest, user: CurrentUser = Depends(get_c
         "title": body.title, "doc_type": body.doc_type, "size_bytes": len(body.text),
     })
     report = await ingestion.ingest_document(doc_id, user.id, body.text)
-    enrichment = None
-    if body.enrich and settings.has_llm and body.text.strip():
-        try:
-            enrichment = await Archivist().enrich(user.id, doc_id, body.text)
-        except Exception as e:
-            enrichment = {"error": str(e)}
-    return {"id": doc_id, "chunks": report.get("chunks", 0), "enrichment": enrichment}
+    if body.enrich:
+        await Archivist().enrich_or_fallback(user.id, doc_id, body.text, fallback_title=body.title)
+    return {"id": doc_id, "chunks": report.get("chunks", 0)}
 
 
 @router.delete("/{document_id}", status_code=204)

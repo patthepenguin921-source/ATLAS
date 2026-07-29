@@ -194,6 +194,21 @@ def test_process_document_flags_an_error_when_the_original_was_never_stored(monk
     assert "never stored" in updates[-1]["ingest_error"]
 
 
+def _stub_fallback_summary_db(monkeypatch, doc_id):
+    """No LLM configured means `Archivist.enrich_or_fallback` falls back to
+    a plain literal summary written directly via `supabase.select`/
+    `update` -- stub those out so tests that disable the LLM don't hit a
+    real Supabase instance."""
+    async def _fake_select(table, *, columns="*", filters=None, order=None, limit=None, single=False):
+        return [{"id": doc_id, "summary": None, "title": None, "doc_type": None}]
+
+    async def _fake_update(table, patch, *, filters):
+        return [{"id": doc_id, **patch}]
+
+    monkeypatch.setattr(documents_module.supabase, "select", _fake_select)
+    monkeypatch.setattr(documents_module.supabase, "update", _fake_update)
+
+
 def test_process_document_extracts_schedule_for_an_at_a_glance_document(monkeypatch):
     """A document whose title marks it as an "at a glance" schedule must get
     mined for a day-by-day class schedule (same as a Schoology-synced one),
@@ -215,6 +230,7 @@ def test_process_document_extracts_schedule_for_an_at_a_glance_document(monkeypa
     monkeypatch.setattr(documents_module.ingestion, "ingest_document", _fake_ingest_document)
     monkeypatch.setattr(documents_module.settings, "groq_api_key", None)  # enrichment off, irrelevant here
     monkeypatch.setattr(documents_module, "apply_schedule_from_doc", _fake_apply_schedule_from_doc)
+    _stub_fallback_summary_db(monkeypatch, DOC_ID)
 
     asyncio.run(documents_module._process_document(
         DOC_ID, USER_ID, f"{USER_ID}/{DOC_ID}/glance.pdf", "application/pdf",
@@ -245,6 +261,7 @@ def test_process_document_skips_schedule_extraction_for_a_normal_document(monkey
     monkeypatch.setattr(documents_module.ingestion, "ingest_document", _fake_ingest_document)
     monkeypatch.setattr(documents_module.settings, "groq_api_key", None)
     monkeypatch.setattr(documents_module, "apply_schedule_from_doc", _fake_apply_schedule_from_doc)
+    _stub_fallback_summary_db(monkeypatch, DOC_ID)
 
     asyncio.run(documents_module._process_document(
         DOC_ID, USER_ID, f"{USER_ID}/{DOC_ID}/syllabus.pdf", "application/pdf",
@@ -252,3 +269,39 @@ def test_process_document_skips_schedule_extraction_for_a_normal_document(monkey
     ))
 
     assert calls == []
+
+
+def test_process_document_sets_a_fallback_summary_without_an_llm(monkeypatch):
+    """No LLM configured (or the LLM call fails) must never leave a document
+    without any summary at all -- a plain, literal one-liner naming what the
+    document is still beats a blank field forever."""
+    updates = []
+
+    async def _fake_select(table, *, columns="*", filters=None, order=None, limit=None, single=False):
+        return [{"id": DOC_ID, "summary": None, "title": "Syllabus.pdf", "doc_type": "other"}]
+
+    async def _fake_update(table, patch, *, filters):
+        updates.append(patch)
+        return [{"id": DOC_ID, **patch}]
+
+    async def _fake_download(key):
+        return b"%PDF-1.4 fake bytes"
+
+    async def _fake_ingest_document(doc_id, user_id, text):
+        return {"chunks": 1}
+
+    monkeypatch.setattr(documents_module.supabase, "select", _fake_select)
+    monkeypatch.setattr(documents_module.supabase, "update", _fake_update)
+    monkeypatch.setattr(documents_module.r2, "download", _fake_download)
+    monkeypatch.setattr(documents_module.ingestion, "extract_text", lambda *a, **k: "Some notes.")
+    monkeypatch.setattr(documents_module.ingestion, "ingest_document", _fake_ingest_document)
+    monkeypatch.setattr(documents_module.settings, "groq_api_key", None)  # settings.has_llm -> False
+
+    asyncio.run(documents_module._process_document(
+        DOC_ID, USER_ID, f"{USER_ID}/{DOC_ID}/syllabus.pdf", "application/pdf",
+        enrich=True, auto_title=False, title="Syllabus.pdf",
+    ))
+
+    summary_updates = [p for p in updates if "summary" in p]
+    assert len(summary_updates) == 1
+    assert summary_updates[0]["summary"] == 'A document titled "Syllabus.pdf".'

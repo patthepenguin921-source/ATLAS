@@ -32,6 +32,15 @@ from app.llm import claude
 # spaces were replaced with hyphens.
 GLANCE_TITLE_RE = re.compile(r"at[\s-]+a[\s-]+glance", re.I)
 
+# A glance document scoped to something longer than a single week -- a unit,
+# semester, quarter, chapter, term, etc. -- is something a teacher keeps
+# editing as the unit/term actually progresses (new days/assignments added
+# as they're taught), unlike a "Week at a Glance"/"Day at a Glance" which is
+# finished once its dates pass and never touched again. `is_recurring_glance_
+# title` marks these so the sync can keep re-checking them on every run
+# instead of treating a first pull as done forever.
+_BROAD_SCOPE_RE = re.compile(r"\b(unit|semester|quarter|trimester|term|chapter|month|course|year)s?\b", re.I)
+
 _CATEGORY_KEYWORDS = (
     "homework", "classwork", "quiz", "test", "exam", "project", "essay",
     "lab", "discussion", "presentation", "reading", "participation",
@@ -43,6 +52,13 @@ def is_glance_title(title: str | None) -> bool:
     """True if a document's title/filename marks it as an "at a glance"
     schedule document."""
     return bool(title and GLANCE_TITLE_RE.search(title))
+
+
+def is_recurring_glance_title(title: str | None) -> bool:
+    """True for an "at a glance" document scoped to more than a single week
+    (a "Unit at a Glance", "Semester at a Glance", ...) -- see the module-
+    level comment on `_BROAD_SCOPE_RE`."""
+    return is_glance_title(title) and bool(_BROAD_SCOPE_RE.search(title or ""))
 
 
 def _map_category(text: str) -> str:

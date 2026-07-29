@@ -1323,6 +1323,57 @@ def test_sync_scraped_materials_skips_enrichment_without_llm(fake_db, monkeypatc
     assert report["errors"] == []
 
 
+def test_sync_scraped_materials_sets_fallback_summary_without_llm(fake_db, monkeypatch):
+    """No LLM configured must never leave a document without any summary at
+    all -- a plain, literal fallback (see `Archivist.enrich_or_fallback`)
+    beats a blank field forever."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                      kind="item", material_type="File")],
+        files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
+
+    monkeypatch.setattr(settings, "groq_api_key", "")  # settings.has_llm -> False
+
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    doc = fake_db.tables["documents"][0]
+    assert doc["summary"] == 'A document titled "Syllabus.pdf".'
+
+
+def test_sync_scraped_materials_sets_fallback_summary_for_flagged_stub(fake_db, monkeypatch):
+    """A link Atlas couldn't classify/download yet (only a title+URL stub is
+    recorded, see `_ingest_text`) must still get a summary, not stay blank
+    until a later sync happens to be able to read it for real."""
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Quizlet Set", href="https://quizlet.com/123/set",
+                      kind="item", material_type="Link")],
+    )
+
+    import app.integrations.schoology as schoology_module
+
+    async def _fake_fetch(url):
+        return None  # unreachable/blocked
+
+    monkeypatch.setattr(schoology_module, "_fetch_external_url", _fake_fetch)
+
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    doc = fake_db.tables["documents"][0]
+    assert doc["needs_review"] is True
+    assert doc["summary"] == 'A document titled "Quizlet Set".'
+
+
 def test_sync_scraped_materials_downloads_google_links_with_token(fake_db, monkeypatch):
     """A "Link."-labeled item pointing at Google Drive/Docs/Slides is routed
     through the existing Google download path, same as the API path."""
@@ -2191,6 +2242,127 @@ def test_sync_scraped_materials_extracts_schedule_from_glance_document(fake_db, 
     assert assignment["title"] == "Chlorophyll Lab Report"
     assert assignment["due_date"] == "2025-10-09"
     assert assignment["category"] == "lab"
+
+
+def test_sync_scraped_materials_rewalks_unit_at_a_glance_every_sync(fake_db, monkeypatch):
+    """A "Unit at a Glance" document is scoped to more than a single week --
+    teachers keep editing it as the unit progresses -- so unlike an ordinary
+    material it must stay out of the dedupe set forever and be re-walked on
+    every sync, re-extracting the schedule only when the file itself
+    actually changed. The reported bug: a synced "Unit at a Glance" wasn't
+    turning into class-schedule events, because once the file existed with
+    a storage_path, `_ingest_file` returned immediately without ever
+    re-checking it on a later sync."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    item = MaterialLink(name="Unit 3 - At a Glance.pdf", href="/attachment/download/1",
+                         kind="item", material_type="File", folder_path="Unit 3")
+
+    from app.llm import claude
+
+    # Both schedule extraction (app.services.schedule_extraction) and the
+    # Archivist's own summary enrichment go through the same complete_json
+    # call -- distinguish by `system` so `calls` only tracks the former.
+    calls: list[str] = []
+
+    async def _fake_complete_json_v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        if "class schedule" not in system:
+            return {"summary": "s", "keywords": [], "doc_type": "other",
+                     "importance": "normal", "concepts": []}
+        calls.append(prompt)
+        return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": []}]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json_v1)
+
+    scraper1 = _FakeScraperClient(
+        [item], files={"/attachment/download/1": (b"%PDF v1 unit content", "application/pdf")},
+    )
+    report1 = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper1, report=report1,
+    ))
+    assert {e["title"] for e in fake_db.tables["calendar_events"]} == {"Intro"}
+    assert len(calls) == 1
+
+    # Second sync, unchanged file content -- must still be re-walked (not
+    # excluded via known_names)...
+    scraper2 = _FakeScraperClient(
+        [item], files={"/attachment/download/1": (b"%PDF v1 unit content", "application/pdf")},
+    )
+    report2 = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper2, report=report2,
+    ))
+    assert "unit 3 - at a glance.pdf" not in (scraper2.known_names_calls[0] or set())
+    # ...but since the content didn't actually change, nothing was re-run.
+    assert len(calls) == 1
+    assert len(fake_db.tables["documents"]) == 1
+
+    # Third sync: the teacher actually updated the file -- the schedule must
+    # be re-extracted and the new day applied, in place, not duplicated.
+    async def _fake_complete_json_v2(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        if "class schedule" not in system:
+            return {"summary": "s", "keywords": [], "doc_type": "other",
+                     "importance": "normal", "concepts": []}
+        calls.append(prompt)
+        return {"days": [
+            {"date": "2025-10-06", "topic": "Intro", "assignments": []},
+            {"date": "2025-10-13", "topic": "New unit content", "assignments": []},
+        ]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json_v2)
+    scraper3 = _FakeScraperClient(
+        [item], files={"/attachment/download/1": (b"%PDF v2 unit content -- updated", "application/pdf")},
+    )
+    report3 = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper3, report=report3,
+    ))
+    assert len(calls) == 2
+    assert {e["title"] for e in fake_db.tables["calendar_events"]} == {"Intro", "New unit content"}
+    assert len(fake_db.tables["documents"]) == 1  # still just the one document row
+
+
+def test_sync_scraped_materials_stops_rewalking_week_at_a_glance_after_first_sync(fake_db, monkeypatch):
+    """Unlike a "Unit"/"Semester at a Glance", a plain "Week at a Glance" is
+    finished once its dates pass -- it must be treated as done after the
+    first pull, same as any other material, not re-walked forever."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+
+    item = MaterialLink(name="Week at a Glance", href="/attachment/download/1",
+                         kind="item", material_type="File", folder_path="Unit 1")
+
+    from app.llm import claude
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        if "class schedule" not in system:
+            return {"summary": "s", "keywords": [], "doc_type": "other",
+                     "importance": "normal", "concepts": []}
+        return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": []}]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    scraper1 = _FakeScraperClient(
+        [item], files={"/attachment/download/1": (b"%PDF week content", "application/pdf")},
+    )
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper1, report=_full_report(),
+    ))
+
+    scraper2 = _FakeScraperClient(
+        [item], files={"/attachment/download/1": (b"%PDF week content", "application/pdf")},
+    )
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper2, report=_full_report(),
+    ))
+    assert "week at a glance" in (scraper2.known_names_calls[0] or set())
 
 
 def test_sync_scraped_materials_flags_unrecognized_link_it_cannot_fetch(fake_db, monkeypatch):

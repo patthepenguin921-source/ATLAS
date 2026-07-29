@@ -1819,7 +1819,18 @@ class SchoologyProvider(IntegrationProvider):
                 continue  # already represented by the assignment's due event
             if not self._in_week(ev.start, monday, sunday):
                 continue
-            kind = "exam" if re.search(r"\b(exam|test|quiz)\b", ev.title, re.I) else "event"
+            # A quiz is graded and calendar-worthy the same way an exam/test
+            # is, but must stay a distinct `kind` -- lumping "quiz" into
+            # "exam" here made a student asking the AI "what's my next
+            # test" get handed the nearest quiz instead, since the AI has
+            # only the `kind` label to go on (it never reads titles well
+            # enough on its own to tell "Limits Quiz" isn't a test).
+            if re.search(r"\bquiz\b", ev.title, re.I):
+                kind = "quiz"
+            elif re.search(r"\b(exam|test)\b", ev.title, re.I):
+                kind = "exam"
+            else:
+                kind = "event"
             await self._upsert_calendar_event(user_id, f"schoology:event:{ev.id}", {
                 "course_id": course_id, "title": ev.title,
                 "description": ev.description or None,

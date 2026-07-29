@@ -94,6 +94,13 @@ EVENTS = {"event": [
      "start": _this_week_iso(), "has_end": 0, "end": "", "all_day": 0,
      "type": "event", "assignment_id": None,
      "web_url": "https://app.schoology.com/event/3001"},
+    # A quiz must classify separately from an exam/test -- see the
+    # `_sync_section` comment on why lumping them into one "exam" kind broke
+    # the AI's "when's my next test" answers.
+    {"id": "3004", "title": "Weekly Quiz", "description": "",
+     "start": _this_week_iso(), "has_end": 0, "end": "", "all_day": 0,
+     "type": "event", "assignment_id": None,
+     "web_url": "https://app.schoology.com/event/3004"},
     # An assignment-linked event should be skipped (deduped by the assignment).
     {"id": "3002", "title": "Cell Respiration Lab", "start": _this_week_iso(),
      "type": "assignment", "assignment_id": "9001", "web_url": ""},
@@ -327,7 +334,7 @@ def test_client_parses_sections_assignments_events():
             assert "docs.google.com" in links_of(a.attachments)[0]["url"]
 
             events = await client.get_events(SECTION_ID)
-            assert {e.id for e in events} == {"3001", "3002", "3003"}
+            assert {e.id for e in events} == {"3001", "3002", "3003", "3004"}
         finally:
             await client.aclose()
 
@@ -434,11 +441,12 @@ def test_sync_reconciles_course_and_imports_without_grades(fake_db, monkeypatch)
     # Grading is PowerSchool-only: the provider must never write a grade.
     assert fake_db.tables["grades"] == []
 
-    # Week-at-a-glance: the exam event + the assignment due date are this week;
-    # the assignment-linked event and the 2020 event are excluded.
+    # Week-at-a-glance: the exam + quiz events + the assignment due date are
+    # this week; the assignment-linked event and the 2020 event are excluded.
+    # The exam and the quiz must land as distinct kinds, not both "exam".
     events = fake_db.tables["calendar_events"]
     kinds = sorted(e["kind"] for e in events)
-    assert kinds == ["due", "exam"]
+    assert kinds == ["due", "exam", "quiz"]
 
     # Assignment attachments + scraped materials became documents.
     docs = fake_db.tables["documents"]

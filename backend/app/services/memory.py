@@ -48,14 +48,16 @@ async def upcoming_assignments(user_id: str, *, days: int = 14, limit: int = 25)
 
 
 async def upcoming_events(user_id: str, *, days: int = 14, limit: int = 25) -> list[dict]:
-    """Upcoming `calendar_events` rows -- exams/quizzes, classes, and other
+    """Upcoming `calendar_events` rows -- exams, quizzes, classes, and other
     LMS-calendar items. Distinct from `upcoming_assignments`: a test/exam is
     routinely synced as a calendar event (e.g. Schoology section-calendar
-    items get `kind="exam"` when their title matches exam/test/quiz -- see
+    items get `kind="exam"` or `kind="quiz"` from their title -- see
     `SchoologyProvider._sync_section`) rather than as an `assignments` row,
     so without this a student's own "when's my test" question has no
     grounding at all even though the same data already renders on their
-    dashboard/calendar view (`app.routers.dashboard`)."""
+    dashboard/calendar view (`app.routers.dashboard`). `kind` deliberately
+    keeps "quiz" distinct from "exam" so a quiz never gets handed back as
+    the answer to a "when's my test" question."""
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(days=days)
     return await supabase.select(

@@ -2244,6 +2244,73 @@ def test_sync_scraped_materials_extracts_schedule_from_glance_document(fake_db, 
     assert assignment["category"] == "lab"
 
 
+def test_sync_scraped_materials_extracts_schedule_when_only_the_content_says_glance(fake_db, monkeypatch):
+    """The reported real-world bug: a Schoology item named for what it
+    contains ("AP Calculus BC Unit 1 Assignments List", filed under a
+    folder path that happened to read ".../Unit at Glance/...", which the
+    title check never even looks at) whose own document opens with an "at
+    a glance" heading must still get mined for its schedule -- and a
+    sibling, genuinely unrelated document merely filed under a folder path
+    containing "Unit" must NOT be misdetected as one just because of that
+    folder path."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    glance_item = MaterialLink(
+        name="AP Calculus BC Unit 1 Assignments List", href="/attachment/download/1",
+        kind="item", material_type="File", folder_path="General information/Unit at Glance/Unit 1 - Limits",
+    )
+    plain_item = MaterialLink(
+        name="Syllabus.pdf", href="/attachment/download/2",
+        kind="item", material_type="File", folder_path="Unit 1 - Limits",
+    )
+    scraper = _FakeScraperClient(
+        [glance_item, plain_item],
+        files={
+            "/attachment/download/1": (b"glance pdf bytes", "application/pdf"),
+            "/attachment/download/2": (b"syllabus pdf bytes", "application/pdf"),
+        },
+    )
+
+    def _fake_extract_text(content, mt, fn=""):
+        if content == b"glance pdf bytes":
+            return (
+                "# AP Calculus BC Unit 1 at a Glance\n\n"
+                "8/4 through 8/21/2026. Daily assignments due next school day.\n\n"
+                "| Dates | Agenda | Suggested Assignments |\n"
+                "| M, 8/3 | Intro to limits | Review packet |\n"
+            )
+        return "Course policies and grading breakdown."
+
+    monkeypatch.setattr(ingestion, "extract_text", _fake_extract_text)
+
+    from app.llm import claude
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        if "class schedule" not in system:
+            return {"summary": "s", "keywords": [], "doc_type": "other",
+                     "importance": "normal", "concepts": []}
+        return {"days": [{"date": "2026-08-03", "topic": "Intro to limits", "assignments": []}]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["errors"] == []
+    events = fake_db.tables["calendar_events"]
+    assert {e["title"] for e in events} == {"Intro to limits"}
+
+    docs = {d["metadata"]["material_name"]: d for d in fake_db.tables["documents"]}
+    assert docs["AP Calculus BC Unit 1 Assignments List"]["metadata"].get("is_recurring_glance") is True
+    # The plain syllabus, filed under an unrelated "Unit 1 - Limits" folder,
+    # must not be swept up by the folder path alone.
+    assert "is_recurring_glance" not in docs["Syllabus.pdf"]["metadata"]
+
+
 def test_sync_scraped_materials_rewalks_unit_at_a_glance_every_sync(fake_db, monkeypatch):
     """A "Unit at a Glance" document is scoped to more than a single week --
     teachers keep editing it as the unit progresses -- so unlike an ordinary

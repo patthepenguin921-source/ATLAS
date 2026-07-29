@@ -3,10 +3,24 @@
 A teacher's "Week at a Glance"/"Unit at a Glance" document lays out what
 happens in class on specific days -- topics, activities, and often
 assignments due -- in whatever shape the teacher wrote it (a table, a
-bulleted list, prose). Matched purely by title/filename, e.g. "Week at a
+bulleted list, prose). Matched first by title/filename, e.g. "Week at a
 Glance", "Unit 4 - At a Glance.pdf", "Chapter 7 – AT A GLANCE" -- any of
 these should be treated as a schedule document and mined for a day-by-day
 `calendar_events` rundown (`kind="class"`) plus any assignments it mentions.
+
+A title match isn't the only signal, though: an LMS item is often named for
+*what it contains* rather than by the "at a glance" phrasing its own
+document uses -- confirmed against a real account, a Schoology item titled
+"AP Calculus BC Unit 1 Assignments List" (nested under a folder path that
+happened to read "Unit at Glance", which callers never even see -- only the
+item's own name is title-matched) turned out to open with the heading "AP
+Calculus BC Unit 1 **at a Glance**". `is_glance`/`is_recurring_glance` fall
+back to sniffing the opening of the document's own extracted text once
+there's actually text to check (title-only detection, via `is_glance_title`/
+`is_recurring_glance_title`, is all that's available before a file is
+downloaded/extracted, or when only a stored title is on hand -- e.g. the
+materials-sync dedupe set, which never re-fetches an already-known item's
+content just to re-classify it).
 
 Shared by the Schoology materials-sync path (`app.integrations.schoology`)
 and the generic upload pipeline (`app.routers.documents`) so a document
@@ -29,8 +43,18 @@ from app.llm import claude
 # (week/unit/day) immediately before it the way an earlier, stricter version
 # of this regex did -- that missed plain "<something> - At a Glance"
 # filenames entirely. `[\s-]+` between words also catches filenames where
-# spaces were replaced with hyphens.
-GLANCE_TITLE_RE = re.compile(r"at[\s-]+a[\s-]+glance", re.I)
+# spaces were replaced with hyphens. The "a" itself is optional -- a real
+# Schoology folder was found named "Unit at Glance" (no "a") -- so
+# `[\s-]+(?:a[\s-]+)?` still requires "at" directly leading into "glance"
+# (with or without the "a") rather than loosening the match generally.
+GLANCE_TITLE_RE = re.compile(r"at[\s-]+(?:a[\s-]+)?glance", re.I)
+
+# How much of a document's own extracted text is worth checking for the
+# glance phrase when its title/filename didn't already say so -- just the
+# opening (a heading is always near the top of one of these), not a full-
+# document scan, so a document that merely mentions "at a glance" somewhere
+# deep in unrelated prose isn't misclassified as a schedule document.
+_CONTENT_SNIFF_CHARS = 300
 
 # A glance document scoped to something longer than a single week -- a unit,
 # semester, quarter, chapter, term, etc. -- is something a teacher keeps
@@ -59,6 +83,28 @@ def is_recurring_glance_title(title: str | None) -> bool:
     (a "Unit at a Glance", "Semester at a Glance", ...) -- see the module-
     level comment on `_BROAD_SCOPE_RE`."""
     return is_glance_title(title) and bool(_BROAD_SCOPE_RE.search(title or ""))
+
+
+def is_glance(*, title: str | None = None, text: str | None = None) -> bool:
+    """True if this document is an "at a glance" schedule document, by its
+    title/filename or (as a fallback, once there's text to check) its own
+    opening content -- see the module docstring for why the fallback
+    exists. `text` is optional so this still works as a pure title check
+    when no content is available yet (matching `is_glance_title`)."""
+    if is_glance_title(title):
+        return True
+    return bool(text) and bool(GLANCE_TITLE_RE.search(text[:_CONTENT_SNIFF_CHARS]))
+
+
+def is_recurring_glance(*, title: str | None = None, text: str | None = None) -> bool:
+    """`is_glance`, further scoped to more than a single week -- see
+    `is_recurring_glance_title`. Checks the same title-or-content
+    combination for the scope keyword (unit/semester/quarter/...)."""
+    if not is_glance(title=title, text=text):
+        return False
+    if is_recurring_glance_title(title):
+        return True
+    return bool(text) and bool(_BROAD_SCOPE_RE.search(text[:_CONTENT_SNIFF_CHARS]))
 
 
 def _map_category(text: str) -> str:

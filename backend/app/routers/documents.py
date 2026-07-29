@@ -35,7 +35,7 @@ from app.core.security import CurrentUser, check_cron_secret, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.schemas import DocumentPatchRequest, DriveImportRequest, IngestTextRequest
 from app.services import ingestion, storage_cleanup
-from app.services.schedule_extraction import apply_schedule_from_doc, is_glance_title
+from app.services.schedule_extraction import apply_schedule_from_doc, is_glance
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -258,10 +258,12 @@ async def _process_document(
         )
 
     # A document whose title/filename marks it as an "at a glance" schedule
-    # (e.g. "Week at a Glance", "Unit 4 - At a Glance.pdf") gets mined for a
-    # day-by-day class schedule the same way a Schoology-synced one does —
-    # see app.services.schedule_extraction, shared with that sync path.
-    if course_id and text.strip() and is_glance_title(title or filename):
+    # (e.g. "Week at a Glance", "Unit 4 - At a Glance.pdf") -- or, failing
+    # that, whose own opening text does (a file named for what it contains
+    # rather than by the "at a glance" phrasing its own document uses; see
+    # app.services.schedule_extraction's module docstring) -- gets mined for
+    # a day-by-day class schedule the same way a Schoology-synced one does.
+    if course_id and text.strip() and is_glance(title=title or filename, text=text):
         try:
             await apply_schedule_from_doc(
                 user_id=user_id, course_id=course_id, title=title or filename,

@@ -64,6 +64,8 @@ from app.llm import claude
 from app.services import ingestion
 from app.services.schedule_extraction import GLANCE_TITLE_RE as _GLANCE_TITLE_RE
 from app.services.schedule_extraction import apply_schedule_from_doc as _apply_schedule_from_doc_shared
+from app.services.schedule_extraction import is_glance as _is_glance
+from app.services.schedule_extraction import is_recurring_glance as _is_recurring_glance
 from app.services.schedule_extraction import is_recurring_glance_title
 
 # Assignment/material title keywords → Atlas assignment_category enum values.
@@ -1003,10 +1005,16 @@ class SchoologyProvider(IntegrationProvider):
         existing = await self._existing_document(user_id, external_id)
         content_hash = hashlib.sha256(content).hexdigest()
         if existing and existing.get("storage_path"):
-            if extract_schedule:
+            existing_meta = existing.get("metadata") or {}
+            # `extract_schedule` alone is title-only (computed by the caller
+            # before any content existed to check) -- a document this row's
+            # own first ingest already content-sniffed into a recurring
+            # glance doc (see below) needs the same recheck-on-change
+            # treatment even when its title never said so.
+            if extract_schedule or existing_meta.get("is_recurring_glance"):
                 await self._recheck_glance_file_for_changes(
                     user_id=user_id, course_id=course_id, doc_id=existing["id"],
-                    existing_meta=existing.get("metadata") or {}, content_hash=content_hash,
+                    existing_meta=existing_meta, content_hash=content_hash,
                     title=title, content=content, content_type=content_type,
                     filename=filename, report=report,
                 )
@@ -1046,13 +1054,30 @@ class SchoologyProvider(IntegrationProvider):
             text = await asyncio.to_thread(ingestion.extract_text, content, content_type, filename)
         except Exception:  # noqa: BLE001
             text = ""
+        # A file/item is often named for what it contains rather than by
+        # the "at a glance" phrasing its own document uses (see
+        # app.services.schedule_extraction's module docstring) -- now that
+        # there's real text, upgrade a title-only "no" into a real answer.
+        # Content-only (no `title=`): `title` here is whatever the caller
+        # composed for display -- often folder-path-prefixed (e.g. "Unit 1 ·
+        # Syllabus.pdf") -- and re-checking that against the broad-scope
+        # pattern would false-positive on any item merely filed inside a
+        # folder named "Unit ..."; `extract_schedule` already carries the
+        # caller's own, correctly-scoped title verdict. `is_recurring_
+        # glance` is persisted so a future sync (which won't re-derive this
+        # from the title either) still knows to keep re-checking this file
+        # for changes -- see the early-return above.
+        extract_schedule = extract_schedule or _is_glance(text=text)
+        recurring_meta = (
+            {"is_recurring_glance": True} if _is_recurring_glance(text=text) else {}
+        )
         payload = {
             "title": title or filename or "Untitled", "doc_type": doc_type,
             "mime_type": content_type, "size_bytes": len(content),
             "storage_path": storage_path,
             "external_id": external_id, "external_source": self.name,
             "needs_review": False,
-            "metadata": {**(extra_meta or {}), "content_hash": content_hash},
+            "metadata": {**(extra_meta or {}), **recurring_meta, "content_hash": content_hash},
         }
         if was_flagged_stub:
             await supabase.update("documents", payload, filters={"id": eq(doc_id)})
@@ -1101,8 +1126,14 @@ class SchoologyProvider(IntegrationProvider):
             text = await asyncio.to_thread(ingestion.extract_text, content, content_type, filename)
         except Exception:  # noqa: BLE001
             text = ""
+        # Content-only, not `title=` -- see `_ingest_file`'s comment on why;
+        # merge order below means an already-True flag from a prior sync is
+        # kept even if this recheck's own content check comes back False
+        # (e.g. this particular re-download's text extraction failed).
+        recurring_meta = {"is_recurring_glance": True} if _is_recurring_glance(text=text) else {}
         await supabase.update(
-            "documents", {"metadata": {**existing_meta, "content_hash": content_hash}},
+            "documents",
+            {"metadata": {**existing_meta, **recurring_meta, "content_hash": content_hash}},
             filters={"id": eq(doc_id)},
         )
         if text.strip():
@@ -1140,12 +1171,18 @@ class SchoologyProvider(IntegrationProvider):
         if existing and not was_flagged_stub and not (recheck_for_changes and content_changed):
             return False  # already ingested and (when checked) unchanged — nothing to do
         doc_id = existing["id"] if existing else str(uuid.uuid4())
+        # Persisted the same way `_ingest_file` does (content-only, not
+        # `title=` -- see its comment for why), so a future sync that only
+        # has this row's stored title (not this page's freshly-fetched
+        # text) still knows to keep re-checking it for changes -- see
+        # `_sync_scraped_materials`'s `known_names` exclusion.
+        recurring_meta = {"is_recurring_glance": True} if _is_recurring_glance(text=text) else {}
         payload = {
             "title": title or "Untitled", "doc_type": "other",
             "size_bytes": len(text or ""),
             "external_id": external_id, "external_source": self.name,
             "needs_review": False,
-            "metadata": {**(extra_meta or {}), "content_hash": content_hash},
+            "metadata": {**(extra_meta or {}), **recurring_meta, "content_hash": content_hash},
         }
         if existing:
             await supabase.update("documents", payload, filters={"id": eq(doc_id)})
@@ -1909,6 +1946,12 @@ class SchoologyProvider(IntegrationProvider):
             # `_ingest_file`/`_ingest_external_page`'s own content-hash check
             # (see their docstrings) is what keeps a re-walk that finds no
             # actual change cheap (no re-download-triggered LLM re-run).
+            # `metadata.is_recurring_glance` catches the same case for an
+            # item named for what it contains rather than by the "at a
+            # glance" phrasing its own document uses -- its *title* alone
+            # (all a stored `documents` row without re-fetching it has to
+            # go on) would say no, but its content already told a prior
+            # sync otherwise, and that verdict was persisted right here.
             known_names = {
                 str((row.get("metadata") or {}).get("material_name") or "").strip().lower()
                 for row in existing
@@ -1918,6 +1961,7 @@ class SchoologyProvider(IntegrationProvider):
                     or (row.get("metadata") or {}).get("review_reason")
                 )
                 and not is_recurring_glance_title((row.get("metadata") or {}).get("material_name"))
+                and not (row.get("metadata") or {}).get("is_recurring_glance")
             } - {""}
 
             # A scraped "assignment"-type item is never recorded as a
@@ -2175,6 +2219,11 @@ class SchoologyProvider(IntegrationProvider):
                 page_text = None
                 report["errors"].append(f"{section.display_name} · {item.name}: {e}")
             if page_text and page_text.strip():
+                # Upgrade the title-only `is_glance` now that there's real
+                # page text to check -- a page named for what it contains
+                # (not by the "at a glance" phrasing its own heading uses)
+                # would otherwise never get mined for a schedule at all.
+                page_is_glance = is_glance or _is_glance(text=page_text)
                 # `recheck_for_changes` re-indexes (and, below, re-mines the
                 # schedule from) a glance page whose content changed since
                 # the last sync -- see `_ingest_external_page`'s docstring
@@ -2183,11 +2232,11 @@ class SchoologyProvider(IntegrationProvider):
                 changed = await self._ingest_external_page(
                     user_id=user_id, course_id=course_id, external_id=external_id,
                     title=title, text=page_text, extra_meta=base_meta,
-                    recheck_for_changes=is_glance,
+                    recheck_for_changes=page_is_glance,
                 )
                 if changed:
                     report["documents"] += 1
-                if is_glance and changed:
+                if page_is_glance and changed:
                     await self._apply_schedule_from_doc(
                         user_id=user_id, course_id=course_id, title=title, text=page_text,
                         report=report,

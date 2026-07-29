@@ -69,6 +69,36 @@ def test_is_recurring_glance_title_rejects_week_scoped_and_non_glance_titles(tit
     assert schedule_extraction.is_recurring_glance_title(title) is False
 
 
+def test_is_glance_title_tolerates_a_missing_the_word_a():
+    """A real Schoology folder was found named "Unit at Glance" (no "a")."""
+    assert schedule_extraction.is_glance_title("Unit at Glance") is True
+    assert schedule_extraction.is_glance_title("Week at Glance.pdf") is True
+
+
+def test_is_glance_falls_back_to_content_when_the_title_does_not_say_so():
+    """The reported real-world case: a Schoology item named for what it
+    contains ("... Assignments List") whose own document opens with an "at
+    a glance" heading -- a plain title check alone misses this entirely."""
+    title = "AP Calculus BC Unit 1 Assignments List"
+    text = "# AP Calculus BC Unit 1 at a Glance\n\n8/4 through 8/21/2026 ..."
+    assert schedule_extraction.is_glance_title(title) is False
+    assert schedule_extraction.is_glance(title=title, text=text) is True
+    assert schedule_extraction.is_recurring_glance(title=title, text=text) is True
+
+
+def test_is_glance_does_not_scan_far_into_the_document_body():
+    """Only the opening is checked -- a document that merely mentions the
+    phrase deep in unrelated prose must not be misclassified as a schedule
+    document."""
+    text = ("Some unrelated notes. " * 50) + "Please review this at a glance before the quiz."
+    assert schedule_extraction.is_glance(title="Notes", text=text) is False
+
+
+def test_is_glance_with_no_text_falls_back_to_title_only():
+    assert schedule_extraction.is_glance(title="Week at a Glance", text=None) is True
+    assert schedule_extraction.is_glance(title="Notes", text=None) is False
+
+
 class FakeSupabase:
     def __init__(self) -> None:
         self.tables: dict[str, list[dict[str, Any]]] = {"calendar_events": [], "assignments": []}

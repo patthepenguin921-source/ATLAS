@@ -1,4 +1,8 @@
-"""Pure unit tests for the Schoology course-name mapping rules."""
+"""Pure unit tests for the course-name mapping rules shared by every sync
+provider (Schoology, PowerSchool, ...). `resolve_grouped_course_id`'s DB-
+touching behavior is exercised end-to-end from each provider's own sync
+tests (test_schoology.py, test_powerschool_sync.py) instead of here.
+"""
 from __future__ import annotations
 
 from app.integrations import course_mapping
@@ -67,6 +71,32 @@ def test_ap_calc_ab_bc_group_matching():
 
 def test_unrelated_course_does_not_match_a_group():
     assert course_mapping.match_group("English 10") is None
+
+
+def test_compute_present_group_semesters_from_a_mixed_list_of_names():
+    """Both halves of a split class, from any provider's own naming, count
+    toward the same group key -- this is the "real evidence" `resolve_
+    grouped_course_id` needs before it'll actually split a class."""
+    present = course_mapping.compute_present_group_semesters([
+        "Bio PreLab HN", "AP Biology", "English 10", "AP Calculus AB",
+    ])
+    assert present["ap_biology"] == {"s1", "s2"}
+    assert present["ap_calc_bc"] == {"s1"}  # only the AB half showed up
+    assert "english" not in present
+
+
+def test_names_match_cross_system_variants():
+    assert course_mapping.names_match("AP Biology", "ap biology")
+    assert course_mapping.names_match("AP Biology", "AP Biology - Sec 1")
+    assert not course_mapping.names_match("AP Biology", "AP Physics I")
+    # A differing, discriminating token (AB vs BC) must block the match --
+    # a missed link just leaves a separate course; a wrong merge corrupts
+    # two classes' data.
+    assert not course_mapping.names_match("AP Calculus AB", "AP Calculus BC")
+
+
+def test_normalize_name_basic():
+    assert course_mapping.normalize_name("AP  Calculus-AB!") == "ap calculus ab"
 
 
 def test_merge_known_sections_adds_missing_known_ids():

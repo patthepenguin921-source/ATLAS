@@ -34,13 +34,13 @@ class Agent:
             "found; judge for yourself whether they actually contain the "
             "answer. If they don't, use \"Found online\" results instead if "
             "present. Anything under \"Found online\" did not come from the "
-            "student's own documents or academic records — say so explicitly "
-            "whenever you use it (e.g. \"I couldn't find this in your "
-            "materials, but online sources say...\"). Never present a web "
-            "result as if it came from the student's own documents, and never "
-            "present document/record content as if it were a web result. If "
-            "neither source has the answer, say so plainly rather than "
-            "inventing facts."
+            "student's own documents or academic records — flag it once, "
+            "briefly, when you use it (e.g. \"(found online, not in your "
+            "materials)\"). Never present a web result as if it came from the "
+            "student's own documents, and never present document/record "
+            "content as if it were a web result. If neither source has the "
+            "answer, say so in one short sentence and stop — don't "
+            "editorialize about what else the student might have meant."
         )
 
     async def respond(

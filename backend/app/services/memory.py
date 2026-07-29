@@ -47,6 +47,30 @@ async def upcoming_assignments(user_id: str, *, days: int = 14, limit: int = 25)
     ) or []
 
 
+async def upcoming_events(user_id: str, *, days: int = 14, limit: int = 25) -> list[dict]:
+    """Upcoming `calendar_events` rows -- exams/quizzes, classes, and other
+    LMS-calendar items. Distinct from `upcoming_assignments`: a test/exam is
+    routinely synced as a calendar event (e.g. Schoology section-calendar
+    items get `kind="exam"` when their title matches exam/test/quiz -- see
+    `SchoologyProvider._sync_section`) rather than as an `assignments` row,
+    so without this a student's own "when's my test" question has no
+    grounding at all even though the same data already renders on their
+    dashboard/calendar view (`app.routers.dashboard`)."""
+    now = datetime.now(timezone.utc)
+    horizon = now + timedelta(days=days)
+    return await supabase.select(
+        "calendar_events",
+        columns="id,title,description,starts_at,ends_at,all_day,kind,course_id",
+        filters={
+            "user_id": eq(user_id),
+            "starts_at": f"gte.{now.isoformat()}",
+            "and": f"(starts_at.lte.{horizon.isoformat()})",
+        },
+        order="starts_at.asc",
+        limit=limit,
+    ) or []
+
+
 async def overdue_or_missing(user_id: str, *, limit: int = 25) -> list[dict]:
     now = datetime.now(timezone.utc)
     return await supabase.select(
@@ -158,6 +182,7 @@ async def build_context(
     ctx: dict[str, Any] = {
         "courses": await courses_overview(user_id),
         "upcoming": await upcoming_assignments(user_id),
+        "upcoming_events": await upcoming_events(user_id),
         "overdue": await overdue_or_missing(user_id),
         "recent_grades": await recent_grades(user_id, limit=10),
         "review_due": await concepts_needing_review(user_id, limit=10),
@@ -211,6 +236,14 @@ def render_context(ctx: dict[str, Any]) -> str:
                 f"- [{a.get('due_date','?')}] {a['title']} ({a['category']}, {a['status']}) "
                 f"in {course_name(a.get('course_id'))}"
                 + (f", ~{a['estimated_minutes']}min" if a.get("estimated_minutes") else "")
+            )
+
+    if ctx.get("upcoming_events"):
+        lines.append("\n## Upcoming calendar events (exams, classes, due dates)")
+        for e in ctx["upcoming_events"]:
+            when = (e.get("starts_at") or "?")[:10] if e.get("all_day") else e.get("starts_at", "?")
+            lines.append(
+                f"- [{when}] {e['title']} ({e.get('kind','event')}) in {course_name(e.get('course_id'))}"
             )
 
     if ctx.get("overdue"):

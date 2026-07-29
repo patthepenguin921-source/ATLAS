@@ -23,6 +23,7 @@ manual) course so the two systems share one course row instead of duplicating.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import time
 import uuid
@@ -63,6 +64,7 @@ from app.llm import claude
 from app.services import ingestion
 from app.services.schedule_extraction import GLANCE_TITLE_RE as _GLANCE_TITLE_RE
 from app.services.schedule_extraction import apply_schedule_from_doc as _apply_schedule_from_doc_shared
+from app.services.schedule_extraction import is_recurring_glance_title
 
 # Assignment/material title keywords → Atlas assignment_category enum values.
 _CATEGORY_KEYWORDS = (
@@ -1072,9 +1074,28 @@ class SchoologyProvider(IntegrationProvider):
         (`routers/documents.py`'s `_store_and_ingest`) so the file has a
         `storage_path` and is actually viewable/downloadable from the app,
         not just searchable as extracted text — best-effort, same as there:
-        a storage failure still lets the document be recorded and indexed."""
+        a storage failure still lets the document be recorded and indexed.
+
+        When `extract_schedule` is set and the file already exists, this
+        still never re-stores/re-embeds it (see above), but it does check
+        whether the file's own content actually changed since the last sync
+        (a hash kept in `metadata.content_hash`) and, if so, re-mines it for
+        a schedule — an "at a glance" document longer than a week (a unit,
+        semester, ...) is one teachers keep editing as the term progresses,
+        so a schedule that was current on a prior sync can go stale with no
+        new document ever appearing. An unchanged file is left alone
+        entirely; `_apply_schedule_from_doc` upserts by date so re-running
+        it on a changed file never duplicates anything already saved."""
         existing = await self._existing_document(user_id, external_id)
+        content_hash = hashlib.sha256(content).hexdigest()
         if existing and existing.get("storage_path"):
+            if extract_schedule:
+                await self._recheck_glance_file_for_changes(
+                    user_id=user_id, course_id=course_id, doc_id=existing["id"],
+                    existing_meta=existing.get("metadata") or {}, content_hash=content_hash,
+                    title=title, content=content, content_type=content_type,
+                    filename=filename, report=report,
+                )
             return False
         doc_id = existing["id"] if existing else str(uuid.uuid4())
         storage_path = f"{user_id}/{doc_id}/{safe_object_name(filename)}"
@@ -1117,7 +1138,7 @@ class SchoologyProvider(IntegrationProvider):
             "storage_path": storage_path,
             "external_id": external_id, "external_source": self.name,
             "needs_review": False,
-            "metadata": extra_meta or {},
+            "metadata": {**(extra_meta or {}), "content_hash": content_hash},
         }
         if was_flagged_stub:
             await supabase.update("documents", payload, filters={"id": eq(doc_id)})
@@ -1133,12 +1154,10 @@ class SchoologyProvider(IntegrationProvider):
         # Same enrichment (summary/keywords/doc_type + concept links) a direct
         # upload gets via `_store_and_ingest` — best-effort, and never renames
         # the title: Schoology's own material name is already the right title,
-        # unlike a direct upload's filename-derived placeholder.
-        if settings.has_llm and text.strip():
-            try:
-                await Archivist().enrich(user_id, doc_id, text)
-            except Exception:  # noqa: BLE001
-                pass
+        # unlike a direct upload's filename-derived placeholder. Guarantees a
+        # summary either way (see `Archivist.enrich_or_fallback`) rather than
+        # leaving one blank whenever there's no LLM/no text/the call fails.
+        await Archivist().enrich_or_fallback(user_id, doc_id, text, fallback_title=title)
         if classify_as_assignment:
             await self._link_assignment_from_google_doc(
                 user_id=user_id, course_id=course_id, doc_id=doc_id,
@@ -1153,30 +1172,66 @@ class SchoologyProvider(IntegrationProvider):
             )
         return True
 
+    async def _recheck_glance_file_for_changes(
+        self, *, user_id: str, course_id: str, doc_id: str, existing_meta: dict[str, Any],
+        content_hash: str, title: str, content: bytes, content_type: str, filename: str,
+        report: dict[str, Any] | None,
+    ) -> None:
+        """An already-ingested "at a glance" file, re-downloaded on this
+        sync — re-mine it for a schedule only if its content actually
+        changed since the hash was last recorded (see `_ingest_file`'s
+        docstring); an unchanged file needs nothing done to it at all."""
+        if existing_meta.get("content_hash") == content_hash:
+            return
+        try:
+            text = await asyncio.to_thread(ingestion.extract_text, content, content_type, filename)
+        except Exception:  # noqa: BLE001
+            text = ""
+        await supabase.update(
+            "documents", {"metadata": {**existing_meta, "content_hash": content_hash}},
+            filters={"id": eq(doc_id)},
+        )
+        if text.strip():
+            await self._apply_schedule_from_doc(
+                user_id=user_id, course_id=course_id, title=title, text=text,
+                report=report, source_document_id=doc_id,
+            )
+
     async def _ingest_external_page(
         self, *, user_id: str, course_id: str, external_id: str, title: str,
         text: str, extra_meta: dict[str, Any] | None = None,
+        recheck_for_changes: bool = False,
     ) -> bool:
         """Record an external web page as real, searchable content — same
         idempotent/stub-upgrade handling as `_ingest_file`, but for a page
         that was read rather than downloaded: there's no original file
         worth storing to R2 (a raw HTML blob isn't usefully "the document"
         the way a PDF is), so this only ever writes the extracted text and
-        runs it through the normal chunk/embed/enrich pipeline."""
+        runs it through the normal chunk/embed/enrich pipeline.
+
+        `recheck_for_changes` (set for an "at a glance" page — see
+        `_ingest_file`'s docstring) compares the page's content against the
+        hash recorded on the last sync and, if it changed, re-indexes it
+        the same as a brand-new page; if unchanged, this is a no-op. Returns
+        True iff the document row was newly created, a flagged stub was
+        upgraded, or (with `recheck_for_changes`) its content changed —
+        i.e. iff real work happened."""
         existing = await self._existing_document(user_id, external_id)
         existing_meta = (existing.get("metadata") or {}) if existing else {}
         was_flagged_stub = bool(existing) and bool(
             existing_meta.get("needs_google_auth") or existing_meta.get("review_reason")
         )
-        if existing and not was_flagged_stub:
-            return False  # already a real, ingested page — nothing to do
+        content_hash = hashlib.sha256((text or "").encode("utf-8", "ignore")).hexdigest()
+        content_changed = bool(existing) and existing_meta.get("content_hash") != content_hash
+        if existing and not was_flagged_stub and not (recheck_for_changes and content_changed):
+            return False  # already ingested and (when checked) unchanged — nothing to do
         doc_id = existing["id"] if existing else str(uuid.uuid4())
         payload = {
             "title": title or "Untitled", "doc_type": "other",
             "size_bytes": len(text or ""),
             "external_id": external_id, "external_source": self.name,
             "needs_review": False,
-            "metadata": extra_meta or {},
+            "metadata": {**(extra_meta or {}), "content_hash": content_hash},
         }
         if existing:
             await supabase.update("documents", payload, filters={"id": eq(doc_id)})
@@ -1189,11 +1244,7 @@ class SchoologyProvider(IntegrationProvider):
                 "documents", {"ingested": False, "ingest_error": str(e)[:400]},
                 filters={"id": eq(doc_id)},
             )
-        if settings.has_llm and text.strip():
-            try:
-                await Archivist().enrich(user_id, doc_id, text)
-            except Exception:  # noqa: BLE001
-                pass
+        await Archivist().enrich_or_fallback(user_id, doc_id, text, fallback_title=title)
         return True
 
     async def _ingest_external_link(
@@ -1344,6 +1395,12 @@ class SchoologyProvider(IntegrationProvider):
             await ingestion.ingest_document(doc_id, user_id, text or title)
         except Exception:  # noqa: BLE001
             pass
+        # This is only ever a title+URL stub (no real content pulled yet —
+        # see this method's callers), so a fallback rather than a real LLM
+        # enrichment call; still guarantees the document is never left
+        # without any summary until a later sync upgrades it for real (see
+        # `_ingest_file`'s `was_flagged_stub` handling).
+        await Archivist().enrich_or_fallback(user_id, doc_id, "", fallback_title=title)
         return True
 
     async def _ingest_attachments(
@@ -1932,6 +1989,15 @@ class SchoologyProvider(IntegrationProvider):
             # token is now connected or `_ingest_external_link` can now
             # actually read the page. Otherwise a document would stay
             # flagged forever even after the underlying problem is fixed.
+            # A "Unit/Semester at a Glance" item (see `is_recurring_glance_
+            # title`) is left out the same way, every sync, on purpose: a
+            # teacher keeps editing one of these as the unit/term actually
+            # progresses, unlike a week-at-a-glance which is finished once
+            # its dates pass, so it needs to be re-walked and re-checked for
+            # changes forever, not just pulled once and treated as done —
+            # `_ingest_file`/`_ingest_external_page`'s own content-hash check
+            # (see their docstrings) is what keeps a re-walk that finds no
+            # actual change cheap (no re-download-triggered LLM re-run).
             known_names = {
                 str((row.get("metadata") or {}).get("material_name") or "").strip().lower()
                 for row in existing
@@ -1940,6 +2006,7 @@ class SchoologyProvider(IntegrationProvider):
                     (row.get("metadata") or {}).get("needs_google_auth")
                     or (row.get("metadata") or {}).get("review_reason")
                 )
+                and not is_recurring_glance_title((row.get("metadata") or {}).get("material_name"))
             } - {""}
 
             # A scraped "assignment"-type item is never recorded as a
@@ -2197,12 +2264,19 @@ class SchoologyProvider(IntegrationProvider):
                 page_text = None
                 report["errors"].append(f"{section.display_name} · {item.name}: {e}")
             if page_text and page_text.strip():
-                if await self._ingest_external_page(
+                # `recheck_for_changes` re-indexes (and, below, re-mines the
+                # schedule from) a glance page whose content changed since
+                # the last sync -- see `_ingest_external_page`'s docstring
+                # and `is_recurring_glance_title` -- rather than only ever
+                # once, the first time it's seen.
+                changed = await self._ingest_external_page(
                     user_id=user_id, course_id=course_id, external_id=external_id,
                     title=title, text=page_text, extra_meta=base_meta,
-                ):
+                    recheck_for_changes=is_glance,
+                )
+                if changed:
                     report["documents"] += 1
-                if is_glance:
+                if is_glance and changed:
                     await self._apply_schedule_from_doc(
                         user_id=user_id, course_id=course_id, title=title, text=page_text,
                         report=report,

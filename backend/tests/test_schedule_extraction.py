@@ -44,6 +44,31 @@ def test_is_glance_title_rejects_unrelated_titles(title):
     assert schedule_extraction.is_glance_title(title) is False
 
 
+@pytest.mark.parametrize("title", [
+    "Unit at a Glance",
+    "Unit 4 - At a Glance.pdf",
+    "Semester at a Glance",
+    "Chapter 7 – AT A GLANCE",
+    "Quarter 2 at a Glance",
+])
+def test_is_recurring_glance_title_matches_broader_than_a_week(title):
+    """A unit/semester/quarter/chapter-scoped document is one a teacher
+    keeps editing as the term progresses, so it must be flagged for
+    every-sync re-checking, not treated as done after the first pull."""
+    assert schedule_extraction.is_recurring_glance_title(title) is True
+
+
+@pytest.mark.parametrize("title", [
+    "Week at a Glance",
+    "Day at a Glance",
+    "At a Glance",  # no scope word at all -- not assumed recurring
+    "Syllabus.pdf",
+    None,
+])
+def test_is_recurring_glance_title_rejects_week_scoped_and_non_glance_titles(title):
+    assert schedule_extraction.is_recurring_glance_title(title) is False
+
+
 class FakeSupabase:
     def __init__(self) -> None:
         self.tables: dict[str, list[dict[str, Any]]] = {"calendar_events": [], "assignments": []}

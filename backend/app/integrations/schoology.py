@@ -305,34 +305,13 @@ def _map_category(text: str) -> str:
     return "other"
 
 
-def _normalize_name(name: str) -> str:
-    """Lowercase alphanumeric tokens for cross-system course matching."""
-    return " ".join(re.findall(r"[a-z0-9]+", (name or "").lower()))
-
-
-# Course-name tokens that carry no discriminating signal when matching a
-# Schoology section to a PowerSchool course (both label the same class).
-_STOPWORDS = {"the", "of", "and", "a", "an", "period", "sec", "section"}
-
-
-def _name_tokens(name: str) -> set[str]:
-    return {t for t in _normalize_name(name).split() if t and t not in _STOPWORDS}
-
-
-def _names_match(a: str, b: str) -> bool:
-    """True if two course names very likely refer to the same class. Uses
-    exact normalized equality, or one token set being a subset of the other
-    (so "AP Biology" matches "AP Biology - Sec 1"). Deliberately conservative:
-    it will NOT merge "AP Calculus AB" with "AP Calculus BC" (a differing
-    token blocks the match) — a missed link just leaves a separate course,
-    whereas a wrong merge corrupts two classes' data."""
-    na, nb = _normalize_name(a), _normalize_name(b)
-    if na and na == nb:
-        return True
-    ta, tb = _name_tokens(a), _name_tokens(b)
-    if not ta or not tb:
-        return False
-    return ta <= tb or tb <= ta
+# Cross-system course-name matching (does this section match a course
+# PowerSchool/manual entry/a prior sync already created?) now lives in
+# course_mapping.py, shared with PowerSchoolProvider — aliased back to their
+# original names here since they're also used below for assignment/material
+# dedup keys, not just course matching.
+_normalize_name = course_mapping.normalize_name
+_names_match = course_mapping.names_match
 
 
 class SchoologyProvider(IntegrationProvider):
@@ -841,72 +820,6 @@ class SchoologyProvider(IntegrationProvider):
             },
         })
 
-    async def _resolve_grouped_course(
-        self, user_id: str, section: SchoologySection,
-        group: course_mapping.CourseGroup, member: course_mapping.GroupMember,
-    ) -> str:
-        """Resolve/create the merged course row for a section matched by
-        `course_mapping.match_group` (e.g. an "HN Ext Lab" + "AP" pair that
-        should display as one course with linked semester rows).
-
-        Also self-heals accounts synced before this grouping existed: if this
-        exact section was already imported as its own standalone course, that
-        row is renamed/relabeled into the group in place (via the external_id
-        match below) rather than left as a stale duplicate — no manual
-        course cleanup required after a re-sync."""
-        existing = await supabase.select(
-            "courses", columns="id,metadata",
-            filters={"user_id": eq(user_id), "external_id": eq(section.id),
-                     "external_source": eq(self.name)}, limit=1,
-        )
-        group_rows = await supabase.select(
-            "courses", columns="id,semester,linked_course_id,metadata",
-            filters={"user_id": eq(user_id), "metadata->>course_group": eq(group.key)},
-        ) or []
-
-        patch: dict[str, Any] = {
-            "name": group.canonical_name,
-            "code": section.course_code or None,
-            "room": section.location or None,
-            "semester": member.semester,
-            "course_level": member.course_level,
-            "has_hn_prep_lab": member.has_hn_prep_lab,
-            "has_ap_prep_lab": member.has_ap_prep_lab,
-            "external_id": section.id,
-            "external_source": self.name,
-        }
-        meta_extra = {
-            "course_group": group.key,
-            "schoology_section_id": section.id,
-            "meeting_days": section.meeting_days,
-            "start_time": section.start_time,
-            "end_time": section.end_time,
-        }
-
-        if existing:
-            row_id = existing[0]["id"]
-            meta = {**(existing[0].get("metadata") or {}), **meta_extra}
-            await supabase.update("courses", {**patch, "metadata": meta}, filters={"id": eq(row_id)})
-            return row_id
-
-        # Reuse the group's row for this semester if one already exists
-        # (e.g. re-syncing the same section under a slightly different id).
-        same_semester = next((r for r in group_rows if r.get("semester") == member.semester), None)
-        if same_semester:
-            meta = {**(same_semester.get("metadata") or {}), **meta_extra}
-            await supabase.update(
-                "courses", {**patch, "metadata": meta}, filters={"id": eq(same_semester["id"])}
-            )
-            return same_semester["id"]
-
-        # First row for the group becomes the root; later semesters link to it.
-        root = next((r for r in group_rows if not r.get("linked_course_id")), None)
-        patch["metadata"] = meta_extra
-        if root:
-            patch["linked_course_id"] = root["id"]
-        created = await supabase.insert("courses", {**patch, "user_id": user_id})
-        return created[0]["id"]
-
     async def _refresh_active_status(self, course_id: str, active: bool) -> None:
         """Best-effort: keep `is_active` current (the signal that moves a
         class between "current" and "completed" in the UI) without ever
@@ -935,19 +848,20 @@ class SchoologyProvider(IntegrationProvider):
         """Reuse an existing PowerSchool/manual/prior-Schoology course when one
         matches so the systems share a single course row. Only creates a new
         course when nothing matches."""
-        group_match = course_mapping.match_group(section.display_name)
-        if group_match:
-            group, member = group_match
-            # Only actually split into the group when there's real evidence
-            # this class is split this way: either the section itself is the
-            # distinctively-named HN prep-lab half (a name like "Physics 1 H
-            # Ext Lab" doesn't happen to a plain, already-existing course), or
-            # both halves showed up in this same sync. Otherwise a plain,
-            # already-reconciled course (e.g. a stand-alone "AP Biology" with
-            # no lab counterpart) would get needlessly split — fall through
-            # to ordinary name-based reconciliation instead.
-            if member.has_hn_prep_lab or len(present_group_semesters.get(group.key, set())) >= 2:
-                return await self._resolve_grouped_course(user_id, section, group, member)
+        grouped = await course_mapping.resolve_grouped_course_id(
+            provider_name=self.name, user_id=user_id, external_id=section.id,
+            display_name=section.display_name, course_code=section.course_code,
+            present_group_semesters=present_group_semesters,
+            extra_fields={"room": section.location or None},
+            extra_meta={
+                "schoology_section_id": section.id,
+                "meeting_days": section.meeting_days,
+                "start_time": section.start_time,
+                "end_time": section.end_time,
+            },
+        )
+        if grouped:
+            return grouped
 
         # 1) A course this provider already created/linked for this section.
         existing = await supabase.select(
@@ -1549,12 +1463,9 @@ class SchoologyProvider(IntegrationProvider):
             sections = await client.get_sections(uid)
             monday, sunday = week_bounds()
 
-            present_group_semesters: dict[str, set[str]] = {}
-            for s in sections:
-                gm = course_mapping.match_group(s.display_name)
-                if gm:
-                    g, m = gm
-                    present_group_semesters.setdefault(g.key, set()).add(m.semester)
+            present_group_semesters = course_mapping.compute_present_group_semesters(
+                s.display_name for s in sections
+            )
 
             # Resolving each section to a course_id is a single cheap DB
             # upsert, done up front and in order; the actual slow part —

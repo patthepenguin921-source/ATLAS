@@ -12,9 +12,11 @@ from typing import Any
 from app.config import settings
 from app.core.crypto import decrypt_json, encrypt_json
 from app.core.supabase_client import eq, supabase
+from app.integrations import course_mapping
 from app.integrations.base import IntegrationProvider
 from app.integrations.powerschool_browser import BrowserLoginError, login_and_get_cookie_header
 from app.integrations.powerschool_client import (
+    PSClass,
     PowerSchoolAuthError,
     PowerSchoolClient,
     UnsupportedLoginFlow,
@@ -120,6 +122,96 @@ class PowerSchoolProvider(IntegrationProvider):
         created = await supabase.insert("teachers", {"user_id": user_id, "name": name})
         return created[0]["id"]
 
+    async def _linked_course_id(self, user_id: str, ccid: str) -> str | None:
+        """A course this provider already created/linked for this class --
+        by its own `external_id`, or (if a different provider's row already
+        claimed that column pair) by the `metadata.powerschool_ccid` link a
+        prior sync left on it instead. Mirrors `SchoologyProvider.
+        _resolve_course_id`'s equivalent two-step lookup."""
+        existing = await supabase.select(
+            "courses", columns="id",
+            filters={"user_id": eq(user_id), "external_id": eq(ccid),
+                     "external_source": eq(self.name)}, limit=1,
+        )
+        if existing:
+            return existing[0]["id"]
+        linked = await supabase.select(
+            "courses", columns="id",
+            filters={"user_id": eq(user_id), "metadata->>powerschool_ccid": eq(ccid)}, limit=1,
+        )
+        return linked[0]["id"] if linked else None
+
+    async def _resolve_course_id(
+        self, user_id: str, cls: PSClass, teacher_id: str | None,
+        present_group_semesters: dict[str, set[str]],
+    ) -> str:
+        """Reuse an existing Schoology/manual/prior-PowerSchool course when
+        one matches so the systems share a single course row instead of
+        duplicating it -- mirrors `SchoologyProvider._resolve_course_id`.
+        `course_mapping.resolve_grouped_course_id` handles the shared case
+        of a class split across two differently-named semesters (e.g. "AP
+        Biology" + "Bio PreLab HN", "AP Calculus AB" + "AP Calculus BC") --
+        Schoology and PowerSchool both list each semester as its own
+        section/class under the very same names, so the same group match
+        lands both providers' data on the same two linked rows instead of
+        each growing its own duplicate pair."""
+        grouped = await course_mapping.resolve_grouped_course_id(
+            provider_name=self.name, user_id=user_id, external_id=cls.ccid,
+            display_name=cls.name, course_code=None,
+            present_group_semesters=present_group_semesters,
+            extra_fields={
+                "room": cls.room or None, "period": cls.period, "teacher_id": teacher_id,
+                "current_grade": cls.grade_percent, "current_letter": cls.grade_letter,
+            },
+            extra_meta={"powerschool_ccid": cls.ccid, "teacher": cls.teacher},
+        )
+        if grouped:
+            return grouped
+
+        # 1) A course this provider already created/linked for this class --
+        #    just keep its grade current; scheduling fields were already
+        #    filled (see step 2) the first time this row got linked.
+        row_id = await self._linked_course_id(user_id, cls.ccid)
+        if row_id:
+            await supabase.update(
+                "courses", {"current_grade": cls.grade_percent, "current_letter": cls.grade_letter},
+                filters={"id": eq(row_id)},
+            )
+            return row_id
+
+        # 2) An existing course (any source) whose name matches -- link,
+        #    don't dupe (the reported "duplicate courses I didn't add" bug:
+        #    a course a Schoology/manual sync already created, with its own
+        #    documents/assignments, getting a second, empty PowerSchool-
+        #    owned row instead of sharing the real one).
+        all_courses = await supabase.select(
+            "courses", columns="id,name,room,period,teacher_id,metadata",
+            filters={"user_id": eq(user_id)},
+        )
+        for c in all_courses or []:
+            if course_mapping.names_match(cls.name, c.get("name") or ""):
+                meta = {**(c.get("metadata") or {}), "powerschool_ccid": cls.ccid, "teacher": cls.teacher}
+                patch: dict[str, Any] = {
+                    "metadata": meta, "current_grade": cls.grade_percent,
+                    "current_letter": cls.grade_letter,
+                }
+                # Fill in scheduling details another provider didn't have, if empty.
+                if cls.room and not c.get("room"):
+                    patch["room"] = cls.room
+                if cls.period and not c.get("period"):
+                    patch["period"] = cls.period
+                if teacher_id and not c.get("teacher_id"):
+                    patch["teacher_id"] = teacher_id
+                await supabase.update("courses", patch, filters={"id": eq(c["id"])})
+                return c["id"]
+
+        # 3) No match — create a PowerSchool-owned course.
+        return await self.upsert_course(user_id, cls.ccid, {
+            "name": cls.name, "period": cls.period, "room": cls.room or None,
+            "teacher_id": teacher_id, "current_grade": cls.grade_percent,
+            "current_letter": cls.grade_letter, "metadata": {"teacher": cls.teacher},
+        }, create_only={"course_level": course_mapping.infer_course_level(cls.name)})
+
     async def debug_scrape(self, user_id: str) -> dict[str, Any]:
         """Fetches the authenticated grades page and reports its raw table
         structure — lets a district's actual column layout be inspected
@@ -139,20 +231,47 @@ class PowerSchoolProvider(IntegrationProvider):
         client = await self._authenticated_client(user_id)
         try:
             classes = await client.fetch_classes()
-            courses = assignments_count = grades_count = 0
+            courses = assignments_count = grades_count = excluded = 0
             errors: list[str] = []
 
+            # Same "class split across two differently-named semesters"
+            # evidence Schoology's sync computes (see
+            # course_mapping.resolve_grouped_course_id) -- PowerSchool lists
+            # each semester as its own class, under the same names, so a
+            # student taking (e.g.) AP Biology this year sees both "Bio
+            # PreLab HN" and "AP Biology" here too.
+            present_group_semesters = course_mapping.compute_present_group_semesters(
+                cls.name for cls in classes
+            )
+
             for cls in classes:
+                # Non-academic blocks (lunch, advisory) -- never imported as
+                # a course, same exclusion Schoology applies (see
+                # course_mapping.is_excluded): PowerSchool's own gradebook
+                # lists these as ordinary classes too (e.g. "CAT Time",
+                # "Lunch 1st Semester"). Any stale row a sync from before
+                # this filter existed already created is removed too, same
+                # self-heal Schoology's own exclusion does.
+                if course_mapping.is_excluded(cls.name):
+                    try:
+                        await supabase.delete(
+                            "courses",
+                            filters={"user_id": eq(user_id), "external_id": eq(cls.ccid),
+                                     "external_source": eq(self.name)},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    excluded += 1
+                    continue
+
                 teacher_id = await self._resolve_teacher_id(user_id, cls.teacher)
-                course_id = await self.upsert_course(user_id, cls.ccid, {
-                    "name": cls.name,
-                    "period": cls.period,
-                    "room": cls.room or None,
-                    "teacher_id": teacher_id,
-                    "current_grade": cls.grade_percent,
-                    "current_letter": cls.grade_letter,
-                    "metadata": {"teacher": cls.teacher},
-                })
+                try:
+                    course_id = await self._resolve_course_id(
+                        user_id, cls, teacher_id, present_group_semesters,
+                    )
+                except Exception as e:  # noqa: BLE001 — one course shouldn't sink the sync
+                    errors.append(f"{cls.name}: {e}")
+                    continue
                 courses += 1
 
                 if not cls.detail_href:
@@ -187,7 +306,7 @@ class PowerSchoolProvider(IntegrationProvider):
 
             return {
                 "courses": courses, "assignments": assignments_count,
-                "grades": grades_count, "errors": errors,
+                "grades": grades_count, "excluded": excluded, "errors": errors,
             }
         finally:
             await client.aclose()

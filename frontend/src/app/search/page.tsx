@@ -246,7 +246,19 @@ export default function AskAtlasPage() {
                       {m.content}
                     </div>
                   ) : (
-                    <div className="text-[15px] leading-relaxed whitespace-pre-wrap">{m.content}</div>
+                    <div>
+                      <div className="text-[15px] leading-relaxed whitespace-pre-wrap">{m.content}</div>
+                      {m.pendingAction && (
+                        <div className="flex gap-2 mt-2">
+                          <button className="btn-primary !py-1.5 !px-3 text-sm" onClick={() => chat.confirmAction(i)}>
+                            Confirm
+                          </button>
+                          <button className="btn-ghost !py-1.5 !px-3 text-sm" onClick={() => chat.dismissAction(i)}>
+                            Cancel
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               ))}

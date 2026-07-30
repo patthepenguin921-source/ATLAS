@@ -9,7 +9,7 @@ import { AgentPicker } from "./AgentPicker";
 export function FloatingChat() {
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
-  const { agent, setAgent, messages, busy, send, reset } = useChat();
+  const { agent, setAgent, messages, busy, send, reset, confirmAction, dismissAction } = useChat();
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -52,7 +52,19 @@ export function FloatingChat() {
                     {m.content}
                   </div>
                 ) : (
-                  <div className="text-sm whitespace-pre-wrap leading-relaxed">{m.content}</div>
+                  <div>
+                    <div className="text-sm whitespace-pre-wrap leading-relaxed">{m.content}</div>
+                    {m.pendingAction && (
+                      <div className="flex gap-2 mt-1.5">
+                        <button className="btn-primary !py-1 !px-2.5 text-xs" onClick={() => confirmAction(i)}>
+                          Confirm
+                        </button>
+                        <button className="btn-ghost !py-1 !px-2.5 text-xs" onClick={() => dismissAction(i)}>
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             ))}

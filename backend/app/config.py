@@ -50,9 +50,22 @@ class Settings(BaseSettings):
     # stronger reasoning than Llama 3.3 70B. Set ATLAS_LLM_PROVIDER=gemini to use
     # it as the primary provider, or just set GEMINI_API_KEY to enable it as the
     # automatic fallback below without switching the primary.
+    #
+    # Defaults to Google's floating "-latest" alias, not a dated model string
+    # (e.g. "gemini-2.5-flash") -- confirmed in production: a pinned dated
+    # model 404s outright once Google retires it for new callers (happened to
+    # gemini-2.5-flash within months of release, earlier than its announced
+    # deprecation date), which broke every chat turn with no way to recover
+    # short of a code change. "-latest" always resolves to a live release, so
+    # it can't hard-fail this way -- Google just hot-swaps what it points to
+    # over time (with >=2 weeks notice for breaking changes), which can shift
+    # quality/cost/behavior but never breaks the endpoint outright. See
+    # https://ai.google.dev/gemini-api/docs/latest-model. Pin to a specific
+    # dated model instead if predictable behavior matters more than never
+    # having to touch this again.
     gemini_api_key: str = ""
-    atlas_gemini_model: str = "gemini-2.5-flash"
-    atlas_gemini_fast_model: str = "gemini-2.5-flash-lite"
+    atlas_gemini_model: str = "gemini-flash-latest"
+    atlas_gemini_fast_model: str = "gemini-flash-latest"
 
     # Anthropic / Claude — optional paid upgrade path
     anthropic_api_key: str = ""

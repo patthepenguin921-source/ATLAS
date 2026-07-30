@@ -14,7 +14,7 @@ import hashlib
 import hmac
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit
 
@@ -2327,9 +2327,20 @@ def test_sync_scraped_materials_rewalks_unit_at_a_glance_every_sync(fake_db, mon
     actually changed. The reported bug: a synced "Unit at a Glance" wasn't
     turning into class-schedule events, because once the file existed with
     a storage_path, `_ingest_file` returned immediately without ever
-    re-checking it on a later sync."""
+    re-checking it on a later sync. "Forever" is still bounded by
+    relevance (see `glance_still_relevant`), so today is frozen here to
+    stay within the range the fixture's own extracted dates cover."""
+    from app.services import schedule_extraction
+
     provider = SchoologyProvider()
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    class _FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 10, 9)
+
+    monkeypatch.setattr(schedule_extraction, "date", _FrozenDate)
 
     item = MaterialLink(name="Unit 3 - At a Glance.pdf", href="/attachment/download/1",
                          kind="item", material_type="File", folder_path="Unit 3")
@@ -2402,10 +2413,15 @@ def test_sync_scraped_materials_rewalks_unit_at_a_glance_every_sync(fake_db, mon
     assert len(fake_db.tables["documents"]) == 1  # still just the one document row
 
 
-def test_sync_scraped_materials_stops_rewalking_week_at_a_glance_after_first_sync(fake_db, monkeypatch):
-    """Unlike a "Unit"/"Semester at a Glance", a plain "Week at a Glance" is
-    finished once its dates pass -- it must be treated as done after the
-    first pull, same as any other material, not re-walked forever."""
+def test_sync_scraped_materials_rewalks_week_at_a_glance_while_relevant_then_stops(fake_db, monkeypatch):
+    """Unlike the old behavior (pull a plain "Week at a Glance" once, never
+    look at it again), it must now be re-walked and re-checked for changes
+    on every sync for as long as its own extracted date range is still
+    current -- a late correction to an upcoming week's page must not be
+    missed -- and only stop being re-walked once that range is safely in
+    the past, same as a "Unit"/"Semester at a Glance" eventually would."""
+    from app.services import schedule_extraction
+
     provider = SchoologyProvider()
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")
 
@@ -2422,6 +2438,15 @@ def test_sync_scraped_materials_stops_rewalking_week_at_a_glance_after_first_syn
 
     monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
 
+    class _FrozenDate(date):
+        _today = date(2025, 10, 8)  # a couple days after 10/6 -- still relevant
+
+        @classmethod
+        def today(cls):
+            return cls._today
+
+    monkeypatch.setattr(schedule_extraction, "date", _FrozenDate)
+
     scraper1 = _FakeScraperClient(
         [item], files={"/attachment/download/1": (b"%PDF week content", "application/pdf")},
     )
@@ -2429,7 +2454,11 @@ def test_sync_scraped_materials_stops_rewalking_week_at_a_glance_after_first_syn
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper1, report=_full_report(),
     ))
+    doc = fake_db.tables["documents"][0]
+    assert doc["metadata"]["glance_date_range"] == {"start": "2025-10-06", "end": "2025-10-06"}
 
+    # Still within the grace window past 10/6 -- must be re-walked, not
+    # treated as permanently done.
     scraper2 = _FakeScraperClient(
         [item], files={"/attachment/download/1": (b"%PDF week content", "application/pdf")},
     )
@@ -2437,7 +2466,18 @@ def test_sync_scraped_materials_stops_rewalking_week_at_a_glance_after_first_syn
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper2, report=_full_report(),
     ))
-    assert "week at a glance" in (scraper2.known_names_calls[0] or set())
+    assert "week at a glance" not in (scraper2.known_names_calls[0] or set())
+
+    # Long past the range now -- nothing left in it worth re-checking.
+    _FrozenDate._today = date(2025, 12, 1)
+    scraper3 = _FakeScraperClient(
+        [item], files={"/attachment/download/1": (b"%PDF week content", "application/pdf")},
+    )
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper3, report=_full_report(),
+    ))
+    assert "week at a glance" in (scraper3.known_names_calls[0] or set())
 
 
 def test_sync_scraped_materials_flags_unrecognized_link_it_cannot_fetch(fake_db, monkeypatch):

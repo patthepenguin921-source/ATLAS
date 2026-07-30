@@ -29,7 +29,7 @@ matching this pattern gets the same treatment regardless of how it arrived.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from app.config import settings
@@ -107,6 +107,30 @@ def is_recurring_glance(*, title: str | None = None, text: str | None = None) ->
     return bool(text) and bool(_BROAD_SCOPE_RE.search(text[:_CONTENT_SNIFF_CHARS]))
 
 
+# Grace window (past a glance document's own last-extracted date range)
+# before Atlas stops bothering to re-check it -- covers a sync landing a
+# day or two late, not meant to be generous.
+_GLANCE_RELEVANCE_GRACE_DAYS = 5
+
+
+def glance_still_relevant(metadata: dict[str, Any] | None) -> bool:
+    """True while today is still within (or shortly after) the date range a
+    glance document's own last successful extraction covered, or when
+    there's no recorded range yet to judge by (nothing pulled yet, or a row
+    that predates this field existing) -- keep trying in that case rather
+    than assume it's stale. Once every date the document mentions is safely
+    in the past, there's nothing left in it worth re-mining even if the file
+    itself gets edited later (e.g. a typo fix to an old week's page)."""
+    date_range = (metadata or {}).get("glance_date_range")
+    if not isinstance(date_range, dict) or not date_range.get("end"):
+        return True
+    try:
+        end = date.fromisoformat(date_range["end"])
+    except (TypeError, ValueError):
+        return True
+    return date.today() <= end + timedelta(days=_GLANCE_RELEVANCE_GRACE_DAYS)
+
+
 def _map_category(text: str) -> str:
     low = (text or "").lower()
     for key in _CATEGORY_KEYWORDS:
@@ -119,15 +143,25 @@ def _normalize_name(name: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", (name or "").lower()))
 
 
-async def extract_schedule_from_text(title: str, text: str) -> list[dict[str, Any]]:
+async def extract_schedule_from_text(
+    title: str, text: str, *, report: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Ask the reasoning engine to read an 'at a glance' document like a
     student would and return one entry per day it actually names, each with
     the day's topic and any assignment due. No LLM configured means no
     schedule -- free-form day/date layouts have no reliable regex/DOM to
-    parse, so there's no safe non-LLM fallback here."""
+    parse, so there's no safe non-LLM fallback here.
+
+    A genuine LLM/parse failure is reported (into `report["errors"]` when a
+    report is on hand) rather than swallowed into the same empty list a
+    document with no real schedule content would also produce -- those two
+    cases used to be indistinguishable, which made a transient failure look
+    exactly like "nothing here" instead of a retriable problem. Still never
+    raises: one document's extraction failing must not abort the rest of a
+    sync, same as every other best-effort step in this pipeline."""
     if not settings.has_llm or not text.strip():
         return []
-    excerpt = text.strip()[:6000]
+    excerpt = text.strip()[:12000]
     today = date.today().isoformat()
     prompt = f"""\
 A document titled "{title}" lays out what happens in class on specific days \
@@ -136,7 +170,17 @@ A document titled "{title}" lays out what happens in class on specific days \
 invent a date the document doesn't state.
 
 Read the document and list every day it actually names, with what's \
-happening that day and any assignment due that day.
+happening that day and any assignment due that day. Only report a date or \
+assignment that the document actually states -- never infer or invent one \
+that isn't really there.
+
+If a day is also labeled with its day of the week (e.g. "Monday 10/6"), the \
+date you resolve must actually fall on that weekday of the calendar -- if no \
+date satisfies both the stated weekday and the stated month/day, omit that \
+entry rather than guessing. When a date is missing its year, pick whichever \
+nearby year (today's, or the one before/after) puts the date closest to \
+today -- don't default to today's year if that would place the date many \
+months away from today in either direction while a different year would not.
 
 Document text (may be truncated):
 \"\"\"
@@ -159,12 +203,16 @@ Omit assignments with no clear title."""
     try:
         result = await claude.complete_json(
             system="You are Atlas's Archivist, precisely extracting a class schedule from a teacher's document.",
-            prompt=prompt, max_tokens=1500, temperature=0.0,
+            prompt=prompt, max_tokens=4000, temperature=0.0,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        if report is not None:
+            report["errors"].append(f"{title}: couldn't extract a schedule from this document ({e})")
         return []
     days = result.get("days") if isinstance(result, dict) else None
     if not isinstance(days, list):
+        if report is not None:
+            report["errors"].append(f"{title}: schedule extraction returned an unexpected shape")
         return []
     return [d for d in days if isinstance(d, dict) and d.get("date")]
 
@@ -182,6 +230,12 @@ async def _upsert_calendar_event(user_id: str, external_id: str, fields: dict[st
 
 
 async def _upsert_assignment(user_id: str, external_id: str, source: str, fields: dict[str, Any]) -> None:
+    """`fields` deliberately never includes `status` -- only a brand-new row
+    gets seeded as "not_started"; an update leaves whatever status is
+    already there untouched (a PATCH only ever changes the columns given).
+    Without this, re-mining a recurring glance doc after an edit anywhere
+    in it would reset every assignment it lists back to "not started" on
+    every sync, wiping a student's actual progress."""
     existing = await supabase.select(
         "assignments", columns="id",
         filters={"user_id": eq(user_id), "external_id": eq(external_id),
@@ -191,7 +245,69 @@ async def _upsert_assignment(user_id: str, external_id: str, source: str, fields
     if existing:
         await supabase.update("assignments", payload, filters={"id": eq(existing[0]["id"])})
     else:
-        await supabase.insert("assignments", payload)
+        await supabase.insert("assignments", {**payload, "status": "not_started"})
+
+
+async def _reconcile_glance_rows(
+    *, user_id: str, course_id: str, source: str, source_document_id: str,
+    touched_assignment_ids: set[str], touched_event_ids: set[str],
+    report: dict[str, Any] | None,
+) -> None:
+    """Delete any assignment/calendar_event this exact document previously
+    created that this run's fresh extraction no longer lists -- a day or
+    assignment dropped from a re-edited glance doc should disappear from
+    Atlas too, not linger forever. Scoped strictly to rows this document
+    produced (`metadata.source_document_id`), so this can never touch a row
+    any other document, sync, or manual entry created -- and only ever
+    called when this run's extraction actually found at least one day (see
+    `apply_schedule_from_doc`), so a transient LLM failure can never look
+    like "the document now has nothing in it" and wipe everything out."""
+    try:
+        existing_assignments = await supabase.select(
+            "assignments", columns="id,external_id",
+            filters={"user_id": eq(user_id), "course_id": eq(course_id),
+                     "external_source": eq(source),
+                     "metadata->>source_document_id": eq(source_document_id)},
+        ) or []
+        for row in existing_assignments:
+            if row.get("external_id") not in touched_assignment_ids:
+                await supabase.delete("assignments", filters={"id": eq(row["id"])})
+    except Exception as e:  # noqa: BLE001
+        if report is not None:
+            report["errors"].append(f"couldn't clean up assignments no longer on the schedule: {e}")
+    try:
+        existing_events = await supabase.select(
+            "calendar_events", columns="id,external_id",
+            filters={"user_id": eq(user_id), "course_id": eq(course_id),
+                     "metadata->>source_document_id": eq(source_document_id)},
+        ) or []
+        for row in existing_events:
+            if row.get("external_id") not in touched_event_ids:
+                await supabase.delete("calendar_events", filters={"id": eq(row["id"])})
+    except Exception as e:  # noqa: BLE001
+        if report is not None:
+            report["errors"].append(f"couldn't clean up class-schedule days no longer on the schedule: {e}")
+
+
+async def _record_glance_date_range(source_document_id: str, dates: list[str]) -> None:
+    """Persist the span of dates this document's latest successful
+    extraction actually covered, so `glance_still_relevant` can tell once
+    every date in it is safely in the past. Merges into whatever metadata
+    is already on the row (content_hash, is_glance, ...) rather than
+    overwriting it."""
+    if not dates:
+        return
+    try:
+        rows = await supabase.select(
+            "documents", columns="metadata", filters={"id": eq(source_document_id)}, limit=1,
+        )
+        if not rows:
+            return
+        metadata = dict(rows[0].get("metadata") or {})
+        metadata["glance_date_range"] = {"start": min(dates), "end": max(dates)}
+        await supabase.update("documents", {"metadata": metadata}, filters={"id": eq(source_document_id)})
+    except Exception:  # noqa: BLE001
+        pass  # best-effort -- worst case, the doc just keeps getting rechecked
 
 
 async def apply_schedule_from_doc(
@@ -213,14 +329,28 @@ async def apply_schedule_from_doc(
     (see `SchoologyProvider._import_assignment`/`_ingest_scraped_assignment`)
     -- since a teacher's schedule doc routinely just restates a due date
     that's already tracked elsewhere. Dedupe by normalized title against
-    every assignment already on file for this course before inserting a new
-    one, the same way `_ingest_scraped_assignment` does, so a title match
-    from any source counts and it's pulled once, not twice. A title that
-    already belongs to *this* glance doc's own previously-created row is
-    exempted so a re-sync still updates it (via `_upsert_assignment`'s
-    upsert-by-external_id below) instead of being skipped as a false
-    duplicate of itself."""
-    days = await extract_schedule_from_text(title, text)
+    every *non-glance* assignment already on file for this course before
+    inserting a new one, the same way `_ingest_scraped_assignment` does, so
+    a title match against a genuinely independent import counts and it's
+    pulled once, not twice. Every glance-derived row (from this document or
+    any other) is excluded from that check entirely, not just this
+    document's own -- a coincidental title match between two different
+    glance documents (two different weeks both mentioning a "Quiz", say)
+    must never suppress a real item; each document's own rows are kept
+    distinct by `external_id` (which embeds `source_document_id`), so a
+    re-sync still updates this document's own previously-created row in
+    place via `_upsert_assignment`'s upsert-by-external_id instead of
+    either duplicating or falsely colliding with it.
+
+    Everything this call writes (or previously wrote, on an earlier run for
+    this same document) is reconciled against what this run's extraction
+    actually found: unmentioned assignments/days from a prior run are
+    deleted, changed ones (e.g. a moved due date) are updated in place, and
+    new ones are created -- see `_reconcile_glance_rows`. Skipped entirely
+    when this run found nothing at all, so a transient LLM failure can
+    never be mistaken for "the document now has zero days" and wipe out
+    everything a previous, successful run saved."""
+    days = await extract_schedule_from_text(title, text, report=report)
     existing_assignments = await supabase.select(
         "assignments", columns="external_id,title",
         filters={"user_id": eq(user_id), "course_id": eq(course_id)},
@@ -228,15 +358,23 @@ async def apply_schedule_from_doc(
     other_assignment_titles = {
         _normalize_name(row.get("title") or "")
         for row in existing_assignments
-        if not str(row.get("external_id") or "").startswith(f"{source}:glance-assignment:{course_id}:")
+        if ":glance-assignment:" not in str(row.get("external_id") or "")
     } - {""}
+
+    touched_assignment_ids: set[str] = set()
+    touched_event_ids: set[str] = set()
+    dates: list[str] = []
+
     for day in days:
         iso_date = day.get("date")
         if not iso_date:
             continue
+        dates.append(iso_date)
+        event_ext_id = f"{source}:class:{course_id}:{source_document_id}:{iso_date}"
+        touched_event_ids.add(event_ext_id)
         try:
             await _upsert_calendar_event(
-                user_id, f"{source}:class:{course_id}:{iso_date}", {
+                user_id, event_ext_id, {
                     "course_id": course_id, "title": day.get("topic") or title,
                     "description": day.get("topic") or None,
                     "starts_at": iso_date, "all_day": True, "kind": "class",
@@ -263,11 +401,12 @@ async def apply_schedule_from_doc(
             if category not in _ASSIGNMENT_CATEGORY_VALUES:
                 category = _map_category(a_title)
             due = a.get("due_date") or iso_date
-            ext_id = f"{source}:glance-assignment:{course_id}:{_normalize_name(a_title)}"
+            ext_id = f"{source}:glance-assignment:{course_id}:{source_document_id}:{_normalize_name(a_title)}"
+            touched_assignment_ids.add(ext_id)
             try:
                 await _upsert_assignment(user_id, ext_id, source, {
                     "course_id": course_id, "title": a_title, "category": category,
-                    "due_date": due, "status": "not_started",
+                    "due_date": due,
                     "metadata": {
                         "source_document_id": source_document_id,
                         "detected_from": "glance_doc",
@@ -280,3 +419,12 @@ async def apply_schedule_from_doc(
                     report["errors"].append(
                         f"{a_title}: detected as assignment but couldn't save it ({e})"
                     )
+
+    if days and source_document_id:
+        await _reconcile_glance_rows(
+            user_id=user_id, course_id=course_id, source=source,
+            source_document_id=source_document_id,
+            touched_assignment_ids=touched_assignment_ids, touched_event_ids=touched_event_ids,
+            report=report,
+        )
+        await _record_glance_date_range(source_document_id, dates)

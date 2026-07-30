@@ -64,6 +64,7 @@ from app.llm import claude
 from app.services import ingestion
 from app.services.schedule_extraction import GLANCE_TITLE_RE as _GLANCE_TITLE_RE
 from app.services.schedule_extraction import apply_schedule_from_doc as _apply_schedule_from_doc_shared
+from app.services.schedule_extraction import glance_still_relevant as _glance_still_relevant
 from app.services.schedule_extraction import is_glance as _is_glance
 from app.services.schedule_extraction import is_recurring_glance as _is_recurring_glance
 from app.services.schedule_extraction import is_recurring_glance_title
@@ -1008,10 +1009,20 @@ class SchoologyProvider(IntegrationProvider):
             existing_meta = existing.get("metadata") or {}
             # `extract_schedule` alone is title-only (computed by the caller
             # before any content existed to check) -- a document this row's
-            # own first ingest already content-sniffed into a recurring
-            # glance doc (see below) needs the same recheck-on-change
-            # treatment even when its title never said so.
-            if extract_schedule or existing_meta.get("is_recurring_glance"):
+            # own first ingest already content-sniffed into a glance doc
+            # (see below) needs the same recheck-on-change treatment even
+            # when its title never said so, whether or not it's also
+            # "recurring" (broad-scope) -- `is_recurring_glance` alone used
+            # to gate this and missed a content-only-detected, single-week
+            # glance file entirely: its title never matched (so
+            # `extract_schedule` stays False every sync) and it was never
+            # "recurring" either, so it was ingested once and never
+            # rechecked again. Also stops entirely once the document's own
+            # last-extracted date range is safely in the past (see
+            # `glance_still_relevant`) -- no point re-mining an old week's
+            # page just because a late edit changed its hash.
+            is_known_glance = existing_meta.get("is_glance") or existing_meta.get("is_recurring_glance")
+            if (extract_schedule or is_known_glance) and _glance_still_relevant(existing_meta):
                 await self._recheck_glance_file_for_changes(
                     user_id=user_id, course_id=course_id, doc_id=existing["id"],
                     existing_meta=existing_meta, content_hash=content_hash,
@@ -1064,10 +1075,11 @@ class SchoologyProvider(IntegrationProvider):
         # pattern would false-positive on any item merely filed inside a
         # folder named "Unit ..."; `extract_schedule` already carries the
         # caller's own, correctly-scoped title verdict. `is_recurring_
-        # glance` is persisted so a future sync (which won't re-derive this
-        # from the title either) still knows to keep re-checking this file
-        # for changes -- see the early-return above.
+        # glance`/`is_glance` are persisted so a future sync (which won't
+        # re-derive this from the title either) still knows to keep
+        # re-checking this file for changes -- see the early-return above.
         extract_schedule = extract_schedule or _is_glance(text=text)
+        glance_meta = {"is_glance": True} if extract_schedule else {}
         recurring_meta = (
             {"is_recurring_glance": True} if _is_recurring_glance(text=text) else {}
         )
@@ -1077,7 +1089,7 @@ class SchoologyProvider(IntegrationProvider):
             "storage_path": storage_path,
             "external_id": external_id, "external_source": self.name,
             "needs_review": False,
-            "metadata": {**(extra_meta or {}), **recurring_meta, "content_hash": content_hash},
+            "metadata": {**(extra_meta or {}), **glance_meta, **recurring_meta, "content_hash": content_hash},
         }
         if was_flagged_stub:
             await supabase.update("documents", payload, filters={"id": eq(doc_id)})
@@ -1130,10 +1142,11 @@ class SchoologyProvider(IntegrationProvider):
         # merge order below means an already-True flag from a prior sync is
         # kept even if this recheck's own content check comes back False
         # (e.g. this particular re-download's text extraction failed).
+        glance_meta = {"is_glance": True} if _is_glance(text=text) else {}
         recurring_meta = {"is_recurring_glance": True} if _is_recurring_glance(text=text) else {}
         await supabase.update(
             "documents",
-            {"metadata": {**existing_meta, **recurring_meta, "content_hash": content_hash}},
+            {"metadata": {**existing_meta, **glance_meta, **recurring_meta, "content_hash": content_hash}},
             filters={"id": eq(doc_id)},
         )
         if text.strip():
@@ -1146,7 +1159,7 @@ class SchoologyProvider(IntegrationProvider):
         self, *, user_id: str, course_id: str, external_id: str, title: str,
         text: str, extra_meta: dict[str, Any] | None = None,
         recheck_for_changes: bool = False,
-    ) -> bool:
+    ) -> tuple[bool, str]:
         """Record an external web page as real, searchable content — same
         idempotent/stub-upgrade handling as `_ingest_file`, but for a page
         that was read rather than downloaded: there's no original file
@@ -1157,10 +1170,14 @@ class SchoologyProvider(IntegrationProvider):
         `recheck_for_changes` (set for an "at a glance" page — see
         `_ingest_file`'s docstring) compares the page's content against the
         hash recorded on the last sync and, if it changed, re-indexes it
-        the same as a brand-new page; if unchanged, this is a no-op. Returns
-        True iff the document row was newly created, a flagged stub was
-        upgraded, or (with `recheck_for_changes`) its content changed —
-        i.e. iff real work happened."""
+        the same as a brand-new page; if unchanged, this is a no-op. Also
+        stops once the page's own last-extracted date range is safely in
+        the past (see `glance_still_relevant`), same as `_ingest_file`.
+        Returns `(changed, doc_id)` — `changed` is True iff the document row
+        was newly created, a flagged stub was upgraded, or (with
+        `recheck_for_changes`) its content changed; `doc_id` is always the
+        row's id (new or existing) so a caller mining this page for a
+        schedule can tag its writes back to this exact document."""
         existing = await self._existing_document(user_id, external_id)
         existing_meta = (existing.get("metadata") or {}) if existing else {}
         was_flagged_stub = bool(existing) and bool(
@@ -1168,21 +1185,23 @@ class SchoologyProvider(IntegrationProvider):
         )
         content_hash = hashlib.sha256((text or "").encode("utf-8", "ignore")).hexdigest()
         content_changed = bool(existing) and existing_meta.get("content_hash") != content_hash
-        if existing and not was_flagged_stub and not (recheck_for_changes and content_changed):
-            return False  # already ingested and (when checked) unchanged — nothing to do
+        should_recheck = recheck_for_changes and content_changed and _glance_still_relevant(existing_meta)
         doc_id = existing["id"] if existing else str(uuid.uuid4())
+        if existing and not was_flagged_stub and not should_recheck:
+            return False, doc_id  # already ingested and (when checked) unchanged — nothing to do
         # Persisted the same way `_ingest_file` does (content-only, not
         # `title=` -- see its comment for why), so a future sync that only
         # has this row's stored title (not this page's freshly-fetched
         # text) still knows to keep re-checking it for changes -- see
         # `_sync_scraped_materials`'s `known_names` exclusion.
+        glance_meta = {"is_glance": True} if _is_glance(text=text) else {}
         recurring_meta = {"is_recurring_glance": True} if _is_recurring_glance(text=text) else {}
         payload = {
             "title": title or "Untitled", "doc_type": "other",
             "size_bytes": len(text or ""),
             "external_id": external_id, "external_source": self.name,
             "needs_review": False,
-            "metadata": {**(extra_meta or {}), **recurring_meta, "content_hash": content_hash},
+            "metadata": {**(extra_meta or {}), **glance_meta, **recurring_meta, "content_hash": content_hash},
         }
         if existing:
             await supabase.update("documents", payload, filters={"id": eq(doc_id)})
@@ -1196,7 +1215,7 @@ class SchoologyProvider(IntegrationProvider):
                 filters={"id": eq(doc_id)},
             )
         await Archivist().enrich_or_fallback(user_id, doc_id, text, fallback_title=title)
-        return True
+        return True, doc_id
 
     async def _ingest_external_link(
         self, *, user_id: str, course_id: str, external_id: str, title: str,
@@ -1233,10 +1252,11 @@ class SchoologyProvider(IntegrationProvider):
         text = _extract_readable_text(content)
         if not text.strip():
             return False
-        return await self._ingest_external_page(
+        changed, _doc_id = await self._ingest_external_page(
             user_id=user_id, course_id=course_id, external_id=external_id,
             title=title, text=text, extra_meta=extra_meta,
         )
+        return changed
 
     async def _link_assignment_from_google_doc(
         self, *, user_id: str, course_id: str, doc_id: str, doc_external_id: str,
@@ -1898,6 +1918,24 @@ class SchoologyProvider(IntegrationProvider):
                 google_token=google_token, report=report,
             )
 
+    @staticmethod
+    def _glance_needs_rewalk(metadata: dict[str, Any]) -> bool:
+        """True if an already-known scraped item should be walked/re-fetched
+        again on every sync rather than treated as permanently done — any
+        "at a glance" document, not just a broad-scope "recurring" one:
+        `is_recurring_glance_title` alone used to gate this and missed a
+        content-only-detected, single-week glance item entirely (its title
+        never said so, and it isn't "recurring" either, so it was pulled
+        once and never looked at again) — for as long as it's still within
+        (or just past) the date range its own last extraction covered, per
+        `glance_still_relevant`. Once that range is safely in the past,
+        there's nothing left in it worth re-walking for."""
+        is_glance_item = bool(
+            metadata.get("is_glance") or metadata.get("is_recurring_glance")
+            or is_recurring_glance_title(metadata.get("material_name"))
+        )
+        return is_glance_item and _glance_still_relevant(metadata)
+
     # ---- material ingestion: always via the login-scraper session ----
     async def _sync_scraped_materials(
         self, *, user_id: str, course_id: str, section: SchoologySection,
@@ -1949,21 +1987,19 @@ class SchoologyProvider(IntegrationProvider):
             # token is now connected or `_ingest_external_link` can now
             # actually read the page. Otherwise a document would stay
             # flagged forever even after the underlying problem is fixed.
-            # A "Unit/Semester at a Glance" item (see `is_recurring_glance_
-            # title`) is left out the same way, every sync, on purpose: a
-            # teacher keeps editing one of these as the unit/term actually
-            # progresses, unlike a week-at-a-glance which is finished once
-            # its dates pass, so it needs to be re-walked and re-checked for
-            # changes forever, not just pulled once and treated as done —
-            # `_ingest_file`/`_ingest_external_page`'s own content-hash check
-            # (see their docstrings) is what keeps a re-walk that finds no
-            # actual change cheap (no re-download-triggered LLM re-run).
-            # `metadata.is_recurring_glance` catches the same case for an
-            # item named for what it contains rather than by the "at a
-            # glance" phrasing its own document uses -- its *title* alone
-            # (all a stored `documents` row without re-fetching it has to
-            # go on) would say no, but its content already told a prior
-            # sync otherwise, and that verdict was persisted right here.
+            # An "at a glance" item (see `_glance_needs_rewalk`) is left out
+            # the same way, every sync, for as long as it's still relevant:
+            # a teacher keeps editing a "Unit/Semester at a Glance" as the
+            # term actually progresses, and even a single week's page can
+            # get a late correction before its dates pass, so it needs to
+            # be re-walked and re-checked for changes, not just pulled once
+            # and treated as done forever — `_ingest_file`/`_ingest_
+            # external_page`'s own content-hash check (see their
+            # docstrings) is what keeps a re-walk that finds no actual
+            # change cheap (no re-download-triggered LLM re-run), and
+            # `glance_still_relevant` is what eventually lets a page whose
+            # entire date range has passed go back to being "known" and
+            # left alone.
             known_names = {
                 str((row.get("metadata") or {}).get("material_name") or "").strip().lower()
                 for row in existing
@@ -1972,8 +2008,7 @@ class SchoologyProvider(IntegrationProvider):
                     (row.get("metadata") or {}).get("needs_google_auth")
                     or (row.get("metadata") or {}).get("review_reason")
                 )
-                and not is_recurring_glance_title((row.get("metadata") or {}).get("material_name"))
-                and not (row.get("metadata") or {}).get("is_recurring_glance")
+                and not self._glance_needs_rewalk(row.get("metadata") or {})
             } - {""}
 
             # A scraped "assignment"-type item is never recorded as a
@@ -2245,7 +2280,7 @@ class SchoologyProvider(IntegrationProvider):
                 # the last sync -- see `_ingest_external_page`'s docstring
                 # and `is_recurring_glance_title` -- rather than only ever
                 # once, the first time it's seen.
-                changed = await self._ingest_external_page(
+                changed, page_doc_id = await self._ingest_external_page(
                     user_id=user_id, course_id=course_id, external_id=external_id,
                     title=title, text=page_text, extra_meta=base_meta,
                     recheck_for_changes=page_is_glance,
@@ -2253,9 +2288,15 @@ class SchoologyProvider(IntegrationProvider):
                 if changed:
                     report["documents"] += 1
                 if page_is_glance and changed:
+                    # `source_document_id=page_doc_id` -- previously omitted
+                    # here (unlike the file/Google-doc branches above), so a
+                    # glance page's assignments/events were never tagged
+                    # back to their source document at all, which broke
+                    # per-document reconciliation and relevance tracking
+                    # for this one path.
                     await self._apply_schedule_from_doc(
                         user_id=user_id, course_id=course_id, title=title, text=page_text,
-                        report=report,
+                        report=report, source_document_id=page_doc_id,
                     )
                 return
 

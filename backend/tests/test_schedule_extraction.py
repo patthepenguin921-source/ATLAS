@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
@@ -101,13 +102,20 @@ def test_is_glance_with_no_text_falls_back_to_title_only():
 
 class FakeSupabase:
     def __init__(self) -> None:
-        self.tables: dict[str, list[dict[str, Any]]] = {"calendar_events": [], "assignments": []}
+        self.tables: dict[str, list[dict[str, Any]]] = {
+            "calendar_events": [], "assignments": [], "documents": [],
+        }
 
     @staticmethod
     def _match(row: dict, filters: dict[str, str] | None) -> bool:
         for k, v in (filters or {}).items():
             want = v.split("eq.", 1)[1] if isinstance(v, str) and v.startswith("eq.") else v
-            if str(row.get(k)) != str(want):
+            if "->>" in k:  # JSON path filter, e.g. metadata->>source_document_id
+                col, prop = k.split("->>", 1)
+                got = (row.get(col) or {}).get(prop)
+            else:
+                got = row.get(k)
+            if str(got) != str(want):
                 return False
         return True
 
@@ -132,11 +140,18 @@ class FakeSupabase:
                 out.append(row)
         return out
 
+    async def delete(self, table, *, filters):
+        keep, removed = [], []
+        for row in self.tables.setdefault(table, []):
+            (removed if self._match(row, filters) else keep).append(row)
+        self.tables[table] = keep
+        return removed
+
 
 @pytest.fixture
 def fake_db(monkeypatch):
     fake = FakeSupabase()
-    for name in ("select", "insert", "update"):
+    for name in ("select", "insert", "update", "delete"):
         monkeypatch.setattr(supabase, name, getattr(fake, name))
     return fake
 
@@ -174,7 +189,7 @@ def test_apply_schedule_from_doc_creates_class_events_and_assignments(fake_db, m
     assert len(events) == 1
     assert events[0]["kind"] == "class"
     assert events[0]["course_id"] == COURSE_ID
-    assert events[0]["external_id"] == f"manual:class:{COURSE_ID}:2025-10-06"
+    assert events[0]["external_id"] == f"manual:class:{COURSE_ID}:doc-1:2025-10-06"
 
     assignments = fake_db.tables["assignments"]
     assert len(assignments) == 1
@@ -238,3 +253,249 @@ def test_apply_schedule_from_doc_is_a_noop_without_llm(fake_db, monkeypatch):
 
     assert fake_db.tables["calendar_events"] == []
     assert fake_db.tables["assignments"] == []
+
+
+def test_apply_schedule_from_doc_updates_due_date_in_place_on_resync(fake_db, monkeypatch):
+    """A re-parse of the same document that only changed an assignment's due
+    date must update that same row in place -- not create a second,
+    duplicate assignment -- since the external_id now embeds the source
+    document id, not just the normalized title."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+
+    async def _v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": [
+            {"title": "Lab Report", "due_date": "2025-10-09", "category": "lab"},
+        ]}]}
+
+    monkeypatch.setattr(claude, "complete_json", _v1)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week at a Glance",
+        text="v1", source="schoology", source_document_id="doc-1",
+    ))
+    assert len(fake_db.tables["assignments"]) == 1
+    row_id = fake_db.tables["assignments"][0]["id"]
+
+    async def _v2(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": [
+            {"title": "Lab Report", "due_date": "2025-10-11", "category": "lab"},
+        ]}]}
+
+    monkeypatch.setattr(claude, "complete_json", _v2)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week at a Glance",
+        text="v2", source="schoology", source_document_id="doc-1",
+    ))
+
+    assignments = fake_db.tables["assignments"]
+    assert len(assignments) == 1  # updated in place, not duplicated
+    assert assignments[0]["id"] == row_id
+    assert assignments[0]["due_date"] == "2025-10-11"
+
+
+def test_apply_schedule_from_doc_preserves_status_on_resync(fake_db, monkeypatch):
+    """Re-mining a document after an unrelated edit elsewhere in it must not
+    reset a student's progress on an assignment it already created -- only a
+    brand-new row gets seeded "not_started"."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+
+    async def _v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": [
+            {"title": "Lab Report", "due_date": "2025-10-09", "category": "lab"},
+        ]}]}
+
+    monkeypatch.setattr(claude, "complete_json", _v1)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week at a Glance",
+        text="v1", source="schoology", source_document_id="doc-1",
+    ))
+    assert fake_db.tables["assignments"][0]["status"] == "not_started"
+    fake_db.tables["assignments"][0]["status"] = "done"  # student finished it
+
+    async def _v2(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [{"date": "2025-10-06", "topic": "Intro (typo fixed)", "assignments": [
+            {"title": "Lab Report", "due_date": "2025-10-09", "category": "lab"},
+        ]}]}
+
+    monkeypatch.setattr(claude, "complete_json", _v2)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week at a Glance",
+        text="v2", source="schoology", source_document_id="doc-1",
+    ))
+
+    assert fake_db.tables["assignments"][0]["status"] == "done"
+
+
+def test_apply_schedule_from_doc_deletes_assignment_and_event_dropped_from_a_resync(fake_db, monkeypatch):
+    """When a re-parsed document no longer mentions a day/assignment it
+    previously did, the rows that document created for them must be
+    deleted -- not left behind forever."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+
+    async def _v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [
+            {"date": "2025-10-06", "topic": "Intro", "assignments": [
+                {"title": "Lab Report", "due_date": "2025-10-09", "category": "lab"},
+            ]},
+            {"date": "2025-10-08", "topic": "Quiz day", "assignments": [
+                {"title": "Quiz 1", "due_date": "2025-10-08", "category": "quiz"},
+            ]},
+        ]}
+
+    monkeypatch.setattr(claude, "complete_json", _v1)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week at a Glance",
+        text="v1", source="schoology", source_document_id="doc-1",
+    ))
+    assert len(fake_db.tables["assignments"]) == 2
+    assert len(fake_db.tables["calendar_events"]) == 2
+
+    # The teacher removed the quiz day entirely on a later edit.
+    async def _v2(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [
+            {"date": "2025-10-06", "topic": "Intro", "assignments": [
+                {"title": "Lab Report", "due_date": "2025-10-09", "category": "lab"},
+            ]},
+        ]}
+
+    monkeypatch.setattr(claude, "complete_json", _v2)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week at a Glance",
+        text="v2", source="schoology", source_document_id="doc-1",
+    ))
+
+    assignments = fake_db.tables["assignments"]
+    assert len(assignments) == 1
+    assert assignments[0]["title"] == "Lab Report"
+    events = fake_db.tables["calendar_events"]
+    assert len(events) == 1
+    assert events[0]["title"] == "Intro"
+
+
+def test_apply_schedule_from_doc_empty_extraction_does_not_delete_prior_rows(fake_db, monkeypatch):
+    """A transient LLM failure/empty result on a re-sync must never be read
+    as "the document now has zero days" and wipe out what a previous,
+    successful run saved -- reconciliation only runs when this run's
+    extraction actually found something."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+
+    async def _v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": [
+            {"title": "Lab Report", "due_date": "2025-10-09", "category": "lab"},
+        ]}]}
+
+    monkeypatch.setattr(claude, "complete_json", _v1)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week at a Glance",
+        text="v1", source="schoology", source_document_id="doc-1",
+    ))
+    assert len(fake_db.tables["assignments"]) == 1
+    assert len(fake_db.tables["calendar_events"]) == 1
+
+    async def _v2_empty(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": []}
+
+    monkeypatch.setattr(claude, "complete_json", _v2_empty)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week at a Glance",
+        text="v2", source="schoology", source_document_id="doc-1",
+    ))
+
+    assert len(fake_db.tables["assignments"]) == 1
+    assert len(fake_db.tables["calendar_events"]) == 1
+
+
+def test_apply_schedule_from_doc_cross_document_title_collision_does_not_suppress_real_item(fake_db, monkeypatch):
+    """Two different glance documents that happen to mention the same
+    generic assignment title (e.g. a recurring weekly "Quiz") must not
+    collide -- only a genuinely independent (non-glance) import counts for
+    the cross-source dedupe check."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+
+    async def _week1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [{"date": "2025-10-06", "topic": "Week 1", "assignments": [
+            {"title": "Quiz", "due_date": "2025-10-09", "category": "quiz"},
+        ]}]}
+
+    monkeypatch.setattr(claude, "complete_json", _week1)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week 1 at a Glance",
+        text="week1", source="schoology", source_document_id="doc-week1",
+    ))
+
+    async def _week2(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [{"date": "2025-10-13", "topic": "Week 2", "assignments": [
+            {"title": "Quiz", "due_date": "2025-10-16", "category": "quiz"},
+        ]}]}
+
+    monkeypatch.setattr(claude, "complete_json", _week2)
+    report: dict[str, Any] = {"events": 0, "assignments": 0, "skipped": 0, "errors": []}
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Week 2 at a Glance",
+        text="week2", source="schoology", source_document_id="doc-week2", report=report,
+    ))
+
+    assignments = fake_db.tables["assignments"]
+    assert len(assignments) == 2  # both weeks' quizzes kept, not collided
+    assert {a["due_date"] for a in assignments} == {"2025-10-09", "2025-10-16"}
+    assert report["skipped"] == 0
+
+
+def test_apply_schedule_from_doc_records_date_range_onto_the_document_row(fake_db, monkeypatch):
+    """`glance_still_relevant` reads `documents.metadata.glance_date_range` --
+    this is where it gets written, merged into whatever metadata the row
+    already carries rather than overwriting it."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {"content_hash": "abc123"}})
+
+    async def _fake(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [
+            {"date": "2025-10-06", "topic": "Intro", "assignments": []},
+            {"date": "2025-10-10", "topic": "Wrap-up", "assignments": []},
+        ]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Unit at a Glance",
+        text="whatever", source="schoology", source_document_id="doc-1",
+    ))
+
+    doc = fake_db.tables["documents"][0]
+    assert doc["metadata"]["glance_date_range"] == {"start": "2025-10-06", "end": "2025-10-10"}
+    assert doc["metadata"]["content_hash"] == "abc123"  # merged, not overwritten
+
+
+def test_glance_still_relevant_true_with_no_recorded_range():
+    assert schedule_extraction.glance_still_relevant(None) is True
+    assert schedule_extraction.glance_still_relevant({}) is True
+
+
+def test_glance_still_relevant_true_within_range_and_grace_window():
+    today = date.today().isoformat()
+    assert schedule_extraction.glance_still_relevant(
+        {"glance_date_range": {"start": today, "end": today}}
+    ) is True
+
+
+def test_glance_still_relevant_false_once_past_the_grace_window():
+    long_ago = (date.today() - timedelta(days=30)).isoformat()
+    assert schedule_extraction.glance_still_relevant(
+        {"glance_date_range": {"start": long_ago, "end": long_ago}}
+    ) is False

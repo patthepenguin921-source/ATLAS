@@ -5,13 +5,13 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.agents import get_agent
+from app.agents import get_agent, tools
 from app.agents.memory_keeper import MemoryKeeper
 from app.agents.registry import Analyst, Coach, Planner, Tutor
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
-from app.schemas import (AnalyzeRequest, ChatRequest, ExplainRequest, PlanRequest,
-                         QuizRequest, ReviewRequest)
+from app.schemas import (ActionConfirmRequest, AnalyzeRequest, ChatRequest, ExplainRequest,
+                         PlanRequest, QuizRequest, ReviewRequest)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -69,6 +69,22 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
     except Exception:
         pass  # learning long-term facts is best-effort; never break the chat turn
     return {**result, "conversation_id": conv_id}
+
+
+@router.post("/actions/confirm")
+async def confirm_action(body: ActionConfirmRequest, user: CurrentUser = Depends(get_current_user)):
+    """Actually performs a destructive action the chat agent proposed
+    (`pending_action` on a `/agents/chat` reply) once the student clicks
+    Confirm — see `app.agents.tools` for why this is the *only* path that
+    can ever delete anything, never the chat turn that first proposed it.
+    `body.name`/`body.arguments` must be exactly what that turn's
+    `pending_action` contained (a resolved row id, not a fuzzy title)."""
+    result = await tools.confirm_tool(user.id, body.name, body.arguments)
+    reply = result.get("message") or "Something went wrong — nothing was changed."
+    await _persist_turn(
+        user.id, body.conversation_id, "general", f"Confirmed: {body.name}", reply, {},
+    )
+    return {"reply": reply, "status": result.get("status"), "conversation_id": body.conversation_id}
 
 
 @router.post("/planner/daily-plan")

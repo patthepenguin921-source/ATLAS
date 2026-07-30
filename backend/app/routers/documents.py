@@ -332,57 +332,58 @@ async def process_document_now(document_id: str, user: CurrentUser = Depends(get
     return rows[0] if rows else {"id": document_id}
 
 
-@router.post("/{document_id}/resync")
-async def resync_document(document_id: str, user: CurrentUser = Depends(get_current_user)):
-    """Re-fetch and reprocess one document from its live source, without
-    running a full Schoology sync -- for when a single "at a glance" doc or
-    syllabus gets edited mid-unit and a student doesn't want to wait for the
-    next scheduled sync (or trigger a full one) just to pick that up.
+async def resync_document_core(user_id: str, document_id: str) -> dict:
+    """The actual resync work, shared by the HTTP endpoint below and the
+    chat agent's `resync_document` tool (see `app.agents.tools`). Never
+    raises for an expected, user-facing failure (document not found, not
+    re-fetchable, no Google token, fetch error) -- returns
+    ``{"ok": False, "error": "<code>", "message": "..."}`` instead, so a
+    tool-call caller can feed the failure back to the model as a normal
+    tool result instead of a crash. ``{"ok": True, ...}`` on success.
 
     Only works for a document Atlas can refetch directly on its own: one
     Schoology linked to a Google Doc/Slides/Sheet (`metadata.source_url`,
     set by the materials sync — see `app.integrations.schoology`). A raw
     Schoology-hosted attachment has no stable URL Atlas can fetch outside an
-    authenticated scraper session, so those still need a full sync; this
-    endpoint says so explicitly rather than silently doing nothing.
+    authenticated scraper session, so those still need a full sync -- the
+    caller says so explicitly rather than silently doing nothing.
     """
     rows = await supabase.select(
         "documents", columns="id,user_id,course_id,title,metadata,auto_title",
-        filters={"user_id": eq(user.id), "id": eq(document_id)}, limit=1,
+        filters={"user_id": eq(user_id), "id": eq(document_id)}, limit=1,
     )
     if not rows:
-        raise HTTPException(404, "Not found")
+        return {"ok": False, "error": "not_found", "message": "Document not found."}
     doc = rows[0]
     metadata = doc.get("metadata") or {}
     source_url = metadata.get("source_url")
     ref = google_files.parse_google_url(source_url) if source_url else None
     if not ref:
-        raise HTTPException(
-            422,
+        return {"ok": False, "error": "not_resyncable", "message": (
             "Atlas can't re-fetch this document directly (it isn't linked to a Google "
-            "Doc/Slides/Sheet) — run a full Schoology sync to refresh it instead.",
-        )
+            "Doc/Slides/Sheet) — run a full Schoology sync to refresh it instead."
+        )}
 
-    access_token = await SchoologyProvider().google_token_for_resync(user.id)
+    access_token = await SchoologyProvider().google_token_for_resync(user_id)
     if not access_token:
-        raise HTTPException(
-            422, "Connect Google Drive (from Integrations) to let Atlas re-fetch this document.",
-        )
+        return {"ok": False, "error": "no_google_token", "message": (
+            "Connect Google Drive (from Integrations) to let Atlas re-fetch this document."
+        )}
 
     try:
         content, filename, content_type = await google_files.download_google_file(
             ref, access_token, name=doc.get("title") or "document",
         )
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"Couldn't re-fetch the document: {e}")
+        return {"ok": False, "error": "fetch_failed", "message": f"Couldn't re-fetch the document: {e}"}
 
     content_hash = hashlib.sha256(content).hexdigest()
     if content_hash == metadata.get("content_hash"):
-        return {"id": document_id, "changed": False}
+        return {"ok": True, "id": document_id, "changed": False}
 
     text = await _extract_text_bounded(content, content_type, filename)
 
-    storage_path = f"{user.id}/{document_id}/{safe_object_name(filename)}"
+    storage_path = f"{user_id}/{document_id}/{safe_object_name(filename)}"
     update: dict = {"metadata": {**metadata, "content_hash": content_hash}}
     try:
         await r2.upload(storage_path, content, content_type or "application/octet-stream")
@@ -392,29 +393,48 @@ async def resync_document(document_id: str, user: CurrentUser = Depends(get_curr
     await supabase.update("documents", update, filters={"id": eq(document_id)})
 
     try:
-        await ingestion.ingest_document(document_id, user.id, text)
+        await ingestion.ingest_document(document_id, user_id, text)
     except Exception as e:  # noqa: BLE001
         await supabase.update(
             "documents", {"ingested": False, "ingest_error": str(e)[:500]},
             filters={"id": eq(document_id)},
         )
-        return {"id": document_id, "changed": True, "ingest_error": str(e)[:500]}
+        return {"ok": True, "id": document_id, "changed": True, "ingest_error": str(e)[:500]}
 
     await Archivist().enrich_or_fallback(
-        user.id, document_id, text, rename_untitled=doc.get("auto_title", False), fallback_title=doc.get("title"),
+        user_id, document_id, text, rename_untitled=doc.get("auto_title", False), fallback_title=doc.get("title"),
     )
 
     course_id = doc.get("course_id")
     if course_id and text.strip() and is_glance(title=doc.get("title"), text=text):
         try:
             await apply_schedule_from_doc(
-                user_id=user.id, course_id=course_id, title=doc.get("title") or filename,
+                user_id=user_id, course_id=course_id, title=doc.get("title") or filename,
                 text=text, source="schoology", source_document_id=document_id,
             )
         except Exception:
             pass  # best-effort, same as the sync path this mirrors
 
-    return {"id": document_id, "changed": True}
+    return {"ok": True, "id": document_id, "changed": True}
+
+
+_RESYNC_ERROR_STATUS = {
+    "not_found": 404, "not_resyncable": 422, "no_google_token": 422, "fetch_failed": 502,
+}
+
+
+@router.post("/{document_id}/resync")
+async def resync_document(document_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Re-fetch and reprocess one document from its live source, without
+    running a full Schoology sync -- for when a single "at a glance" doc or
+    syllabus gets edited mid-unit and a student doesn't want to wait for the
+    next scheduled sync (or trigger a full one) just to pick that up. See
+    `resync_document_core` for the actual logic."""
+    result = await resync_document_core(user.id, document_id)
+    if not result.get("ok"):
+        status = _RESYNC_ERROR_STATUS.get(result.get("error"), 400)
+        raise HTTPException(status, result.get("message", "Couldn't resync this document."))
+    return {k: v for k, v in result.items() if k != "ok"}
 
 
 @router.get("/{document_id}")

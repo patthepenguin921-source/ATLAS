@@ -14,6 +14,17 @@ class ChatRequest(BaseModel):
     include_semantic: bool = True
 
 
+class ActionConfirmRequest(BaseModel):
+    """Confirms a destructive action the chat agent proposed (see
+    `app.agents.tools`) -- `name`/`arguments` are exactly what that turn's
+    `pending_action` contained, never something the frontend constructs
+    itself."""
+
+    name: str
+    arguments: dict[str, Any]
+    conversation_id: str
+
+
 class PlanRequest(BaseModel):
     plan_date: Optional[str] = None
     available_minutes: int = 180

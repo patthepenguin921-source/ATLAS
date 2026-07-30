@@ -3,7 +3,20 @@
 import { useState } from "react";
 import { apiPost, apiGet } from "@/lib/api";
 
-export type Msg = { role: "user" | "assistant"; content: string };
+export type PendingAction = {
+  name: string;
+  arguments: Record<string, any>;
+  description?: string | null;
+};
+
+export type Msg = {
+  role: "user" | "assistant";
+  content: string;
+  /** A destructive action (delete_*) the agent proposed on this turn but
+   *  hasn't performed yet -- see app.agents.tools. Cleared once confirmed
+   *  or dismissed so the button can't be clicked twice. */
+  pendingAction?: PendingAction | null;
+};
 
 export const AGENTS = [
   { id: "general", label: "Atlas", blurb: "Coordinates everything" },
@@ -50,7 +63,7 @@ export function useChat(onNewConversation?: () => void) {
       const isNew = !conv;
       const r = await apiPost("/agents/chat", { message, agent, conversation_id: conv });
       setConv(r.conversation_id);
-      setMessages((m) => [...m, { role: "assistant", content: r.reply }]);
+      setMessages((m) => [...m, { role: "assistant", content: r.reply, pendingAction: r.pending_action ?? null }]);
       if (isNew) onNewConversation?.();
     } catch (e: any) {
       setMessages((m) => [...m, { role: "assistant", content: `⚠️ ${e.message}` }]);
@@ -59,5 +72,31 @@ export function useChat(onNewConversation?: () => void) {
     }
   }
 
-  return { agent, setAgent, messages, conv, busy, reset, openConversation, send };
+  // Actually performs a destructive action a message's `pendingAction`
+  // described, once the student clicks Confirm — see
+  // `POST /agents/actions/confirm` and `app.agents.tools`. Clears the
+  // pending action on that message either way so the button can't fire twice.
+  async function confirmAction(index: number) {
+    const target = messages[index];
+    if (!target?.pendingAction || busy) return;
+    const { name, arguments: args } = target.pendingAction;
+    setMessages((m) => m.map((msg, i) => (i === index ? { ...msg, pendingAction: null } : msg)));
+    setBusy(true);
+    try {
+      const r = await apiPost("/agents/actions/confirm", { name, arguments: args, conversation_id: conv });
+      setMessages((m) => [...m, { role: "assistant", content: r.reply }]);
+    } catch (e: any) {
+      setMessages((m) => [...m, { role: "assistant", content: `⚠️ ${e.message}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function dismissAction(index: number) {
+    setMessages((m) => m.map((msg, i) => (i === index ? { ...msg, pendingAction: null } : msg)));
+  }
+
+  return {
+    agent, setAgent, messages, conv, busy, reset, openConversation, send, confirmAction, dismissAction,
+  };
 }

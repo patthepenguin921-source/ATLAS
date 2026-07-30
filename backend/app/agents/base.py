@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from app.agents import tools
 from app.agents.persona import ATLAS_SHARED_PRINCIPLES
 from app.llm import claude
 from app.services import memory, web_search
@@ -40,7 +41,22 @@ class Agent:
             "student's own documents, and never present document/record "
             "content as if it were a web result. If neither source has the "
             "answer, say so in one short sentence and stop — don't "
-            "editorialize about what else the student might have meant."
+            "editorialize about what else the student might have meant.\n\n"
+            "You can also take real actions in the app for the student -- "
+            "adding an assignment, adding a calendar event, resyncing a "
+            "document from its live source, or deleting an assignment/"
+            "document/calendar event -- using the tools provided, whenever "
+            "they clearly ask for one of those. Actually call the matching "
+            "tool; don't just describe what you would do. A delete tool "
+            "never deletes anything itself the first time you call it -- it "
+            "only reports back what it *would* delete so the student can "
+            "confirm. Turn that into a natural confirmation question (e.g. "
+            "\"Delete the Lab Report assignment for AP Biology?\") rather "
+            "than repeating it verbatim, and don't say anything was deleted "
+            "until a tool result actually says so. If a tool result says "
+            "something wasn't found or was ambiguous between several "
+            "matches, ask the student a short clarifying question instead "
+            "of guessing which one they meant."
         )
 
     async def respond(
@@ -70,14 +86,32 @@ class Agent:
         context_text = memory.render_context(ctx)
         messages = list(history or [])
         messages.append({"role": "user", "content": user_message})
-        text = await claude.complete(
+
+        async def _execute(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return await tools.execute_tool_for_chat(user_id, name, arguments)
+
+        result = await claude.agentic_complete(
             system=self.system_prompt(context_text),
             messages=messages,
+            tools=tools.TOOL_SPECS,
+            execute_tool=_execute,
             max_tokens=max_tokens,
         )
+
+        # Surface at most one pending confirmation per turn -- if the model
+        # somehow proposed more than one destructive action, the student
+        # confirms them one at a time rather than all at once.
+        pending_action = None
+        for call in result["tool_calls"]:
+            tool_result = call.get("result") or {}
+            if tool_result.get("status") == "pending_confirmation":
+                pending_action = {**tool_result["action"], "description": tool_result.get("description")}
+                break
+
         return {
             "agent": self.role,
-            "reply": text,
+            "reply": result["text"],
+            "pending_action": pending_action,
             "context_used": {
                 "courses": len(ctx.get("courses", [])),
                 "upcoming": len(ctx.get("upcoming", [])),

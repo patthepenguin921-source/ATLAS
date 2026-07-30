@@ -187,12 +187,17 @@ class FakeSupabase:
     @staticmethod
     def _match(row: dict, filters: dict[str, str] | None) -> bool:
         for k, v in (filters or {}).items():
-            want = v.split("eq.", 1)[1] if isinstance(v, str) and v.startswith("eq.") else v
             if "->>" in k:  # JSON path filter, e.g. metadata->>schoology_section_id
                 col, prop = k.split("->>", 1)
                 got = (row.get(col) or {}).get(prop)
             else:
                 got = row.get(k)
+            if isinstance(v, str) and v.startswith("in.("):
+                wanted = v[len("in.("):-1].split(",")
+                if str(got) not in wanted:
+                    return False
+                continue
+            want = v.split("eq.", 1)[1] if isinstance(v, str) and v.startswith("eq.") else v
             if str(got) != str(want):
                 return False
         return True

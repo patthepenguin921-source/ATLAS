@@ -245,7 +245,18 @@ interface SyncResult {
   announcements?: number;
   errors?: string[];
   detail?: string;
+  skipped_items?: {
+    name: string;
+    course?: string | null;
+    folder?: string | null;
+    reason?: "download_failed" | "no_destination" | string;
+  }[];
 }
+
+const SKIPPED_ITEM_REASON_LABEL: Record<string, string> = {
+  download_failed: "couldn't be downloaded",
+  no_destination: "had no content to save",
+};
 
 interface SchoologyVerifyResult {
   api_uid: string;
@@ -832,6 +843,27 @@ function IntegrationsTab() {
                 {lastResult.errors && lastResult.errors.length > 0 && (
                   <div className="text-atlas-warn mt-2">
                     Some courses didn't fully sync: {lastResult.errors.join("; ")}
+                  </div>
+                )}
+                {lastResult.skipped_items && lastResult.skipped_items.length > 0 && (
+                  <div className="text-atlas-warn mt-2">
+                    <div>
+                      {lastResult.skipped_items.length} item
+                      {lastResult.skipped_items.length === 1 ? "" : "s"} detected but not saved —
+                      they'll be retried on the next sync:
+                    </div>
+                    <ul className="list-disc list-inside mt-1 space-y-0.5">
+                      {lastResult.skipped_items.map((item, i) => (
+                        <li key={i}>
+                          {item.course ? `${item.course} · ` : ""}
+                          {item.folder ? `${item.folder} · ` : ""}
+                          {item.name}
+                          {item.reason && SKIPPED_ITEM_REASON_LABEL[item.reason]
+                            ? ` (${SKIPPED_ITEM_REASON_LABEL[item.reason]})`
+                            : ""}
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
               </>

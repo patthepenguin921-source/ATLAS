@@ -11,6 +11,7 @@ from app import __version__
 from app.config import settings
 from app.core.r2_client import R2Error, r2
 from app.core.supabase_client import SupabaseError, supabase
+from app.llm.claude import LLMError
 from app.routers import api_router
 from app.routers import integrations, profile
 
@@ -69,6 +70,21 @@ async def r2_error_handler(request: Request, exc: R2Error):
     return JSONResponse(
         status_code=status_code,
         content={"detail": {"source": "r2", "status": exc.status, "error": exc.detail}},
+    )
+
+
+@app.exception_handler(LLMError)
+async def llm_error_handler(request: Request, exc: LLMError):
+    # Without this, a Groq free-tier 429 (or an Anthropic rate/overload
+    # error) propagates as an unhandled exception. Starlette's outermost
+    # ServerErrorMiddleware catches those *outside* CORSMiddleware, so the
+    # resulting 500 has no Access-Control-Allow-Origin header and the
+    # browser reports it to the frontend as an opaque "Failed to fetch"
+    # instead of a readable rate-limit message.
+    status_code = exc.status if exc.status in (429, 503) else 502
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": {"source": "llm", "status": exc.status, "error": exc.detail}},
     )
 
 

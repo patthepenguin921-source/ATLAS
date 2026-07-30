@@ -19,8 +19,16 @@ Open http://localhost:8000/docs for the interactive API.
   boots (`/health` reports what's configured). Embeddings fall back to a local
   deterministic encoder. Add keys to unlock persistence + reasoning.
 - Reasoning defaults to **Groq's free tier** (`ATLAS_LLM_PROVIDER=groq` +
-  `GROQ_API_KEY`). Set `ATLAS_LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`
-  to use Claude instead.
+  `GROQ_API_KEY`). **Google Gemini** is also free — get a key at
+  https://aistudio.google.com/apikey and set `GEMINI_API_KEY` to enable it as
+  the automatic fallback (default `ATLAS_LLM_FALLBACK_PROVIDER=gemini`): a
+  429 from the primary provider retries once against Gemini instead of
+  failing the chat turn, so it only fails if both free tiers are exhausted at
+  once. Set `ATLAS_LLM_PROVIDER=gemini` to make it the primary provider
+  instead of the fallback — generally stronger reasoning than Llama 3.3 70B,
+  with materially higher free-tier rate limits than Groq's. Set
+  `ATLAS_LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` to use Claude instead
+  (paid, highest quality).
 - Dev auth shortcut: when `ATLAS_ENV=development` and Supabase isn't
   configured, pass `X-Atlas-Dev-User: <uuid>` to act as a user without a real
   token.
@@ -42,7 +50,7 @@ app/
   main.py            FastAPI app + router mounting
   config.py          env-driven settings
   core/              supabase client, R2 storage client, JWT auth, generic CRUD factory
-  llm/claude.py      grounded reasoning wrapper (pluggable: groq | anthropic)
+  llm/claude.py      grounded reasoning wrapper (pluggable: groq | gemini | anthropic, with fallback)
   embeddings/        pluggable embeddings (voyage | openai | local)
   services/          memory retrieval, ingestion, knowledge model, analytics
   agents/            Planner, Tutor, Analyst, Archivist, Coach (+ base/registry)

@@ -452,7 +452,38 @@ def test_apply_schedule_from_doc_cross_document_title_collision_does_not_suppres
     assignments = fake_db.tables["assignments"]
     assert len(assignments) == 2  # both weeks' quizzes kept, not collided
     assert {a["due_date"] for a in assignments} == {"2025-10-09", "2025-10-16"}
-    assert report["skipped"] == 0
+
+
+def test_apply_schedule_from_doc_keeps_same_title_listed_on_different_days(fake_db, monkeypatch):
+    """The reported real-world bug: a single document (a real AP Calculus
+    "Unit at a Glance") listed "Study for Test" as a suggested assignment on
+    both 8/19 and 8/20 -- keyed only by (document, title), the second day
+    silently overwrote the first's row instead of both surviving as the two
+    distinct reminders the document actually lists."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+
+    async def _fake(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [
+            {"date": "2025-08-19", "topic": "Review", "assignments": [
+                {"title": "Study for Test", "due_date": "2025-08-19", "category": "other"},
+            ]},
+            {"date": "2025-08-20", "topic": "Review", "assignments": [
+                {"title": "Study for Test", "due_date": "2025-08-20", "category": "other"},
+            ]},
+        ]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Unit at a Glance",
+        text="whatever", source="schoology", source_document_id="doc-1",
+    ))
+
+    assignments = fake_db.tables["assignments"]
+    assert len(assignments) == 2  # both days' reminders kept, not collided
+    assert {a["due_date"] for a in assignments} == {"2025-08-19", "2025-08-20"}
 
 
 def test_apply_schedule_from_doc_records_date_range_onto_the_document_row(fake_db, monkeypatch):

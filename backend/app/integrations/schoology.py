@@ -1456,6 +1456,7 @@ class SchoologyProvider(IntegrationProvider):
         report: dict[str, Any] = {
             "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
             "documents": 0, "links": 0, "announcements": 0, "skipped": 0, "errors": [],
+            "skipped_items": [],
         }
 
         # The login (username/password) is the only required credential now;
@@ -2153,6 +2154,10 @@ class SchoologyProvider(IntegrationProvider):
             # with no original to open. Not added to the known-names set,
             # so the next sync tries it again.
             report["skipped"] += 1
+            report.setdefault("skipped_items", []).append({
+                "name": item.name, "course": section.display_name,
+                "folder": item.folder_path or None, "reason": "download_failed",
+            })
             return
 
         # Not a direct Google link, not an assignment, not a downloadable
@@ -2264,6 +2269,10 @@ class SchoologyProvider(IntegrationProvider):
         target_href = resolved_target_href or (None if _is_schoology_url(item.href) else item.href)
         if not target_href:
             report["skipped"] += 1
+            report.setdefault("skipped_items", []).append({
+                "name": item.name, "course": section.display_name,
+                "folder": item.folder_path or None, "reason": "no_destination",
+            })
             return
         target_meta = {**base_meta, "source_url": target_href}
         # A genuine external destination Atlas can't otherwise classify —

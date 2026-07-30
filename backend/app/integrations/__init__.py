@@ -165,13 +165,20 @@ async def _run_chunk(provider: str, user_id: str, impl: IntegrationProvider) -> 
             # write, which is what keeps this from looking stale to
             # reconcile_stale_syncs while chunks are actively progressing.
             return {"provider": provider, "status": "running", **result}
-        if result.get("skipped"):
+        # `skipped` also counts a harmless case `skipped_items` doesn't list
+        # (an already-imported scraped assignment re-seen under a name that
+        # already matches — see `_ingest_scraped_assignment`) — only the
+        # unexplained remainder needs a generic note; anything with a real
+        # name/reason is covered by `skipped_items` itself.
+        unexplained_skips = result.get("skipped", 0) - len(result.get("skipped_items") or [])
+        if unexplained_skips > 0:
             result.setdefault("errors", []).append(
-                f"{result['skipped']} item(s) had nothing real to save (an empty "
+                f"{unexplained_skips} item(s) had nothing real to save (an empty "
                 "folder, a failed download, or a link with no real content) and "
                 "were skipped rather than saved as empty placeholders — they'll be "
                 "retried on the next sync."
             )
+        result["skipped_items"] = result.get("skipped_items") or []
         await _set_status(user_id, provider, "success", "")
         return {"provider": provider, "status": "success", **result}
     except NotImplementedError as e:

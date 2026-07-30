@@ -9,12 +9,14 @@ import asyncio
 import uuid
 from typing import Any
 
+from app.agents import archivist as archivist_module
 from app.agents.archivist import Archivist
 from app.core.supabase_client import supabase
 from app.llm import claude
 
 USER_ID = str(uuid.uuid4())
 DOC_ID = str(uuid.uuid4())
+COURSE_ID = str(uuid.uuid4())
 
 _ENRICH_RESULT = {
     "title": "Some Title",
@@ -38,19 +40,27 @@ def _install_fakes(
 
     async def _fake_select(table, *, columns="*", filters=None, order=None, limit=None, single=False):
         assert table == "documents"
-        assert columns == "importance_source,doc_type_source"
+        assert columns == "importance_source,doc_type_source,folder_source,course_id"
         return [{
             "importance_source": existing_importance_source,
             "doc_type_source": existing_doc_type_source,
+            "folder_source": None,
+            "course_id": COURSE_ID,
         }]
 
     async def _fake_update(table, patch, *, filters):
         updates.append(patch)
         return [{"id": DOC_ID, **patch}]
 
+    # Folder auto-sort is exercised separately (see test_archivist_folder_sort.py) --
+    # here it's a no-op so these tests stay focused on importance/doc_type.
+    async def _fake_top_level_folders(user_id, *, course_id):
+        return [], None
+
     monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
     monkeypatch.setattr(supabase, "select", _fake_select)
     monkeypatch.setattr(supabase, "update", _fake_update)
+    monkeypatch.setattr(archivist_module, "top_level_folders", _fake_top_level_folders)
     return updates
 
 

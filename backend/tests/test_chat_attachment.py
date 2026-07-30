@@ -102,7 +102,9 @@ def test_extract_temp_rejects_an_empty_file():
 # ---- Agent.respond(attachment_text=...) --------------------------------
 
 def _install_context(monkeypatch):
-    async def _fake_build_context(user_id, message, *, include_semantic=True):
+    async def _fake_build_context(
+        user_id, message, *, include_semantic=True, course_id=None, folder_id=None,
+    ):
         return {"courses": [], "upcoming": []}
 
     async def _fake_search(query):

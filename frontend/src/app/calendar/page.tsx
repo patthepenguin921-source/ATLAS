@@ -1,0 +1,247 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { AppShell } from "@/components/AppShell";
+import { Loading, Modal, Badge } from "@/components/ui";
+import { apiGet } from "@/lib/api";
+
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function pad(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+/** Local YYYY-MM-DD for a grid day -- built from local Y/M/D components, not
+ *  `toISOString()` (which is UTC-based and would shift the date for anyone
+ *  west of UTC, the same bug `formatCalendarDate` exists to avoid). */
+function localKey(d: Date): string {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** The calendar day a stored event/assignment belongs on. These are
+ *  overwhelmingly date-only values stored at UTC midnight (see
+ *  `frontend/src/lib/date.ts`), so the UTC date portion of the ISO string is
+ *  the actual intended day -- slicing it directly sidesteps any local-
+ *  timezone reinterpretation entirely, same fix as `formatCalendarDate`. */
+function itemKey(iso: string): string {
+  return iso.slice(0, 10);
+}
+
+// Small, distinct, deterministic palette for courses that haven't set their
+// own `color` -- hashed from the course id so the same course always lands
+// on the same swatch across a session without needing to persist anything.
+const FALLBACK_PALETTE = [
+  "#6a8bff", "#f2994a", "#27ae60", "#eb5757", "#9b51e0",
+  "#2d9cdb", "#f2c94c", "#bb6bd9", "#219653", "#56ccf2",
+];
+
+function courseColor(courseId: string, explicit?: string | null): string {
+  if (explicit) return explicit;
+  let hash = 0;
+  for (let i = 0; i < courseId.length; i++) hash = (hash * 31 + courseId.charCodeAt(i)) >>> 0;
+  return FALLBACK_PALETTE[hash % FALLBACK_PALETTE.length];
+}
+
+type CalItem = {
+  id: string;
+  kind: "event" | "assignment";
+  title: string;
+  course_id: string | null;
+  dateKey: string;
+  detail?: string;
+  href?: string;
+};
+
+export default function CalendarPage() {
+  const router = useRouter();
+  const today = new Date();
+  const [cursor, setCursor] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
+  const [courses, setCourses] = useState<any[]>([]);
+  const [data, setData] = useState<{ events: any[]; assignments: any[] } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiGet("/courses").then(setCourses).catch(() => setCourses([]));
+  }, []);
+
+  // Full weeks covering the month, so the grid never has a ragged first/last row.
+  const gridStart = useMemo(() => {
+    const d = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+    d.setDate(d.getDate() - d.getDay());
+    return d;
+  }, [cursor]);
+  const gridDays = useMemo(() => {
+    const days: Date[] = [];
+    const d = new Date(gridStart);
+    while (days.length < 42) {
+      days.push(new Date(d));
+      d.setDate(d.getDate() + 1);
+    }
+    return days;
+  }, [gridStart]);
+  const gridEnd = gridDays[gridDays.length - 1];
+
+  useEffect(() => {
+    setLoading(true);
+    const start = localKey(gridStart);
+    // Exclusive end — the day *after* the last grid day.
+    const endExclusive = new Date(gridEnd);
+    endExclusive.setDate(endExclusive.getDate() + 1);
+    const end = localKey(endExclusive);
+    apiGet(`/dashboard/calendar-range?start=${start}&end=${end}`)
+      .then(setData)
+      .catch(() => setData({ events: [], assignments: [] }))
+      .finally(() => setLoading(false));
+  }, [gridStart, gridEnd]);
+
+  const courseName = (id: string | null) => courses.find((c) => c.id === id)?.name ?? "Other";
+
+  const itemsByDay = useMemo(() => {
+    const map = new Map<string, CalItem[]>();
+    for (const e of data?.events ?? []) {
+      if (!e.starts_at) continue;
+      const key = itemKey(e.starts_at);
+      const list = map.get(key) ?? [];
+      list.push({
+        id: `event-${e.id}`, kind: "event", title: e.title, course_id: e.course_id,
+        dateKey: key, detail: e.kind !== "class" ? e.kind : undefined,
+      });
+      map.set(key, list);
+    }
+    for (const a of data?.assignments ?? []) {
+      if (!a.due_date) continue;
+      const key = itemKey(a.due_date);
+      const list = map.get(key) ?? [];
+      list.push({
+        id: `assignment-${a.id}`, kind: "assignment", title: a.title, course_id: a.course_id,
+        dateKey: key, detail: a.category,
+      });
+      map.set(key, list);
+    }
+    return map;
+  }, [data]);
+
+  const monthLabel = cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const todayKey = localKey(today);
+  const selectedItems = selectedDay ? (itemsByDay.get(selectedDay) ?? []) : [];
+
+  return (
+    <AppShell
+      title="Calendar"
+      subtitle="Every class day, event, and due date across all your courses"
+      actions={
+        <div className="flex items-center gap-2">
+          <button className="btn-ghost !px-3" onClick={() => setCursor(new Date(today.getFullYear(), today.getMonth(), 1))}>
+            Today
+          </button>
+          <button
+            className="btn-ghost !px-3"
+            onClick={() => setCursor((c) => new Date(c.getFullYear(), c.getMonth() - 1, 1))}
+            aria-label="Previous month"
+          >
+            ←
+          </button>
+          <div className="text-sm font-medium w-36 text-center">{monthLabel}</div>
+          <button
+            className="btn-ghost !px-3"
+            onClick={() => setCursor((c) => new Date(c.getFullYear(), c.getMonth() + 1, 1))}
+            aria-label="Next month"
+          >
+            →
+          </button>
+        </div>
+      }
+    >
+      {loading && !data ? (
+        <Loading label="Loading your calendar…" />
+      ) : (
+        <div className="card !p-0 overflow-hidden">
+          <div className="grid grid-cols-7 border-b border-atlas-border">
+            {WEEKDAY_LABELS.map((w) => (
+              <div key={w} className="px-2 py-2 text-xs font-medium text-atlas-muted text-center">
+                {w}
+              </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-7">
+            {gridDays.map((d) => {
+              const key = localKey(d);
+              const inMonth = d.getMonth() === cursor.getMonth();
+              const isToday = key === todayKey;
+              const items = itemsByDay.get(key) ?? [];
+              const visible = items.slice(0, 3);
+              const overflow = items.length - visible.length;
+              return (
+                <button
+                  key={key}
+                  onClick={() => items.length && setSelectedDay(key)}
+                  className={`min-h-24 border-b border-r border-atlas-border p-1.5 text-left align-top transition-colors ${
+                    inMonth ? "bg-transparent" : "bg-atlas-panel2/40"
+                  } ${items.length ? "hover:bg-atlas-panel2 cursor-pointer" : "cursor-default"}`}
+                >
+                  <div
+                    className={`text-xs mb-1 inline-flex items-center justify-center w-5 h-5 rounded-full ${
+                      isToday ? "bg-atlas-accent text-white" : inMonth ? "text-atlas-text" : "text-atlas-muted"
+                    }`}
+                  >
+                    {d.getDate()}
+                  </div>
+                  <div className="space-y-0.5">
+                    {visible.map((item) => (
+                      <div
+                        key={item.id}
+                        className="text-[10px] leading-tight truncate rounded px-1 py-0.5"
+                        style={{
+                          background: `${courseColor(item.course_id ?? "other", courses.find((c) => c.id === item.course_id)?.color)}22`,
+                          color: courseColor(item.course_id ?? "other", courses.find((c) => c.id === item.course_id)?.color),
+                        }}
+                        title={item.title}
+                      >
+                        {item.kind === "assignment" ? "▸ " : ""}
+                        {item.title}
+                      </div>
+                    ))}
+                    {overflow > 0 && (
+                      <div className="text-[10px] text-atlas-muted px-1">+{overflow} more</div>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <Modal
+        open={!!selectedDay}
+        onClose={() => setSelectedDay(null)}
+        title={selectedDay ? new Date(selectedDay + "T00:00:00").toLocaleDateString(undefined, {
+          weekday: "long", month: "long", day: "numeric",
+        }) : ""}
+      >
+        <div className="space-y-2">
+          {selectedItems.map((item) => (
+            <button
+              key={item.id}
+              className="w-full text-left card card-hover flex items-center justify-between gap-3"
+              onClick={() => {
+                setSelectedDay(null);
+                if (item.course_id) router.push(`/courses/${item.course_id}`);
+              }}
+            >
+              <div className="min-w-0">
+                <div className="text-sm font-medium truncate">{item.title}</div>
+                <div className="text-xs text-atlas-muted">{courseName(item.course_id)}</div>
+              </div>
+              <Badge tone={item.kind === "assignment" ? "accent" : "default"}>
+                {item.kind === "assignment" ? (item.detail ?? "assignment") : (item.detail ?? "class")}
+              </Badge>
+            </button>
+          ))}
+        </div>
+      </Modal>
+    </AppShell>
+  );
+}

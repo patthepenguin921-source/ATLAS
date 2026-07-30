@@ -11,6 +11,21 @@ const ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
 
 const IMPORTANCE_LABEL: Record<string, string> = { low: "Low", normal: "Normal", high: "High" };
 
+const DOC_TYPE_LABEL: Record<string, string> = {
+  pdf: "PDF", powerpoint: "Slides", notes: "Notes", announcement: "Announcement",
+  study_guide: "Study guide", essay: "Essay", practice_problems: "Practice problems",
+  rubric: "Rubric", personal_note: "Personal note", email: "Email", image: "Image",
+  glance: "At a glance", other: "Other",
+};
+
+// A document Atlas can re-fetch directly (no full Schoology sync needed) is
+// one linked to a Google Doc/Slides/Sheet — mirrors the backend's
+// `google_files.is_google_url` check without needing the parsed file id.
+function isResyncable(d: any): boolean {
+  const url = d.metadata?.source_url as string | undefined;
+  return !!url && (url.includes("docs.google.com") || url.includes("drive.google.com"));
+}
+
 // `metadata.review_reason` (set by the Schoology integration) explains *why*
 // a document needs a look — falls back to a generic label for the older
 // bulk-upload low-confidence-course-match case, which doesn't set a reason.
@@ -212,6 +227,38 @@ export default function DocumentsPage() {
     }
   }
 
+  // Same "adjustable after the fact" idea as importance above — a manual
+  // re-tag is marked `doc_type_source: manual` server-side so neither the
+  // next re-enrichment nor a glance re-sync ever reverts it.
+  async function setDocType(id: string, doc_type: string) {
+    setDocs((prev) => prev?.map((d) => (d.id === id ? { ...d, doc_type } : d)) ?? prev);
+    try {
+      await apiPatch(`/documents/${id}`, { doc_type });
+    } catch {
+      load(); // revert the optimistic update on failure
+    }
+  }
+
+  const [resyncingId, setResyncingId] = useState<string | null>(null);
+  async function resyncDocument(id: string) {
+    setResyncingId(id);
+    setStatus(null);
+    try {
+      const result = await apiPost(`/documents/${id}/resync`, {}, 60000);
+      setStatus({
+        ok: true,
+        text: result?.changed
+          ? "Re-fetched the latest version — reprocessing now."
+          : "Already up to date — nothing changed since the last sync.",
+      });
+      load();
+    } catch (err: any) {
+      setStatus({ ok: false, text: friendlyError(err) });
+    } finally {
+      setResyncingId(null);
+    }
+  }
+
   const courseName = (id: string) => courses.find((c) => c.id === id)?.name ?? "—";
   // Completed classes (Schoology flips `is_active` false once a grading
   // period ends) shouldn't be offered as a destination for new files —
@@ -327,7 +374,7 @@ export default function DocumentsPage() {
               <div className="min-w-0">
                 <div className="font-medium">{d.title}</div>
                 <div className="text-xs text-atlas-muted mt-0.5">
-                  {courseName(d.course_id)} · {d.doc_type}
+                  {courseName(d.course_id)} · {DOC_TYPE_LABEL[d.doc_type] ?? d.doc_type}
                 </div>
                 {d.summary && <p className="text-sm text-atlas-muted mt-2">{d.summary}</p>}
                 {d.keywords?.length ? (
@@ -346,6 +393,13 @@ export default function DocumentsPage() {
                       items={[
                         ...(!d.ingested
                           ? [{ label: "Index now", onClick: () => triggerProcessing(d.id) }]
+                          : []),
+                        ...(isResyncable(d)
+                          ? [{
+                              label: resyncingId === d.id ? "Re-fetching…" : "Re-fetch from source",
+                              disabled: resyncingId === d.id,
+                              onClick: () => resyncDocument(d.id),
+                            }]
                           : []),
                         { label: "Rename", onClick: () => renameDocument(d.id, d.title) },
                         {
@@ -367,6 +421,17 @@ export default function DocumentsPage() {
                 )}
                 {d.importance === "high" && <Badge tone="accent">important</Badge>}
                 {d.importance === "low" && <Badge>low priority</Badge>}
+                <select
+                  className="input !w-32 text-xs py-1"
+                  value={d.doc_type ?? "other"}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setDocType(d.id, e.target.value)}
+                  title="Document type"
+                >
+                  {Object.entries(DOC_TYPE_LABEL).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
                 <select
                   className="input !w-28 text-xs py-1"
                   value={d.importance ?? "normal"}

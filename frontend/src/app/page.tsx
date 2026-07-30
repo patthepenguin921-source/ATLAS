@@ -9,6 +9,23 @@ import { formatCalendarDate } from "@/lib/date";
 
 const UPLOAD_ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
 
+// Tag filter options for the quick search below — "doc:"/"cat:" prefixes
+// disambiguate document doc_types from assignment categories that happen to
+// share a name (e.g. "essay", "other") since they're two different backend
+// fields (`doc_type` vs `category`) sent as two different query params.
+const DOC_TYPE_TAGS: [string, string][] = [
+  ["pdf", "PDF"], ["powerpoint", "Slides"], ["notes", "Notes"], ["announcement", "Announcement"],
+  ["study_guide", "Study guide"], ["essay", "Essay"], ["practice_problems", "Practice problems"],
+  ["rubric", "Rubric"], ["personal_note", "Personal note"], ["email", "Email"], ["image", "Image"],
+  ["glance", "At a glance"], ["other", "Other"],
+];
+const CATEGORY_TAGS: [string, string][] = [
+  ["homework", "Homework"], ["classwork", "Classwork"], ["quiz", "Quiz"], ["test", "Test"],
+  ["exam", "Exam"], ["project", "Project"], ["essay", "Essay"], ["lab", "Lab"],
+  ["discussion", "Discussion"], ["presentation", "Presentation"], ["reading", "Reading"],
+  ["participation", "Participation"], ["other", "Other"],
+];
+
 function dayLabel(dateStr: string, planDate: string): string {
   const d = new Date(dateStr + "T00:00:00");
   const today = new Date(planDate + "T00:00:00");
@@ -35,6 +52,7 @@ export default function DashboardPage() {
   const [planning, setPlanning] = useState(false);
 
   const [query, setQuery] = useState("");
+  const [tagFilter, setTagFilter] = useState(""); // "" | "doc:<doc_type>" | "cat:<category>"
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<{ assignments: any[]; documents: any[] } | null>(null);
 
@@ -57,9 +75,11 @@ export default function DashboardPage() {
 
   // Debounced quick search across assignments + documents (trigram text
   // search — fast enough to fire on typing, unlike the semantic endpoint).
+  // Also fires with an empty query when a tag is picked, so clicking e.g.
+  // "At a glance" alone browses every glance doc without typing anything.
   useEffect(() => {
     const q = query.trim();
-    if (!q) {
+    if (!q && !tagFilter) {
       setResults(null);
       setSearching(false);
       return;
@@ -67,7 +87,10 @@ export default function DashboardPage() {
     setSearching(true);
     const timer = setTimeout(async () => {
       try {
-        setResults(await apiGet(`/search/text?q=${encodeURIComponent(q)}&limit=6`));
+        const params = new URLSearchParams({ q, limit: "6" });
+        if (tagFilter.startsWith("doc:")) params.set("doc_type", tagFilter.slice(4));
+        if (tagFilter.startsWith("cat:")) params.set("category", tagFilter.slice(4));
+        setResults(await apiGet(`/search/text?${params.toString()}`));
       } catch {
         setResults(null);
       } finally {
@@ -75,7 +98,7 @@ export default function DashboardPage() {
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [query]);
+  }, [query, tagFilter]);
 
   async function uploadDocument(e: React.FormEvent) {
     e.preventDefault();
@@ -162,12 +185,32 @@ export default function DashboardPage() {
             <div className="grid md:grid-cols-2 gap-4">
               <div className="card">
                 <label className="label">Search assignments &amp; documents</label>
-                <input
-                  className="input w-full"
-                  placeholder="e.g. photosynthesis, unit 3 review…"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                />
+                <div className="flex gap-2">
+                  <input
+                    className="input w-full"
+                    placeholder="e.g. photosynthesis, unit 3 review…"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
+                  <select
+                    className="input !w-36 shrink-0"
+                    value={tagFilter}
+                    onChange={(e) => setTagFilter(e.target.value)}
+                    title="Filter by tag"
+                  >
+                    <option value="">All tags</option>
+                    <optgroup label="Documents">
+                      {DOC_TYPE_TAGS.map(([value, label]) => (
+                        <option key={`doc:${value}`} value={`doc:${value}`}>{label}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="Assignments">
+                      {CATEGORY_TAGS.map(([value, label]) => (
+                        <option key={`cat:${value}`} value={`cat:${value}`}>{label}</option>
+                      ))}
+                    </optgroup>
+                  </select>
+                </div>
                 {searching && <div className="text-xs text-atlas-muted mt-2">Searching…</div>}
                 {results && !searching && (
                   <div className="mt-3 space-y-1 max-h-56 overflow-auto">

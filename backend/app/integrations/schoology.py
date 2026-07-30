@@ -377,6 +377,19 @@ class SchoologyProvider(IntegrationProvider):
             pass  # still usable for this run even if persisting the cache fails
         return new_access_token
 
+    async def google_token_for_resync(self, user_id: str) -> str | None:
+        """Public entry point for `app.routers.documents`' single-document
+        resync endpoint -- reuses the same stored-refresh-token machinery a
+        full sync uses (`_resolve_google_token`) rather than a full sync
+        being the only thing able to refresh a Google Drive access token.
+        Returns None when Schoology isn't connected at all or Google Drive
+        was never authorized for it."""
+        try:
+            integration = await self._load_integration(user_id)
+        except RuntimeError:
+            return None
+        return await self._resolve_google_token(user_id, integration)
+
     def _has_api_key(self, integration: dict[str, Any]) -> bool:
         """Whether an optional personal API key was saved alongside the
         (always-required) login — see `SchoologyConnectRequest`'s docstring.

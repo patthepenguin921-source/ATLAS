@@ -22,6 +22,7 @@ const Icon = ({ d }: { d: string }) => (
 
 const NAV = [
   { href: "/", label: "Dashboard", d: "M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6V11h-6v9Zm0-16v5h6V4h-6Z" },
+  { href: "/calendar", label: "Calendar", d: "M7 3v3M17 3v3M4 9h16M5 6h14a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Z" },
   { href: "/courses", label: "Courses", d: "M4 5h16M4 5v14M4 19h16M20 5v14M9 9h7M9 13h7" },
   { href: "/assignments", label: "Assignments", d: "M9 5h6M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 5H7a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 13l2 2 4-4" },
   { href: "/documents", label: "Documents", d: "M14 3v5h5M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" },

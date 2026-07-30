@@ -62,6 +62,9 @@ export default function CourseDetailPage() {
   const [grades, setGrades] = useState<any[]>([]);
   const [events, setEvents] = useState<any[]>([]);
   const [documents, setDocuments] = useState<any[]>([]);
+  const [docQuery, setDocQuery] = useState("");
+  const [docSearchResults, setDocSearchResults] = useState<any[] | null>(null);
+  const [docSearching, setDocSearching] = useState(false);
   const [announcements, setAnnouncements] = useState<any[]>([]);
   const [mistakes, setMistakes] = useState<any[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
@@ -108,6 +111,30 @@ export default function CourseDetailPage() {
     if (id) load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Debounced search across just this course's documents (title + body
+  // text) — falls back to the plain, already-loaded `documents` list once
+  // the search box is cleared, rather than re-fetching.
+  useEffect(() => {
+    const q = docQuery.trim();
+    if (!q || !id) {
+      setDocSearchResults(null);
+      setDocSearching(false);
+      return;
+    }
+    setDocSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const result = await apiGet(`/search/text?q=${encodeURIComponent(q)}&course_id=${id}&limit=50`);
+        setDocSearchResults(result?.documents ?? []);
+      } catch {
+        setDocSearchResults([]);
+      } finally {
+        setDocSearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [docQuery, id]);
 
   function startEdit() {
     setForm({
@@ -474,20 +501,40 @@ export default function CourseDetailPage() {
         </Section>
 
         <Section title="Documents">
-          {documents.length ? (
+          {documents.length > 0 && (
+            <input
+              className="input w-full mb-3"
+              placeholder="Search this course's documents…"
+              value={docQuery}
+              onChange={(e) => setDocQuery(e.target.value)}
+            />
+          )}
+          {docSearching && <div className="text-xs text-atlas-muted mb-2">Searching…</div>}
+          {(docSearchResults ?? documents).length ? (
             <div className="space-y-2">
-              {documents.map((d) => (
-                <div key={d.id} className="card flex items-center justify-between gap-4">
+              {(docSearchResults ?? documents).map((d) => (
+                <div
+                  key={d.id}
+                  className="card card-hover cursor-pointer flex items-center justify-between gap-4"
+                  onClick={() => router.push(`/documents/${d.id}`)}
+                >
                   <div className="min-w-0">
                     <div className="text-sm font-medium truncate">{d.title}</div>
                     <div className="text-xs text-atlas-muted">{d.doc_type}</div>
+                    {d.snippet && (
+                      <div className="text-xs text-atlas-muted truncate mt-0.5" title={d.snippet}>
+                        {d.snippet}
+                      </div>
+                    )}
                   </div>
                   {d.ingested && <Badge tone="good">indexed</Badge>}
                 </div>
               ))}
             </div>
           ) : (
-            <Empty>No documents uploaded for this course.</Empty>
+            <Empty>
+              {docSearchResults ? "No documents match your search." : "No documents uploaded for this course."}
+            </Empty>
           )}
         </Section>
       </div>

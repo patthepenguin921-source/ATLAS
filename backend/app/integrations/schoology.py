@@ -38,7 +38,7 @@ from app.agents.archivist import Archivist
 from app.config import settings
 from app.core.crypto import decrypt_json, encrypt_json
 from app.core.r2_client import r2, safe_object_name
-from app.core.supabase_client import eq, supabase
+from app.core.supabase_client import SupabaseError, eq, supabase
 from app.integrations import course_mapping, google_oauth
 from app.integrations.base import IntegrationProvider
 from app.integrations.google_files import (
@@ -1094,7 +1094,21 @@ class SchoologyProvider(IntegrationProvider):
         if was_flagged_stub:
             await supabase.update("documents", payload, filters={"id": eq(doc_id)})
         else:
-            await supabase.insert("documents", {"id": doc_id, "user_id": user_id, "course_id": course_id, **payload})
+            try:
+                await supabase.insert(
+                    "documents", {"id": doc_id, "user_id": user_id, "course_id": course_id, **payload},
+                )
+            except SupabaseError as e:
+                if e.status != 409:
+                    raise
+                # Lost a race with another concurrent ingest of this exact
+                # external_id (see migration 0020_documents_external_id_
+                # unique) -- the row that won the race is the real one;
+                # nothing further here should proceed under a doc_id that
+                # will never actually own this content. Any R2 upload above
+                # is simply an orphaned object now, same acceptable waste
+                # as any other best-effort storage step in this method.
+                return False
         try:
             await ingestion.ingest_document(doc_id, user_id, text)
         except Exception as e:  # noqa: BLE001
@@ -1206,7 +1220,19 @@ class SchoologyProvider(IntegrationProvider):
         if existing:
             await supabase.update("documents", payload, filters={"id": eq(doc_id)})
         else:
-            await supabase.insert("documents", {"id": doc_id, "user_id": user_id, "course_id": course_id, **payload})
+            try:
+                await supabase.insert(
+                    "documents", {"id": doc_id, "user_id": user_id, "course_id": course_id, **payload},
+                )
+            except SupabaseError as e:
+                if e.status != 409:
+                    raise
+                # Lost a race with another concurrent ingest of this exact
+                # external_id (see `_ingest_file`'s matching comment and
+                # migration 0020_documents_external_id_unique) -- the row
+                # that won is the real one.
+                winner = await self._existing_document(user_id, external_id)
+                return False, (winner["id"] if winner else doc_id)
         try:
             await ingestion.ingest_document(doc_id, user_id, text)
         except Exception as e:  # noqa: BLE001

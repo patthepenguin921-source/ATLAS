@@ -166,21 +166,59 @@ async def extract_schedule_from_text(
     prompt = f"""\
 A document titled "{title}" lays out what happens in class on specific days \
 (a "week at a glance" or "unit at a glance" schedule). Today's date is \
-{today} -- use it only to resolve a date that's missing its year, never to \
-invent a date the document doesn't state.
+{today}.
 
-Read the document and list every day it actually names, with what's \
-happening that day and any assignment due that day. Only report a date or \
-assignment that the document actually states -- never infer or invent one \
-that isn't really there.
+Read the document and list every day it actually names, with a short topic \
+summary and any real assignment due that day.
 
-If a day is also labeled with its day of the week (e.g. "Monday 10/6"), the \
-date you resolve must actually fall on that weekday of the calendar -- if no \
-date satisfies both the stated weekday and the stated month/day, omit that \
-entry rather than guessing. When a date is missing its year, pick whichever \
-nearby year (today's, or the one before/after) puts the date closest to \
-today -- don't default to today's year if that would place the date many \
-months away from today in either direction while a different year would not.
+DATES:
+- If the document states an explicit year anywhere (a header like "8/4 \
+through 8/21/2026", "Fall 2026", etc.), use that year for every date in the \
+document that doesn't state its own year -- don't fall back to guessing \
+from today's date once the document has already told you the year.
+- Only when no year is stated anywhere in the document, resolve a missing \
+year to whichever nearby year (today's, or the one before/after) puts the \
+date closest to today -- don't default to today's year if that would place \
+the date many months away in either direction while a different year would \
+not.
+- If a day is also labeled with its day of the week (e.g. "Monday 10/6"), \
+the date you resolve must actually fall on that weekday of the calendar -- \
+if no date satisfies both the stated weekday and the stated month/day, omit \
+that entry rather than guessing.
+- Only report a date or assignment the document actually states -- never \
+infer or invent one that isn't really there.
+
+WHAT COUNTS AS AN ASSIGNMENT -- be selective; most of these documents \
+describe far more class activity than real, trackable assignments:
+- A test, quiz, exam, project, essay, or anything else graded or turned in \
+is always a real assignment -- capture it wherever it appears in the \
+document, even if it's only mentioned in a day's class-agenda/notes rather \
+than a separate "assignments"/"homework" column. Missing a test or quiz \
+matters far more than missing a minor practice item.
+- A specific, named piece of homework the student is expected to complete \
+(a worksheet, a problem set, a reading, a written response) is a real \
+assignment even if the document files it under a generic column header like \
+"Suggested Assignments" -- that header doesn't mean optional, it's just \
+this document's own label for its homework column.
+- Do NOT create a separate assignment for every individual in-class \
+activity, video, or practice-question set a day's agenda lists (e.g. "Watch \
+video 3.2", "Practice questions 1-19", "Delta Math practice") -- these \
+describe what happens in class, not a discrete thing to track; fold them \
+into that day's topic summary instead of listing each as an assignment.
+- Skip anything the document itself marks as optional, not graded, \
+practice-only, or "as needed" (e.g. "(practice -- not graded)", "Optional: \
+..."). These aren't real due work even if they're worth mentioning in the \
+day's topic.
+- Skip non-academic asides that aren't actual work at all (a holiday/break \
+greeting, "enjoy your weekend", a reminder to bring materials).
+
+DUE DATES:
+- If the document states a rule for when things are due (e.g. "assignments \
+are due the school day immediately following the assigned date"), apply \
+it -- the due_date is not always the same day the item is mentioned; work \
+out which school day (skip weekends) that rule actually points to.
+- Otherwise, an assignment's due date is the day it's listed under, unless \
+the document gives it an explicit different due date.
 
 Document text (may be truncated):
 \"\"\"
@@ -401,7 +439,17 @@ async def apply_schedule_from_doc(
             if category not in _ASSIGNMENT_CATEGORY_VALUES:
                 category = _map_category(a_title)
             due = a.get("due_date") or iso_date
-            ext_id = f"{source}:glance-assignment:{course_id}:{source_document_id}:{_normalize_name(a_title)}"
+            # Keyed by the day it's *listed* under (`iso_date`), not its
+            # due_date -- so the same title mentioned on two different days
+            # in the same document (a recurring "Study for Test" reminder,
+            # a weekly "Quiz") stays two distinct rows instead of the
+            # second silently overwriting the first, while a resync that
+            # only moves *this same listing's* due date still updates the
+            # same row in place rather than duplicating it.
+            ext_id = (
+                f"{source}:glance-assignment:{course_id}:{source_document_id}:"
+                f"{iso_date}:{_normalize_name(a_title)}"
+            )
             touched_assignment_ids.add(ext_id)
             try:
                 await _upsert_assignment(user_id, ext_id, source, {

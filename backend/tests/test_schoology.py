@@ -1231,6 +1231,55 @@ def test_sync_scraped_materials_surfaces_r2_upload_failure(fake_db, monkeypatch)
     assert doc["storage_path"] is None
 
 
+def test_ingest_file_recovers_from_a_racing_duplicate_insert(fake_db, monkeypatch):
+    """Two overlapping sync attempts can both pass the "does this document
+    already exist" check before either commits (real-world evidence: two
+    `documents` rows for the exact same Schoology item, each independently
+    re-running "at a glance" schedule extraction and producing duplicate,
+    inconsistent calendar_events/assignments -- see migration
+    0020_documents_external_id_unique). The loser's insert must hit the
+    DB-level unique constraint and back off cleanly instead of either
+    crashing the sync or creating a second `documents` row for the same
+    real file."""
+    from app.core.supabase_client import SupabaseError
+
+    provider = SchoologyProvider()
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="Syllabus.pdf", href="/attachment/download/1",
+                       kind="item", material_type="File", folder_path="Unit 1")],
+        files={"/attachment/download/1": (b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
+
+    # Simulate another process having already won the race and inserted the
+    # real row an instant before this call's own insert lands.
+    winner_id = str(uuid.uuid4())
+    winning_external_id = f"scrape:{_SCRAPE_SECTION.id}:{_normalize_name('Syllabus.pdf')}"
+    real_insert = fake_db.insert
+
+    async def _insert_that_conflicts(table, rows, *, upsert=False, on_conflict=None):
+        if table == "documents":
+            fake_db.tables.setdefault("documents", []).append({
+                "id": winner_id, "user_id": USER_ID, "course_id": BIO_COURSE,
+                "external_id": winning_external_id, "external_source": "schoology",
+                "title": "Syllabus.pdf", "metadata": {},
+            })
+            raise SupabaseError(409, "duplicate key value violates unique constraint")
+        return await real_insert(table, rows, upsert=upsert, on_conflict=on_conflict)
+
+    monkeypatch.setattr(supabase, "insert", _insert_that_conflicts)
+
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["errors"] == []
+    docs = fake_db.tables["documents"]
+    assert len(docs) == 1  # only the winner's row -- no duplicate from the loser
+    assert docs[0]["id"] == winner_id
+
+
 def test_next_sync_retries_storage_for_a_file_that_failed_to_upload(fake_db, monkeypatch):
     """A document row left with `storage_path = null` by a previous sync's
     failed R2 upload must not be treated as "already fully ingested" —

@@ -327,6 +327,52 @@ async def _reconcile_glance_rows(
             report["errors"].append(f"couldn't clean up class-schedule days no longer on the schedule: {e}")
 
 
+async def _purge_orphaned_glance_rows(
+    *, user_id: str, course_id: str, source: str, report: dict[str, Any] | None,
+) -> None:
+    """Delete glance-derived assignments/calendar_events left behind by a
+    document that no longer exists at all -- e.g. one replaced under a
+    fresh id after a duplicate-ingest race, or removed by a manual cleanup
+    that only caught some of what it created. `_reconcile_glance_rows`
+    above only ever looks at rows tied to *this* run's own document id, so
+    it can never see (let alone clean up) a row still pointing at some
+    other, now-deleted document -- confirmed against a real account where
+    exactly this left a "Unit at a Glance" course showing two conflicting
+    sets of class days for the same two weeks, one set from a document
+    that had already been deleted. Scoped to this course/source so it can
+    never touch another course's or another sync source's rows, and only
+    ever deletes a row once its own referenced document is confirmed gone
+    -- a row whose document still exists is never touched here, no matter
+    what this run's own extraction found."""
+    for table, extra_filters in (
+        ("assignments", {"external_source": eq(source)}),
+        ("calendar_events", {}),
+    ):
+        try:
+            rows = await supabase.select(
+                table, columns="id,metadata",
+                filters={"user_id": eq(user_id), "course_id": eq(course_id),
+                         "metadata->>detected_from": eq("glance_doc"), **extra_filters},
+            ) or []
+            doc_ids = {
+                (row.get("metadata") or {}).get("source_document_id") for row in rows
+            }
+            doc_ids.discard(None)
+            if not doc_ids:
+                continue
+            existing = await supabase.select(
+                "documents", columns="id", filters={"id": f"in.({','.join(doc_ids)})"},
+            ) or []
+            existing_ids = {d["id"] for d in existing}
+            for row in rows:
+                sdid = (row.get("metadata") or {}).get("source_document_id")
+                if sdid and sdid not in existing_ids:
+                    await supabase.delete(table, filters={"id": eq(row["id"])})
+        except Exception as e:  # noqa: BLE001
+            if report is not None:
+                report["errors"].append(f"couldn't clean up orphaned {table} rows: {e}")
+
+
 async def _record_glance_date_range(source_document_id: str, dates: list[str]) -> None:
     """Persist the span of dates this document's latest successful
     extraction actually covered, so `glance_still_relevant` can tell once
@@ -474,5 +520,8 @@ async def apply_schedule_from_doc(
             source_document_id=source_document_id,
             touched_assignment_ids=touched_assignment_ids, touched_event_ids=touched_event_ids,
             report=report,
+        )
+        await _purge_orphaned_glance_rows(
+            user_id=user_id, course_id=course_id, source=source, report=report,
         )
         await _record_glance_date_range(source_document_id, dates)

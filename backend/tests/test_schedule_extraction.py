@@ -109,12 +109,17 @@ class FakeSupabase:
     @staticmethod
     def _match(row: dict, filters: dict[str, str] | None) -> bool:
         for k, v in (filters or {}).items():
-            want = v.split("eq.", 1)[1] if isinstance(v, str) and v.startswith("eq.") else v
             if "->>" in k:  # JSON path filter, e.g. metadata->>source_document_id
                 col, prop = k.split("->>", 1)
                 got = (row.get(col) or {}).get(prop)
             else:
                 got = row.get(k)
+            if isinstance(v, str) and v.startswith("in.("):
+                wanted = v[len("in.("):-1].split(",")
+                if str(got) not in wanted:
+                    return False
+                continue
+            want = v.split("eq.", 1)[1] if isinstance(v, str) and v.startswith("eq.") else v
             if str(got) != str(want):
                 return False
         return True
@@ -178,6 +183,7 @@ def test_apply_schedule_from_doc_creates_class_events_and_assignments(fake_db, m
 
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
     monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {}})
 
     asyncio.run(schedule_extraction.apply_schedule_from_doc(
         user_id=USER_ID, course_id=COURSE_ID, title="Unit 3 - At a Glance.pdf",
@@ -221,6 +227,7 @@ def test_apply_schedule_from_doc_skips_an_assignment_already_on_file(fake_db, mo
 
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
     monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {}})
 
     fake_db.tables["assignments"].append({
         "id": str(uuid.uuid4()), "user_id": USER_ID, "course_id": COURSE_ID,
@@ -264,6 +271,7 @@ def test_apply_schedule_from_doc_updates_due_date_in_place_on_resync(fake_db, mo
     from app.llm import claude
 
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {}})
 
     async def _v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
         return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": [
@@ -303,6 +311,7 @@ def test_apply_schedule_from_doc_preserves_status_on_resync(fake_db, monkeypatch
     from app.llm import claude
 
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {}})
 
     async def _v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
         return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": [
@@ -339,6 +348,7 @@ def test_apply_schedule_from_doc_deletes_assignment_and_event_dropped_from_a_res
     from app.llm import claude
 
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {}})
 
     async def _v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
         return {"days": [
@@ -389,6 +399,7 @@ def test_apply_schedule_from_doc_empty_extraction_does_not_delete_prior_rows(fak
     from app.llm import claude
 
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {}})
 
     async def _v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
         return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": [
@@ -425,6 +436,8 @@ def test_apply_schedule_from_doc_cross_document_title_collision_does_not_suppres
     from app.llm import claude
 
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+    fake_db.tables["documents"].append({"id": "doc-week1", "metadata": {}})
+    fake_db.tables["documents"].append({"id": "doc-week2", "metadata": {}})
 
     async def _week1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
         return {"days": [{"date": "2025-10-06", "topic": "Week 1", "assignments": [
@@ -464,6 +477,7 @@ def test_apply_schedule_from_doc_keeps_same_title_listed_on_different_days(fake_
     from app.llm import claude
 
     monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {}})
 
     async def _fake(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
         return {"days": [
@@ -511,6 +525,86 @@ def test_apply_schedule_from_doc_records_date_range_onto_the_document_row(fake_d
     doc = fake_db.tables["documents"][0]
     assert doc["metadata"]["glance_date_range"] == {"start": "2025-10-06", "end": "2025-10-10"}
     assert doc["metadata"]["content_hash"] == "abc123"  # merged, not overwritten
+
+
+def test_apply_schedule_from_doc_purges_rows_left_by_a_deleted_document(fake_db, monkeypatch):
+    """The reported real-world bug: an earlier duplicate-ingest of the same
+    Schoology item got cleaned up by deleting its stale `documents` row, but
+    the class-schedule `calendar_events`/assignments it had created were
+    left behind (`_reconcile_glance_rows` only ever looks at rows tied to
+    *this* document's own id, so it can never see a row still pointing at a
+    document that no longer exists at all). A student ended up seeing two
+    conflicting sets of class days for the same two weeks. A fresh, healthy
+    sync of the surviving document must sweep up those orphans too."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+
+    # Rows from "doc-old", a document that has since been deleted entirely.
+    fake_db.tables["calendar_events"].append({
+        "id": "orphan-event", "user_id": USER_ID, "course_id": COURSE_ID,
+        "title": "Stale topic", "external_id": f"schoology:class:{COURSE_ID}:doc-old:2025-10-06",
+        "metadata": {"detected_from": "glance_doc", "source_document_id": "doc-old"},
+    })
+    fake_db.tables["assignments"].append({
+        "id": "orphan-assignment", "user_id": USER_ID, "course_id": COURSE_ID,
+        "title": "Stale Quiz", "external_source": "schoology",
+        "external_id": f"schoology:glance-assignment:{COURSE_ID}:doc-old:2025-10-06:stale quiz",
+        "metadata": {"detected_from": "glance_doc", "source_document_id": "doc-old"},
+    })
+    # "doc-1" is the only document row that actually still exists.
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {}})
+
+    async def _fake(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": [
+            {"title": "Lab Report", "due_date": "2025-10-09", "category": "lab"},
+        ]}]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Unit at a Glance",
+        text="whatever", source="schoology", source_document_id="doc-1",
+    ))
+
+    event_ids = {e["id"] for e in fake_db.tables["calendar_events"]}
+    assignment_ids = {a["id"] for a in fake_db.tables["assignments"]}
+    assert "orphan-event" not in event_ids
+    assert "orphan-assignment" not in assignment_ids
+    # The current document's own fresh rows are untouched.
+    assert any(e["external_id"].endswith(":doc-1:2025-10-06") for e in fake_db.tables["calendar_events"])
+    assert any(a["title"] == "Lab Report" for a in fake_db.tables["assignments"])
+
+
+def test_apply_schedule_from_doc_does_not_purge_rows_whose_document_still_exists(fake_db, monkeypatch):
+    """Two different glance documents for the same course (e.g. two
+    different units, each still a real document row) must never have their
+    rows purged just because they weren't touched by this run's own
+    extraction -- only a row whose *document* is actually gone qualifies."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")
+
+    fake_db.tables["documents"].append({"id": "doc-unit1", "metadata": {}})
+    fake_db.tables["documents"].append({"id": "doc-unit2", "metadata": {}})
+    fake_db.tables["calendar_events"].append({
+        "id": "unit1-event", "user_id": USER_ID, "course_id": COURSE_ID,
+        "title": "Unit 1 topic", "external_id": f"schoology:class:{COURSE_ID}:doc-unit1:2025-09-01",
+        "metadata": {"detected_from": "glance_doc", "source_document_id": "doc-unit1"},
+    })
+
+    async def _fake(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": []}]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake)
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Unit at a Glance",
+        text="whatever", source="schoology", source_document_id="doc-unit2",
+    ))
+
+    event_ids = {e["id"] for e in fake_db.tables["calendar_events"]}
+    assert "unit1-event" in event_ids  # its document still exists -- must survive
 
 
 def test_glance_still_relevant_true_with_no_recorded_range():

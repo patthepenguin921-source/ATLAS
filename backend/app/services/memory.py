@@ -278,6 +278,14 @@ def render_context(ctx: dict[str, Any]) -> str:
             desc = d.get("summary") or d.get("doc_type") or ""
             lines.append(f"- {d['title']}" + (f" — {desc}" if desc else ""))
 
+    if ctx.get("attachment"):
+        att = ctx["attachment"]
+        lines.append(
+            f"\n## Attached to this conversation (\"{att['filename']}\" -- uploaded just for "
+            "this chat, not saved to the student's Documents)"
+        )
+        lines.append(att["text"])
+
     if ctx.get("relevant_passages"):
         lines.append("\n## Relevant passages from your documents")
         for p in ctx["relevant_passages"]:

@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Empty, Loading, Badge, Ring, gradeTone } from "@/components/ui";
+import { ColorPicker } from "@/components/ColorPicker";
+import { courseColor } from "@/lib/courseColor";
 import { apiGet, apiPatch, apiPost } from "@/lib/api";
 
 type CourseLevel = "regular" | "honors" | "ap" | "dual_enrollment" | "ib";
@@ -34,6 +36,7 @@ interface Course {
   has_ap_prep_lab: boolean;
   current_grade?: number | null;
   current_letter?: string | null;
+  color?: string | null;
   semester?: string;
   linked_course_id?: string | null;
   sort_order: number;
@@ -88,6 +91,7 @@ const emptyForm = {
   course_level: "regular" as CourseLevel,
   has_hn_prep_lab: false,
   has_ap_prep_lab: false,
+  color: null as string | null,
 };
 
 export default function CoursesPage() {
@@ -219,6 +223,11 @@ export default function CoursesPage() {
             </label>
           </div>
 
+          <div className="md:col-span-4">
+            <label className="label">Calendar color</label>
+            <ColorPicker courseId="" value={form.color} onChange={(c) => setForm({ ...form, color: c })} />
+          </div>
+
           <button className="btn-primary md:col-span-4">Save course</button>
         </form>
       )}
@@ -250,7 +259,13 @@ export default function CoursesPage() {
             >
               <div className="flex items-start justify-between">
                 <div>
-                  <div className="font-medium">{c.name}</div>
+                  <div className="font-medium flex items-center gap-2">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{ background: courseColor(c.id, c.color) }}
+                    />
+                    {c.name}
+                  </div>
                   <div className="text-xs text-atlas-muted">{c.code || c.subject || "—"}</div>
                 </div>
                 <div className="flex flex-col items-end gap-1">

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Loading, Modal, Badge } from "@/components/ui";
 import { apiGet } from "@/lib/api";
+import { courseColor } from "@/lib/courseColor";
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -26,21 +27,6 @@ function localKey(d: Date): string {
  *  timezone reinterpretation entirely, same fix as `formatCalendarDate`. */
 function itemKey(iso: string): string {
   return iso.slice(0, 10);
-}
-
-// Small, distinct, deterministic palette for courses that haven't set their
-// own `color` -- hashed from the course id so the same course always lands
-// on the same swatch across a session without needing to persist anything.
-const FALLBACK_PALETTE = [
-  "#6a8bff", "#f2994a", "#27ae60", "#eb5757", "#9b51e0",
-  "#2d9cdb", "#f2c94c", "#bb6bd9", "#219653", "#56ccf2",
-];
-
-function courseColor(courseId: string, explicit?: string | null): string {
-  if (explicit) return explicit;
-  let hash = 0;
-  for (let i = 0; i < courseId.length; i++) hash = (hash * 31 + courseId.charCodeAt(i)) >>> 0;
-  return FALLBACK_PALETTE[hash % FALLBACK_PALETTE.length];
 }
 
 type CalItem = {

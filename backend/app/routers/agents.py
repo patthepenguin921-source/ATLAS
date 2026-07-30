@@ -56,7 +56,8 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
         history = [{"role": m["role"], "content": m["content"]} for m in prior]
 
     result = await agent.respond(
-        user.id, body.message, history=history, include_semantic=body.include_semantic
+        user.id, body.message, history=history, include_semantic=body.include_semantic,
+        attachment_text=body.attachment_text, attachment_filename=body.attachment_filename,
     )
     conv_id = await _persist_turn(
         user.id, body.conversation_id, body.agent, body.message,

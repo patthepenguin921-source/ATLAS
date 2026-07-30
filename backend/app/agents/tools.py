@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.supabase_client import eq, supabase
+from app.services.grading import ASSIGNMENT_WEIGHTS
 
 # `app.integrations` (course_mapping's package) and `app.routers.documents`
 # both transitively import `app.agents.archivist`, which imports
@@ -58,6 +59,13 @@ TOOL_SPECS: list[dict[str, Any]] = [
                 },
                 "due_date": {"type": "string", "description": "Due date as YYYY-MM-DD, if given."},
                 "points_possible": {"type": "number", "description": "Points it's worth, if mentioned."},
+                "weight_category": {
+                    "type": "string", "enum": list(ASSIGNMENT_WEIGHTS),
+                    "description": "How much this counts toward the grade, only if the student "
+                                   "says or clearly implies it -- a test/project/exam is usually "
+                                   "'major', daily homework/classwork is usually 'minor'. Leave "
+                                   "unset rather than guessing.",
+                },
                 "notes": {"type": "string", "description": "Any extra detail the student gave."},
             },
             "required": ["title"],
@@ -233,6 +241,9 @@ async def _add_assignment(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
         payload["due_date"] = args["due_date"]
     if args.get("points_possible") is not None:
         payload["points_possible"] = args["points_possible"]
+    weight_category = args.get("weight_category")
+    if weight_category in ASSIGNMENT_WEIGHTS:
+        payload["weight"] = ASSIGNMENT_WEIGHTS[weight_category]
     if args.get("notes"):
         payload["notes"] = args["notes"]
     created = await supabase.insert("assignments", payload)
@@ -242,6 +253,7 @@ async def _add_assignment(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
         "assignment": {
             "id": row.get("id"), "title": title, "category": category,
             "due_date": args.get("due_date"), "course_id": course_id,
+            "weight_category": weight_category if weight_category in ASSIGNMENT_WEIGHTS else None,
         },
     }
 

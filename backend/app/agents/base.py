@@ -67,6 +67,8 @@ class Agent:
         history: list[dict[str, str]] | None = None,
         include_semantic: bool = True,
         max_tokens: int = 1200,
+        attachment_text: str | None = None,
+        attachment_filename: str | None = None,
     ) -> dict[str, Any]:
         # Run document retrieval and a web search side by side rather than
         # deciding from document-passage similarity alone whether the web is
@@ -83,6 +85,10 @@ class Agent:
         )
         ctx["web_results"] = web_results
         ctx["web_search_error"] = web_search_error
+        if attachment_text:
+            ctx["attachment"] = {
+                "filename": attachment_filename or "attached file", "text": attachment_text,
+            }
         context_text = memory.render_context(ctx)
         messages = list(history or [])
         messages.append({"role": "user", "content": user_message})

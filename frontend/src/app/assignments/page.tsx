@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { Empty, Loading, Badge, Modal, SkeletonList } from "@/components/ui";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
+import { formatCalendarDate } from "@/lib/date";
 
 const CATEGORIES = ["homework", "quiz", "test", "project", "essay", "lab", "other"];
 const STATUSES = ["not_started", "in_progress", "submitted", "graded", "missing"];
@@ -149,7 +150,7 @@ export default function AssignmentsPage() {
               </div>
               <div className="text-xs text-atlas-muted">
                 {courseName(a.course_id)} · {a.category}
-                {a.due_date && ` · due ${new Date(a.due_date).toLocaleString()}`}
+                {a.due_date && ` · due ${formatCalendarDate(a.due_date)}`}
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -209,7 +210,7 @@ export default function AssignmentsPage() {
             </div>
             {selected.due_date && (
               <div className="text-atlas-muted">
-                Due {new Date(selected.due_date).toLocaleString()}
+                Due {formatCalendarDate(selected.due_date)}
               </div>
             )}
 

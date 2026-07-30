@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Stat, RevealStat, Section, Empty, Loading, gradeTone, Badge, RiskBadge } from "@/components/ui";
 import { apiGet, apiPost, apiUpload } from "@/lib/api";
+import { formatCalendarDate } from "@/lib/date";
 
 const UPLOAD_ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
 
@@ -272,7 +273,7 @@ export default function DashboardPage() {
                             </div>
                             <div className="text-xs text-atlas-muted whitespace-nowrap text-right">
                               {t.due_date && t.due_date !== date && (
-                                <div>due {new Date(t.due_date).toLocaleDateString()}</div>
+                                <div>due {formatCalendarDate(t.due_date)}</div>
                               )}
                               {t.estimated_minutes ? <div>{t.estimated_minutes}m</div> : null}
                             </div>
@@ -306,7 +307,7 @@ export default function DashboardPage() {
                         </div>
                       </div>
                       <Badge tone="accent">
-                        {a.due_date ? new Date(a.due_date).toLocaleDateString() : "—"}
+                        {a.due_date ? formatCalendarDate(a.due_date) : "—"}
                       </Badge>
                     </button>
                   ))}

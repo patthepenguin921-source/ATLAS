@@ -37,8 +37,13 @@ export const AGENTS = [
   { id: "coach", label: "Coach", blurb: "Accountability & reviews" },
 ];
 
-/** Shared chat behavior for the Ask Atlas page and the floating popup. */
-export function useChat(onNewConversation?: () => void) {
+/** Shared chat behavior for the Ask Atlas page, the floating popup, and a
+ *  course page's embedded assistant. Passing `courseId` scopes every turn
+ *  to that one class (see `ChatRequest.course_id`) -- retrieval narrows to
+ *  its assignments/grades/documents and the model is told it's answering
+ *  from that class's own page, without losing the rest of the student's
+ *  record for a cross-class question. */
+export function useChat(onNewConversation?: () => void, courseId?: string | null) {
   const [agent, setAgent] = useState("general");
   const [messages, setMessages] = useState<Msg[]>([]);
   const [conv, setConv] = useState<string | null>(null);
@@ -79,6 +84,7 @@ export function useChat(onNewConversation?: () => void) {
       const r = await apiPost("/agents/chat", {
         message, agent, conversation_id: conv,
         attachment_text: pending?.text, attachment_filename: pending?.filename,
+        course_id: courseId || undefined,
       });
       setConv(r.conversation_id);
       setMessages((m) => [...m, { role: "assistant", content: r.reply, pendingAction: r.pending_action ?? null }]);

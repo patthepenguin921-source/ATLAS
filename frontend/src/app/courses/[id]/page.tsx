@@ -6,6 +6,8 @@ import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Stat, Section, Empty, Loading, Badge, gradeTone } from "@/components/ui";
 import { ColorPicker } from "@/components/ColorPicker";
+import { FolderPane } from "@/components/FolderPane";
+import { CourseAssistant } from "@/components/CourseAssistant";
 import { apiGet, apiPatch, apiPost, apiDelete } from "@/lib/api";
 import { formatCalendarDate } from "@/lib/date";
 
@@ -63,10 +65,6 @@ export default function CourseDetailPage() {
   const [assignments, setAssignments] = useState<any[]>([]);
   const [grades, setGrades] = useState<any[]>([]);
   const [events, setEvents] = useState<any[]>([]);
-  const [documents, setDocuments] = useState<any[]>([]);
-  const [docQuery, setDocQuery] = useState("");
-  const [docSearchResults, setDocSearchResults] = useState<any[] | null>(null);
-  const [docSearching, setDocSearching] = useState(false);
   const [announcements, setAnnouncements] = useState<any[]>([]);
   const [mistakes, setMistakes] = useState<any[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
@@ -81,14 +79,13 @@ export default function CourseDetailPage() {
 
   async function load() {
     try {
-      const [c, t, tm, a, g, e, d, an, mi, ss, sem] = await Promise.all([
+      const [c, t, tm, a, g, e, an, mi, ss, sem] = await Promise.all([
         apiGet(`/courses/${id}`),
         apiGet("/teachers"),
         apiGet("/terms"),
         apiGet(`/assignments?course_id=${id}`),
         apiGet(`/grades?course_id=${id}`),
         apiGet(`/calendar?course_id=${id}`),
-        apiGet(`/documents?course_id=${id}`),
         apiGet(`/announcements?course_id=${id}`),
         apiGet(`/mistakes?course_id=${id}`),
         apiGet(`/study-sessions?course_id=${id}`),
@@ -101,7 +98,6 @@ export default function CourseDetailPage() {
       setAssignments(a ?? []);
       setGrades(g ?? []);
       setEvents(e ?? []);
-      setDocuments(d ?? []);
       setAnnouncements(an ?? []);
       setMistakes(mi ?? []);
       setSessions(ss ?? []);
@@ -113,30 +109,6 @@ export default function CourseDetailPage() {
     if (id) load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
-
-  // Debounced search across just this course's documents (title + body
-  // text) — falls back to the plain, already-loaded `documents` list once
-  // the search box is cleared, rather than re-fetching.
-  useEffect(() => {
-    const q = docQuery.trim();
-    if (!q || !id) {
-      setDocSearchResults(null);
-      setDocSearching(false);
-      return;
-    }
-    setDocSearching(true);
-    const timer = setTimeout(async () => {
-      try {
-        const result = await apiGet(`/search/text?q=${encodeURIComponent(q)}&course_id=${id}&limit=50`);
-        setDocSearchResults(result?.documents ?? []);
-      } catch {
-        setDocSearchResults([]);
-      } finally {
-        setDocSearching(false);
-      }
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [docQuery, id]);
 
   function startEdit() {
     setForm({
@@ -483,69 +455,37 @@ export default function CourseDetailPage() {
         )}
       </Section>
 
-      <div className="grid md:grid-cols-2 gap-6">
-        <Section title="Upcoming events">
-          {events.length ? (
-            <div className="space-y-2">
-              {events.map((ev) => (
-                <div key={ev.id} className="card flex items-center justify-between gap-4">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">{ev.title}</div>
-                    <div className="text-xs text-atlas-muted">{ev.kind}</div>
-                  </div>
-                  <span className="text-xs text-atlas-muted shrink-0">
-                    {ev.starts_at
-                      ? ev.all_day
-                        ? formatCalendarDate(ev.starts_at)
-                        : new Date(ev.starts_at).toLocaleString()
-                      : "—"}
-                  </span>
+      <Section title="Upcoming events">
+        {events.length ? (
+          <div className="space-y-2">
+            {events.map((ev) => (
+              <div key={ev.id} className="card flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium truncate">{ev.title}</div>
+                  <div className="text-xs text-atlas-muted">{ev.kind}</div>
                 </div>
-              ))}
-            </div>
-          ) : (
-            <Empty>Nothing on the calendar for this course.</Empty>
-          )}
-        </Section>
+                <span className="text-xs text-atlas-muted shrink-0">
+                  {ev.starts_at
+                    ? ev.all_day
+                      ? formatCalendarDate(ev.starts_at)
+                      : new Date(ev.starts_at).toLocaleString()
+                    : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Empty>Nothing on the calendar for this course.</Empty>
+        )}
+      </Section>
 
-        <Section title="Documents">
-          {documents.length > 0 && (
-            <input
-              className="input w-full mb-3"
-              placeholder="Search this course's documents…"
-              value={docQuery}
-              onChange={(e) => setDocQuery(e.target.value)}
-            />
-          )}
-          {docSearching && <div className="text-xs text-atlas-muted mb-2">Searching…</div>}
-          {(docSearchResults ?? documents).length ? (
-            <div className="space-y-2">
-              {(docSearchResults ?? documents).map((d) => (
-                <div
-                  key={d.id}
-                  className="card card-hover cursor-pointer flex items-center justify-between gap-4"
-                  onClick={() => router.push(`/documents/${d.id}`)}
-                >
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">{d.title}</div>
-                    <div className="text-xs text-atlas-muted">{d.doc_type}</div>
-                    {d.snippet && (
-                      <div className="text-xs text-atlas-muted truncate mt-0.5" title={d.snippet}>
-                        {d.snippet}
-                      </div>
-                    )}
-                  </div>
-                  {d.ingested && <Badge tone="good">indexed</Badge>}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <Empty>
-              {docSearchResults ? "No documents match your search." : "No documents uploaded for this course."}
-            </Empty>
-          )}
-        </Section>
-      </div>
+      <Section title="Files & folders">
+        <FolderPane courseId={id} />
+      </Section>
+
+      <Section title="Assistant">
+        <CourseAssistant courseId={id} courseName={course.name} />
+      </Section>
 
       <div className="grid md:grid-cols-2 gap-6">
         <Section title="Announcements">

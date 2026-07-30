@@ -5,7 +5,7 @@ from fastapi import APIRouter
 
 from app.core.crud import make_crud_router
 from app.routers import (agents, analytics, courses, dashboard, documents,
-                         knowledge, reviews, search)
+                         folders, knowledge, reviews, search)
 
 # ---- Generic CRUD resources (writable-field whitelists) ----
 _CRUD = [
@@ -66,6 +66,7 @@ for r in _CRUD:
 api_router.include_router(courses.router)
 api_router.include_router(agents.router)
 api_router.include_router(documents.router)
+api_router.include_router(folders.router)
 api_router.include_router(search.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(knowledge.router)

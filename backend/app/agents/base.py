@@ -69,6 +69,8 @@ class Agent:
         max_tokens: int = 1200,
         attachment_text: str | None = None,
         attachment_filename: str | None = None,
+        course_id: str | None = None,
+        folder_id: str | None = None,
     ) -> dict[str, Any]:
         # Run document retrieval and a web search side by side rather than
         # deciding from document-passage similarity alone whether the web is
@@ -80,7 +82,10 @@ class Agent:
         # and the model — not a similarity score — judges which one (if
         # either) actually answers the question.
         ctx, (web_results, web_search_error) = await asyncio.gather(
-            memory.build_context(user_id, user_message, include_semantic=include_semantic),
+            memory.build_context(
+                user_id, user_message, include_semantic=include_semantic,
+                course_id=course_id, folder_id=folder_id,
+            ),
             web_search.search(user_message) if include_semantic else _no_web_search(),
         )
         ctx["web_results"] = web_results

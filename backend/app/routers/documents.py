@@ -92,6 +92,7 @@ async def _extract_text_bounded(content: bytes, mime_type: str, filename: str) -
 async def _prepare_and_store(
     *, user_id: str, course_id: str | None, content: bytes, filename: str,
     content_type: str, title: str | None, enrich: bool,
+    general: bool = False, folder_id: str | None = None,
 ) -> dict:
     """(Convert images→PDF) → store to R2 → classify → record. This is *all*
     that happens before the upload response goes out — the document row is
@@ -104,10 +105,16 @@ async def _prepare_and_store(
     generates one from the document's content. ``course_id`` is optional —
     when omitted (bulk upload), the course is auto-detected from the
     student's existing classes and low-confidence guesses are flagged via
-    ``needs_review`` instead of being left unfiled. Auto-detection needs the
-    document's text, so bulk upload is the one case that still extracts text
-    synchronously here (the cron re-extracts it later for indexing — a small
-    duplicate cost, not worth a second persisted copy just to skip it).
+    ``needs_review`` instead of being left unfiled, UNLESS ``general`` is
+    set: the uploader explicitly said this doesn't belong to any class (the
+    "General" divider), so no auto-detection runs and it's filed there
+    directly. Auto-detection needs the document's text, so bulk upload is
+    the one case that still extracts text synchronously here (the cron
+    re-extracts it later for indexing — a small duplicate cost, not worth a
+    second persisted copy just to skip it). ``folder_id`` optionally places
+    the document straight into a topic/unit subfolder chosen at upload time
+    (marked ``folder_source: manual`` so the Archivist's auto-sort never
+    re-files it).
     """
     if not content:
         raise HTTPException(400, "Empty file")
@@ -141,11 +148,12 @@ async def _prepare_and_store(
     except Exception:
         storage_path = None
 
-    # Auto-detect the course when none was supplied — the only case where
-    # text has to be extracted before the response can go out.
+    # Auto-detect the course when none was supplied and the uploader didn't
+    # say this belongs to "General" — the only case where text has to be
+    # extracted before the response can go out.
     needs_review = False
     course_confidence: float | None = None
-    if not course_id:
+    if not course_id and not general:
         text = await _extract_text_bounded(content, content_type or "", filename or "")
         if not text.strip() and ocr_text.strip():
             text = ocr_text
@@ -182,6 +190,7 @@ async def _prepare_and_store(
         "storage_path": storage_path,
         "needs_review": needs_review, "course_confidence": course_confidence,
         "auto_title": auto_title, "enrich": enrich,
+        "folder_id": folder_id, "folder_source": "manual" if folder_id else None,
     })
 
     return {
@@ -277,13 +286,31 @@ async def _process_document(
 
 
 @router.get("")
-async def list_documents(course_id: str | None = None, user: CurrentUser = Depends(get_current_user)):
-    filters = {"user_id": eq(user.id)}
+async def list_documents(
+    course_id: str | None = None,
+    general: bool = False,
+    folder_id: str | None = None,
+    unfiled: bool = False,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """`general=true` lists documents with no class (the "General" divider)
+    -- mutually exclusive with `course_id`. `folder_id` further narrows to
+    one subfolder within whichever scope; `unfiled=true` instead narrows to
+    documents with no folder at all (that class's/General's own top level).
+    Pass at most one of `folder_id`/`unfiled` alongside `course_id`/`general`."""
+    filters: dict[str, str] = {"user_id": eq(user.id)}
     if course_id:
         filters["course_id"] = eq(course_id)
+    elif general:
+        filters["course_id"] = "is.null"
+    if folder_id:
+        filters["folder_id"] = eq(folder_id)
+    elif unfiled:
+        filters["folder_id"] = "is.null"
     return await supabase.select(
         "documents",
-        columns="id,title,doc_type,summary,keywords,course_id,ingested,ingest_error,size_bytes,"
+        columns="id,title,doc_type,summary,keywords,course_id,folder_id,folder_source,"
+                 "ingested,ingest_error,size_bytes,"
                  "needs_review,course_confidence,importance,metadata,created_at",
         filters=filters, order="created_at.desc", limit=200,
     )
@@ -486,19 +513,24 @@ async def extract_temp_attachment(
 @router.post("/upload", status_code=201)
 async def upload_document(
     file: UploadFile = File(...),
-    course_id: str = Form(...),
+    course_id: str | None = Form(default=None),
+    general: bool = Form(default=False),
+    folder_id: str | None = Form(default=None),
     title: str | None = Form(default=None),
     enrich: bool = Form(default=True),
     user: CurrentUser = Depends(get_current_user),
 ):
-    if not (course_id and course_id.strip()):
-        raise HTTPException(422, "A course is required for every document.")
+    course_id = course_id.strip() if course_id else None
+    if not course_id and not general:
+        raise HTTPException(422, "Pick a class, or mark this as General (not tied to a class).")
+    if course_id and general:
+        raise HTTPException(422, "Pick a class or General, not both.")
     content = await file.read()
     result = await _prepare_and_store(
         user_id=user.id, course_id=course_id, content=content,
         filename=file.filename or "document",
         content_type=file.content_type or "application/octet-stream",
-        title=title, enrich=enrich,
+        title=title, enrich=enrich, general=general, folder_id=folder_id,
     )
     return {**result, "processing": True}
 
@@ -562,6 +594,18 @@ async def update_document(
     # and `Archivist.enrich`), not get silently reverted.
     if "doc_type" in patch:
         patch["doc_type_source"] = "manual"
+    # Same idea again for folder — a student moving a document (or clearing
+    # its folder back to a class's top level) must survive the next
+    # re-enrichment's auto-sort pass (see `Archivist.enrich`).
+    if "folder_id" in patch:
+        if patch["folder_id"]:
+            owned = await supabase.select(
+                "folders", columns="id",
+                filters={"user_id": eq(user.id), "id": eq(patch["folder_id"])}, limit=1,
+            )
+            if not owned:
+                raise HTTPException(404, "Folder not found")
+        patch["folder_source"] = "manual"
     rows = await supabase.update(
         "documents", patch, filters={"user_id": eq(user.id), "id": eq(document_id)}
     )

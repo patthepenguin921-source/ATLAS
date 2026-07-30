@@ -6,6 +6,7 @@ import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Stat, Section, Empty, Loading, Badge, gradeTone } from "@/components/ui";
 import { apiGet, apiPatch, apiPost, apiDelete } from "@/lib/api";
+import { formatCalendarDate } from "@/lib/date";
 
 type CourseLevel = "regular" | "honors" | "ap" | "dual_enrollment" | "ib";
 
@@ -391,7 +392,7 @@ export default function CourseDetailPage() {
                     <div className="text-sm font-medium truncate">{a.title}</div>
                     <div className="text-xs text-atlas-muted">
                       {a.category}
-                      {a.due_date && ` · due ${new Date(a.due_date).toLocaleDateString()}`}
+                      {a.due_date && ` · due ${formatCalendarDate(a.due_date)}`}
                     </div>
                   </div>
                   <Badge tone={assignmentStatusTone(a.status) as any}>{a.status?.replace("_", " ")}</Badge>
@@ -435,9 +436,7 @@ export default function CourseDetailPage() {
               <div key={ev.id} className="card flex items-center justify-between gap-4">
                 <div className="min-w-0">
                   <div className="text-xs text-atlas-muted">
-                    {new Date(ev.starts_at).toLocaleDateString(undefined, {
-                      weekday: "long", month: "short", day: "numeric",
-                    })}
+                    {formatCalendarDate(ev.starts_at, { weekday: "long", month: "short", day: "numeric" })}
                   </div>
                   <div className="text-sm font-medium truncate">{ev.title}</div>
                 </div>
@@ -460,7 +459,11 @@ export default function CourseDetailPage() {
                     <div className="text-xs text-atlas-muted">{ev.kind}</div>
                   </div>
                   <span className="text-xs text-atlas-muted shrink-0">
-                    {ev.starts_at ? new Date(ev.starts_at).toLocaleString() : "—"}
+                    {ev.starts_at
+                      ? ev.all_day
+                        ? formatCalendarDate(ev.starts_at)
+                        : new Date(ev.starts_at).toLocaleString()
+                      : "—"}
                   </span>
                 </div>
               ))}

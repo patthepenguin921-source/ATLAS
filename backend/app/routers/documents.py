@@ -453,6 +453,36 @@ async def get_document(document_id: str, user: CurrentUser = Depends(get_current
     return doc
 
 
+# A temporary chat attachment is injected directly into the prompt as plain
+# text (no chunk/embed/rank -- it's a single one-off file read for one turn,
+# not worth that round-trip), so it needs a hard cap to keep the prompt
+# bounded regardless of how large the source file is.
+_TEMP_ATTACHMENT_CHAR_LIMIT = 12000
+
+
+@router.post("/extract-temp")
+async def extract_temp_attachment(
+    file: UploadFile = File(...), user: CurrentUser = Depends(get_current_user),
+):
+    """Extracts a file's text for one-off use as chat context -- unlike
+    `/upload`, nothing is stored (no R2 upload, no `documents` row, no
+    course). Backs the chat composer's "use for this conversation only"
+    attach option: the frontend holds the returned text client-side and
+    sends it back on the next `/agents/chat` call as `attachment_text`
+    (see `ChatRequest`) rather than this endpoint persisting anything."""
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Empty file")
+    content_type = file.content_type or "application/octet-stream"
+    filename = file.filename or "attachment"
+    if ingestion.is_image(content_type, filename):
+        text = await asyncio.to_thread(ingestion.ocr_image, content)
+    else:
+        text = await _extract_text_bounded(content, content_type, filename)
+    truncated = len(text) > _TEMP_ATTACHMENT_CHAR_LIMIT
+    return {"filename": filename, "text": text[:_TEMP_ATTACHMENT_CHAR_LIMIT], "truncated": truncated}
+
+
 @router.post("/upload", status_code=201)
 async def upload_document(
     file: UploadFile = File(...),

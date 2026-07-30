@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Stat, Section, Empty, Loading, Badge, gradeTone } from "@/components/ui";
+import { ColorPicker } from "@/components/ColorPicker";
 import { apiGet, apiPatch, apiPost, apiDelete } from "@/lib/api";
 import { formatCalendarDate } from "@/lib/date";
 
@@ -47,6 +48,7 @@ interface EditForm {
   room: string;
   teacher_id: string;
   term_id: string;
+  color: string | null;
 }
 
 export default function CourseDetailPage() {
@@ -149,6 +151,7 @@ export default function CourseDetailPage() {
       room: course.room ?? "",
       teacher_id: course.teacher_id ?? "",
       term_id: course.term_id ?? "",
+      color: course.color ?? null,
     });
     setEditing(true);
   }
@@ -364,6 +367,11 @@ export default function CourseDetailPage() {
                 onChange={(e) => setForm({ ...form, has_ap_prep_lab: e.target.checked })} />
               AP Prep Lab (year-long, 6.0 weighted)
             </label>
+          </div>
+
+          <div className="md:col-span-4">
+            <label className="label">Calendar color</label>
+            <ColorPicker courseId={id} value={form.color} onChange={(c) => setForm({ ...form, color: c })} />
           </div>
 
           <button className="btn-primary md:col-span-4">Save changes</button>

@@ -10,6 +10,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.supabase_client import eq, supabase
+from app.services.grading import ASSIGNMENT_WEIGHTS
+
+# Fallback importance guess for an assignment with no explicit minor/major
+# weight set (see ASSIGNMENT_WEIGHTS) -- once a real weight exists it always
+# wins over this category-based guess.
+_HEAVY_CATEGORIES = {"test", "exam", "project", "essay"}
 
 
 async def predicted_gpa(user_id: str, weighted: bool = True) -> float | None:
@@ -66,16 +72,31 @@ async def study_efficiency(user_id: str, *, days: int = 30) -> dict[str, Any]:
 
 
 async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
-    """Upcoming assignments most likely to hurt the grade (weight × imminence)."""
+    """Assignments most likely to hurt the grade: points x difficulty x
+    importance, divided by how much time is left to act.
+
+    Importance comes from the assignment's own minor(0.3)/major(0.7) weight
+    when the student set one (see `app.agents.tools`' add_assignment tool
+    and the manual Add Assignment form), normalized against the minor
+    weight so 0.3 -> 1x and 0.7 -> ~2.3x -- otherwise it falls back to a
+    guess from the category alone, same as before.
+
+    Already missing/late assignments are included (previously excluded
+    entirely by a `status in (not_started, in_progress)` filter, which hid
+    exactly the items already hurting the grade the most) and, along with
+    anything else whose due_date has passed, always get the maximum
+    urgency term via the same `days_left` floor used for a due-in-6-hours
+    item, rather than dividing by a negative or wildly small number.
+    """
     now = datetime.now(timezone.utc)
     soon = now + timedelta(days=10)
     rows = await supabase.select(
         "assignments",
-        columns="id,title,course_id,category,status,due_date,difficulty,points_possible,estimated_minutes",
+        columns="id,title,course_id,category,status,due_date,difficulty,"
+                 "points_possible,weight,estimated_minutes",
         filters={
             "user_id": eq(user_id),
-            "due_date": f"gte.{now.isoformat()}",
-            "status": "in.(not_started,in_progress)",
+            "status": "in.(not_started,in_progress,missing,late)",
         },
         order="due_date.asc",
         limit=50,
@@ -84,15 +105,19 @@ async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str
     for a in rows:
         due = datetime.fromisoformat(a["due_date"].replace("Z", "+00:00")) if a.get("due_date") else soon
         days_left = max(0.25, (due - now).total_seconds() / 86400.0)
-        weight = float(a.get("points_possible") or 10)
+        points = float(a.get("points_possible") or 10)
         difficulty = float(a.get("difficulty") or 3)
-        heavy = {"test", "exam", "project", "essay"}.intersection({a["category"]})
-        risk = (weight * difficulty * (2.0 if heavy else 1.0)) / days_left
+        if a.get("weight") is not None:
+            importance = float(a["weight"]) / ASSIGNMENT_WEIGHTS["minor"]
+        else:
+            importance = 2.0 if a["category"] in _HEAVY_CATEGORIES else 1.0
+        risk = (points * difficulty * importance) / days_left
         scored.append({
             **a,
             "risk_score": round(risk, 2),
             "risk_level": _risk_level(risk),
             "days_left": round(days_left, 1),
+            "overdue": a["status"] in ("missing", "late"),
         })
     scored.sort(key=lambda x: x["risk_score"], reverse=True)
     return scored[:limit]

@@ -12,6 +12,14 @@ class ChatRequest(BaseModel):
     agent: str = "general"
     conversation_id: Optional[str] = None
     include_semantic: bool = True
+    # Text already extracted client-side from a file attached via the chat
+    # composer's "use for this conversation only" option (see
+    # POST /documents/extract-temp) -- injected straight into this turn's
+    # context and never persisted server-side. A file saved via the
+    # composer's other option ("Save to Documents") instead goes through the
+    # normal POST /documents/upload flow and isn't passed here at all.
+    attachment_text: Optional[str] = None
+    attachment_filename: Optional[str] = None
 
 
 class ActionConfirmRequest(BaseModel):

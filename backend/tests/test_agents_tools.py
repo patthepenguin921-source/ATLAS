@@ -87,6 +87,28 @@ def test_add_assignment_creates_a_row_scoped_to_the_matched_course(fake_db):
     assert stored["category"] == "other"  # default when not specified
 
 
+def test_add_assignment_maps_weight_category_to_the_stored_numeric_weight(fake_db):
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "add_assignment",
+        {"title": "Unit Test", "course_name": "ap bio", "weight_category": "major"},
+    ))
+
+    assert result["status"] == "done"
+    assert result["assignment"]["weight_category"] == "major"
+    stored = fake_db.tables["assignments"][0]
+    assert stored["weight"] == 0.7
+
+
+def test_add_assignment_leaves_weight_unset_when_not_given(fake_db):
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "add_assignment", {"title": "Reading"},
+    ))
+
+    assert result["assignment"]["weight_category"] is None
+    stored = fake_db.tables["assignments"][0]
+    assert "weight" not in stored
+
+
 def test_add_assignment_requires_a_title(fake_db):
     result = asyncio.run(tools_module.execute_tool_for_chat(USER_ID, "add_assignment", {}))
 

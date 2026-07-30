@@ -6,8 +6,25 @@ import { Empty, Loading, Badge, Modal, SkeletonList } from "@/components/ui";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import { formatCalendarDate } from "@/lib/date";
 
-const CATEGORIES = ["homework", "quiz", "test", "project", "essay", "lab", "other"];
+// Must match Postgres's `assignment_category` enum (0001_extensions_and_types.sql)
+// exactly -- this list previously omitted 6 of the 13 real values (classwork,
+// exam, discussion, presentation, reading, participation), so e.g. "exam" was
+// never selectable here even though the risk calculation treats it specially.
+const CATEGORIES = [
+  "homework", "classwork", "quiz", "test", "exam", "project", "essay",
+  "lab", "discussion", "presentation", "reading", "participation", "other",
+];
 const STATUSES = ["not_started", "in_progress", "submitted", "graded", "missing"];
+
+// Matches backend/app/services/grading.py's ASSIGNMENT_WEIGHTS -- stored
+// directly in the assignment's existing `weight` column and folded into the
+// course's grade rollup (see supabase/migrations/0023_assignment_weight_grade_rollup.sql)
+// and the at-risk calculation.
+const WEIGHT_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "Not set" },
+  { value: "0.3", label: "Minor (30%)" },
+  { value: "0.7", label: "Major (70%)" },
+];
 
 const statusTone = (s: string) =>
   s === "graded" || s === "submitted" ? "good" : s === "missing" ? "bad" : "default";
@@ -23,7 +40,7 @@ export default function AssignmentsPage() {
   });
   const [form, setForm] = useState<any>({
     title: "", course_id: "", category: "homework", due_date: "", estimated_minutes: 30,
-    description: "", notes: "",
+    description: "", notes: "", weight: "",
   });
 
   async function load() {
@@ -40,9 +57,11 @@ export default function AssignmentsPage() {
     const body = { ...form };
     if (body.due_date) body.due_date = new Date(body.due_date).toISOString();
     if (!body.course_id) delete body.course_id;
+    if (body.weight) body.weight = Number(body.weight);
+    else delete body.weight;
     await apiPost("/assignments", body);
     setForm({ title: "", course_id: "", category: "homework", due_date: "", estimated_minutes: 30,
-      description: "", notes: "" });
+      description: "", notes: "", weight: "" });
     setOpen(false);
     load();
   }
@@ -80,6 +99,8 @@ export default function AssignmentsPage() {
   }
 
   const courseName = (id: string) => courses.find((c) => c.id === id)?.name ?? "—";
+  const weightLabel = (w: number | null | undefined) =>
+    w === 0.3 ? "Minor (30%)" : w === 0.7 ? "Major (70%)" : w != null ? `${Math.round(w * 100)}%` : null;
 
   return (
     <AppShell
@@ -113,6 +134,13 @@ export default function AssignmentsPage() {
             <label className="label">Due</label>
             <input className="input" type="datetime-local" value={form.due_date}
               onChange={(e) => setForm({ ...form, due_date: e.target.value })} />
+          </div>
+          <div>
+            <label className="label">Weight</label>
+            <select className="input" value={form.weight}
+              onChange={(e) => setForm({ ...form, weight: e.target.value })}>
+              {WEIGHT_OPTIONS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
+            </select>
           </div>
           <div className="md:col-span-5">
             <label className="label">Details & instructions</label>
@@ -150,6 +178,7 @@ export default function AssignmentsPage() {
               </div>
               <div className="text-xs text-atlas-muted">
                 {courseName(a.course_id)} · {a.category}
+                {weightLabel(a.weight) && ` · ${weightLabel(a.weight)}`}
                 {a.due_date && ` · due ${formatCalendarDate(a.due_date)}`}
               </div>
             </div>
@@ -252,6 +281,7 @@ export default function AssignmentsPage() {
 
             <div className="flex flex-wrap gap-4 text-xs text-atlas-muted pt-1">
               {selected.points_possible != null && <span>Points: {selected.points_possible}</span>}
+              {weightLabel(selected.weight) && <span>Weight: {weightLabel(selected.weight)}</span>}
               {selected.estimated_minutes != null && <span>Est. {selected.estimated_minutes} min</span>}
               {selected.difficulty != null && <span>Difficulty {selected.difficulty}/5</span>}
             </div>

@@ -16,7 +16,18 @@ export type Msg = {
    *  hasn't performed yet -- see app.agents.tools. Cleared once confirmed
    *  or dismissed so the button can't be clicked twice. */
   pendingAction?: PendingAction | null;
+  /** Name of a file attached "for this conversation only" on this turn --
+   *  display only, the extracted text already went to the backend as part
+   *  of the request that produced this message. */
+  attachmentName?: string | null;
 };
+
+/** A file attached via the composer's "use for this conversation only"
+ *  option -- its extracted text rides along on the next `send()` call and
+ *  is never persisted server-side (see POST /documents/extract-temp). A
+ *  file saved via the composer's other option ("Save to Documents") never
+ *  becomes one of these; it's a plain, independent upload. */
+export type PendingAttachment = { filename: string; text: string; truncated: boolean };
 
 export const AGENTS = [
   { id: "general", label: "Atlas", blurb: "Coordinates everything" },
@@ -32,10 +43,12 @@ export function useChat(onNewConversation?: () => void) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [conv, setConv] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [attachment, setAttachment] = useState<PendingAttachment | null>(null);
 
   function reset() {
     setConv(null);
     setMessages([]);
+    setAttachment(null);
   }
 
   async function openConversation(id: string, fallbackAgent = "general") {
@@ -57,11 +70,16 @@ export function useChat(onNewConversation?: () => void) {
   async function send(text: string) {
     const message = text.trim();
     if (!message || busy) return;
-    setMessages((m) => [...m, { role: "user", content: message }]);
+    const pending = attachment;
+    setAttachment(null);
+    setMessages((m) => [...m, { role: "user", content: message, attachmentName: pending?.filename ?? null }]);
     setBusy(true);
     try {
       const isNew = !conv;
-      const r = await apiPost("/agents/chat", { message, agent, conversation_id: conv });
+      const r = await apiPost("/agents/chat", {
+        message, agent, conversation_id: conv,
+        attachment_text: pending?.text, attachment_filename: pending?.filename,
+      });
       setConv(r.conversation_id);
       setMessages((m) => [...m, { role: "assistant", content: r.reply, pendingAction: r.pending_action ?? null }]);
       if (isNew) onNewConversation?.();
@@ -98,5 +116,6 @@ export function useChat(onNewConversation?: () => void) {
 
   return {
     agent, setAgent, messages, conv, busy, reset, openConversation, send, confirmAction, dismissAction,
+    attachment, setAttachment,
   };
 }

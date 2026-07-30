@@ -50,8 +50,23 @@ DOCUMENT:
         update: dict[str, Any] = {
             "summary": data.get("summary"),
             "keywords": data.get("keywords", []),
-            "doc_type": data.get("doc_type", "other"),
         }
+        # Used below to avoid clobbering a student's own manual choices, or a
+        # `glance` tag this pipeline already set with certainty (see
+        # `schedule_extraction._tag_as_glance`) — fetched once upfront rather
+        # than as two separate round trips.
+        existing = await supabase.select(
+            "documents", columns="importance_source,doc_type_source",
+            filters={"id": eq(document_id)}, limit=1,
+        )
+        existing_row = existing[0] if existing else {}
+
+        # Only ever guess `doc_type` here when it's still AI-sourced or has
+        # never been set — never overrides a manual re-tag or a `system`-set
+        # `glance` tag.
+        if existing_row.get("doc_type_source") not in ("manual", "system"):
+            update["doc_type"] = data.get("doc_type", "other")
+            update["doc_type_source"] = "ai"
         title = (data.get("title") or "").strip()
         # Only override the stored title when the uploader didn't give a real
         # one (a filename-derived placeholder gets replaced by the AI title).
@@ -63,11 +78,7 @@ DOCUMENT:
             # Never override a student's own manual rating (see
             # `update_document`'s `importance_source` handling) — only ever
             # set it here when it's still AI-sourced or has never been set.
-            existing = await supabase.select(
-                "documents", columns="importance_source",
-                filters={"id": eq(document_id)}, limit=1,
-            )
-            if not existing or existing[0].get("importance_source") != "manual":
+            if existing_row.get("importance_source") != "manual":
                 update["importance"] = importance
                 update["importance_source"] = "ai"
 

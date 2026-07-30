@@ -48,3 +48,33 @@ async def dashboard(user: CurrentUser = Depends(get_current_user)):
         "announcements": announcements,
         "daily_plan": plan_rows[0] if plan_rows else None,
     }
+
+
+@router.get("/calendar-range")
+async def calendar_range(
+    start: str, end: str, user: CurrentUser = Depends(get_current_user),
+):
+    """Every class-schedule day, other calendar event, and assignment due
+    date in [start, end) across every course -- the data behind the
+    traditional month/week calendar view (`/calendar` in the frontend).
+    `start`/`end` are plain YYYY-MM-DD dates; `end` is exclusive so a caller
+    can pass the first day of the *next* period without double-counting it.
+
+    Kept separate from the main `/dashboard` call above: that one only ever
+    looks from today forward (the daily briefing), while a calendar view
+    needs an arbitrary range as the student navigates month to month."""
+    events = await supabase.select(
+        "calendar_events",
+        columns="id,title,description,starts_at,ends_at,all_day,kind,course_id",
+        filters={"user_id": eq(user.id), "starts_at": f"gte.{start}",
+                 "and": f"(starts_at.lt.{end})"},
+        order="starts_at.asc", limit=1000,
+    ) or []
+    assignments = await supabase.select(
+        "assignments",
+        columns="id,title,category,due_date,course_id,status",
+        filters={"user_id": eq(user.id), "due_date": f"gte.{start}",
+                 "and": f"(due_date.lt.{end})"},
+        order="due_date.asc", limit=1000,
+    ) or []
+    return {"events": events, "assignments": assignments}

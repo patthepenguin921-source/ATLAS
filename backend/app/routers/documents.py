@@ -22,6 +22,7 @@ anymore.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -33,6 +34,8 @@ from app.config import settings
 from app.core.r2_client import r2, safe_object_name
 from app.core.security import CurrentUser, check_cron_secret, get_current_user
 from app.core.supabase_client import eq, supabase
+from app.integrations import google_files
+from app.integrations.schoology import SchoologyProvider
 from app.schemas import DocumentPatchRequest, DriveImportRequest, IngestTextRequest
 from app.services import ingestion, storage_cleanup
 from app.services.schedule_extraction import apply_schedule_from_doc, is_glance
@@ -329,6 +332,91 @@ async def process_document_now(document_id: str, user: CurrentUser = Depends(get
     return rows[0] if rows else {"id": document_id}
 
 
+@router.post("/{document_id}/resync")
+async def resync_document(document_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Re-fetch and reprocess one document from its live source, without
+    running a full Schoology sync -- for when a single "at a glance" doc or
+    syllabus gets edited mid-unit and a student doesn't want to wait for the
+    next scheduled sync (or trigger a full one) just to pick that up.
+
+    Only works for a document Atlas can refetch directly on its own: one
+    Schoology linked to a Google Doc/Slides/Sheet (`metadata.source_url`,
+    set by the materials sync — see `app.integrations.schoology`). A raw
+    Schoology-hosted attachment has no stable URL Atlas can fetch outside an
+    authenticated scraper session, so those still need a full sync; this
+    endpoint says so explicitly rather than silently doing nothing.
+    """
+    rows = await supabase.select(
+        "documents", columns="id,user_id,course_id,title,metadata,auto_title",
+        filters={"user_id": eq(user.id), "id": eq(document_id)}, limit=1,
+    )
+    if not rows:
+        raise HTTPException(404, "Not found")
+    doc = rows[0]
+    metadata = doc.get("metadata") or {}
+    source_url = metadata.get("source_url")
+    ref = google_files.parse_google_url(source_url) if source_url else None
+    if not ref:
+        raise HTTPException(
+            422,
+            "Atlas can't re-fetch this document directly (it isn't linked to a Google "
+            "Doc/Slides/Sheet) — run a full Schoology sync to refresh it instead.",
+        )
+
+    access_token = await SchoologyProvider().google_token_for_resync(user.id)
+    if not access_token:
+        raise HTTPException(
+            422, "Connect Google Drive (from Integrations) to let Atlas re-fetch this document.",
+        )
+
+    try:
+        content, filename, content_type = await google_files.download_google_file(
+            ref, access_token, name=doc.get("title") or "document",
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Couldn't re-fetch the document: {e}")
+
+    content_hash = hashlib.sha256(content).hexdigest()
+    if content_hash == metadata.get("content_hash"):
+        return {"id": document_id, "changed": False}
+
+    text = await _extract_text_bounded(content, content_type, filename)
+
+    storage_path = f"{user.id}/{document_id}/{safe_object_name(filename)}"
+    update: dict = {"metadata": {**metadata, "content_hash": content_hash}}
+    try:
+        await r2.upload(storage_path, content, content_type or "application/octet-stream")
+        update.update({"storage_path": storage_path, "mime_type": content_type, "size_bytes": len(content)})
+    except Exception:
+        pass  # best-effort, same as every other storage step in this pipeline
+    await supabase.update("documents", update, filters={"id": eq(document_id)})
+
+    try:
+        await ingestion.ingest_document(document_id, user.id, text)
+    except Exception as e:  # noqa: BLE001
+        await supabase.update(
+            "documents", {"ingested": False, "ingest_error": str(e)[:500]},
+            filters={"id": eq(document_id)},
+        )
+        return {"id": document_id, "changed": True, "ingest_error": str(e)[:500]}
+
+    await Archivist().enrich_or_fallback(
+        user.id, document_id, text, rename_untitled=doc.get("auto_title", False), fallback_title=doc.get("title"),
+    )
+
+    course_id = doc.get("course_id")
+    if course_id and text.strip() and is_glance(title=doc.get("title"), text=text):
+        try:
+            await apply_schedule_from_doc(
+                user_id=user.id, course_id=course_id, title=doc.get("title") or filename,
+                text=text, source="schoology", source_document_id=document_id,
+            )
+        except Exception:
+            pass  # best-effort, same as the sync path this mirrors
+
+    return {"id": document_id, "changed": True}
+
+
 @router.get("/{document_id}")
 async def get_document(document_id: str, user: CurrentUser = Depends(get_current_user)):
     rows = await supabase.select(
@@ -406,8 +494,8 @@ async def update_document(
     document_id: str, body: DocumentPatchRequest, user: CurrentUser = Depends(get_current_user),
 ):
     """Used by the bulk-upload review screen to correct an auto-detected
-    course, and by the documents page to rename a document or override its
-    importance rating."""
+    course, and by the documents page to rename a document, re-tag its type,
+    or override its importance rating."""
     patch = body.model_dump(exclude_unset=True)
     if not patch:
         raise HTTPException(400, "No fields to update.")
@@ -419,6 +507,11 @@ async def update_document(
     # re-enrichment (see Archivist.enrich) never quietly overwrites it.
     if "importance" in patch:
         patch["importance_source"] = "manual"
+    # Same idea for doc_type — a manual re-tag must survive the next
+    # re-enrichment/glance re-sync (see `schedule_extraction._tag_as_glance`
+    # and `Archivist.enrich`), not get silently reverted.
+    if "doc_type" in patch:
+        patch["doc_type_source"] = "manual"
     rows = await supabase.update(
         "documents", patch, filters={"user_id": eq(user.id), "id": eq(document_id)}
     )

@@ -61,15 +61,22 @@ class IngestTextRequest(BaseModel):
     enrich: bool = True
 
 
+_DOC_TYPES = Literal[
+    "pdf", "powerpoint", "notes", "announcement", "study_guide", "essay",
+    "practice_problems", "rubric", "personal_note", "email", "image", "glance", "other",
+]
+
+
 class DocumentPatchRequest(BaseModel):
     """Used by the bulk-upload review screen to correct an auto-detected
-    course, and by the documents page to re-title a document or override
-    its importance rating."""
+    course, and by the documents page to re-title a document, re-tag its
+    type, or override its importance rating."""
 
     course_id: Optional[str] = None
     title: Optional[str] = None
     needs_review: Optional[bool] = None
     importance: Optional[Literal["low", "normal", "high"]] = None
+    doc_type: Optional[_DOC_TYPES] = None
 
 
 # ---- Courses ----

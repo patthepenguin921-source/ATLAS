@@ -373,6 +373,31 @@ async def _purge_orphaned_glance_rows(
                 report["errors"].append(f"couldn't clean up orphaned {table} rows: {e}")
 
 
+async def _tag_as_glance(document_id: str) -> None:
+    """Force a schedule ("at a glance") document's own `doc_type` to
+    `glance` instead of whatever the general Archivist enrichment pass
+    separately guessed from the content alone (commonly `study_guide` --
+    a reasonable guess, but wrong: by the time this runs, Atlas already
+    knows for certain this is a schedule document, so it shouldn't need to
+    guess at all). Never overwrites a student's own manual re-tag from the
+    documents page -- `doc_type_source` mirrors `importance_source`
+    (see `app.routers.documents.update_document`): only ever set
+    automatically here when it's still AI/system-sourced or unset."""
+    try:
+        rows = await supabase.select(
+            "documents", columns="doc_type_source",
+            filters={"id": eq(document_id)}, limit=1,
+        )
+        if rows and rows[0].get("doc_type_source") == "manual":
+            return
+        await supabase.update(
+            "documents", {"doc_type": "glance", "doc_type_source": "system"},
+            filters={"id": eq(document_id)},
+        )
+    except Exception:  # noqa: BLE001
+        pass  # best-effort, same as the rest of this pipeline
+
+
 async def _record_glance_date_range(source_document_id: str, dates: list[str]) -> None:
     """Persist the span of dates this document's latest successful
     extraction actually covered, so `glance_still_relevant` can tell once
@@ -434,6 +459,8 @@ async def apply_schedule_from_doc(
     when this run found nothing at all, so a transient LLM failure can
     never be mistaken for "the document now has zero days" and wipe out
     everything a previous, successful run saved."""
+    if source_document_id:
+        await _tag_as_glance(source_document_id)
     days = await extract_schedule_from_text(title, text, report=report)
     existing_assignments = await supabase.select(
         "assignments", columns="external_id,title",

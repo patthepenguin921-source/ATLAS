@@ -17,12 +17,31 @@ import json
 import re
 from typing import Any, Awaitable, Callable
 
+import anthropic
 import httpx
 from anthropic import AsyncAnthropic
 
 from app.config import settings
 
 _anthropic_client: AsyncAnthropic | None = None
+
+
+class LLMError(RuntimeError):
+    """An upstream LLM provider (Groq or Anthropic) call failed -- most
+    commonly a 429 from Groq's free tier or a Claude rate/overload error.
+    Raised instead of letting the provider SDK/httpx exception propagate
+    unhandled, so `app.main`'s exception handler (mirroring `SupabaseError`/
+    `R2Error`) can turn it into a real JSON response that still carries CORS
+    headers. An exception with no registered handler is caught by Starlette's
+    outermost ServerErrorMiddleware, which sits *outside* CORSMiddleware --
+    the resulting 500 has no Access-Control-Allow-Origin header, so the
+    browser reports it to the caller as a generic "Failed to fetch" network
+    error instead of a readable rate-limit message."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(f"LLM provider error {status}: {detail}")
+        self.status = status
+        self.detail = detail
 
 
 def _get_anthropic_client() -> AsyncAnthropic:
@@ -61,13 +80,18 @@ async def _complete_anthropic(
 ) -> str:
     client = _get_anthropic_client()
     chosen = model or (settings.atlas_claude_fast_model if fast else settings.atlas_claude_model)
-    resp = await client.messages.create(
-        model=chosen,
-        system=system,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    try:
+        resp = await client.messages.create(
+            model=chosen,
+            system=system,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    except anthropic.APIStatusError as exc:
+        raise LLMError(exc.status_code, str(exc)) from exc
+    except anthropic.APIConnectionError as exc:
+        raise LLMError(503, str(exc)) from exc
     return "".join(block.text for block in resp.content if block.type == "text").strip()
 
 
@@ -89,7 +113,10 @@ async def _complete_groq(
                 "temperature": temperature,
             },
         )
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise LLMError(r.status_code, r.text) from exc
         return r.json()["choices"][0]["message"]["content"].strip()
 
 
@@ -207,10 +234,15 @@ async def _agentic_anthropic(
     calls_made: list[dict[str, Any]] = []
     text = ""
     for _ in range(_MAX_TOOL_ROUNDS):
-        resp = await client.messages.create(
-            model=chosen, system=system, messages=convo,
-            tools=anthropic_tools, max_tokens=max_tokens, temperature=temperature,
-        )
+        try:
+            resp = await client.messages.create(
+                model=chosen, system=system, messages=convo,
+                tools=anthropic_tools, max_tokens=max_tokens, temperature=temperature,
+            )
+        except anthropic.APIStatusError as exc:
+            raise LLMError(exc.status_code, str(exc)) from exc
+        except anthropic.APIConnectionError as exc:
+            raise LLMError(503, str(exc)) from exc
         text = "".join(b.text for b in resp.content if b.type == "text").strip()
         tool_uses = [b for b in resp.content if b.type == "tool_use"]
         if not tool_uses:
@@ -253,7 +285,10 @@ async def _agentic_groq(
                     "max_tokens": max_tokens, "temperature": temperature,
                 },
             )
-            r.raise_for_status()
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise LLMError(r.status_code, r.text) from exc
             message = r.json()["choices"][0]["message"]
             text = (message.get("content") or "").strip()
             tool_calls = message.get("tool_calls") or []

@@ -38,17 +38,34 @@ class Settings(BaseSettings):
     r2_secret_access_key: str = ""
 
     # ---- Reasoning engine (pluggable provider) ----
-    atlas_llm_provider: str = "groq"          # groq (free) | anthropic (paid, higher quality)
+    atlas_llm_provider: str = "groq"          # groq | gemini (both free) | anthropic (paid, higher quality)
 
     # Groq — free tier, default
     groq_api_key: str = ""
     atlas_groq_model: str = "llama-3.3-70b-versatile"
     atlas_groq_fast_model: str = "llama-3.1-8b-instant"
 
-    # Anthropic / Claude — optional upgrade path
+    # Google Gemini — also free (Google AI Studio, https://aistudio.google.com/apikey),
+    # with materially higher free-tier rate limits than Groq's and generally
+    # stronger reasoning than Llama 3.3 70B. Set ATLAS_LLM_PROVIDER=gemini to use
+    # it as the primary provider, or just set GEMINI_API_KEY to enable it as the
+    # automatic fallback below without switching the primary.
+    gemini_api_key: str = ""
+    atlas_gemini_model: str = "gemini-2.5-flash"
+    atlas_gemini_fast_model: str = "gemini-2.5-flash-lite"
+
+    # Anthropic / Claude — optional paid upgrade path
     anthropic_api_key: str = ""
     atlas_claude_model: str = "claude-opus-4-8"
     atlas_claude_fast_model: str = "claude-haiku-4-5-20251001"
+
+    # If the primary provider above returns a rate-limit (HTTP 429), retry the
+    # same call once against this provider instead of failing the chat turn --
+    # e.g. default groq primary + gemini fallback means a request only fails
+    # if *both* free tiers are exhausted at once. Empty disables fallback.
+    # No-ops automatically if this equals the primary provider or has no
+    # credentials configured.
+    atlas_llm_fallback_provider: str = "gemini"
 
     # ---- Web search (optional fallback when the student's own data has nothing) ----
     tavily_api_key: str = ""
@@ -120,9 +137,13 @@ class Settings(BaseSettings):
 
     @property
     def has_llm(self) -> bool:
-        if self.atlas_llm_provider == "anthropic":
-            return bool(self.anthropic_api_key)
-        return bool(self.groq_api_key)
+        return bool(self._llm_credential(self.atlas_llm_provider))
+
+    def _llm_credential(self, provider: str) -> str:
+        return {
+            "anthropic": self.anthropic_api_key,
+            "gemini": self.gemini_api_key,
+        }.get(provider, self.groq_api_key)
 
     @property
     def has_web_search(self) -> bool:

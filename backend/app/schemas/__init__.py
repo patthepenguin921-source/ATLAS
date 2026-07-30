@@ -12,6 +12,15 @@ class ChatRequest(BaseModel):
     agent: str = "general"
     conversation_id: Optional[str] = None
     include_semantic: bool = True
+    # Set by the assistant embedded on a course page (see FolderPane /
+    # useChat's `courseId`) so retrieval + the "currently focused on" note
+    # in the rendered context are scoped to that one class instead of the
+    # student's whole academic record. None everywhere else (the floating
+    # chat, the full Ask Atlas page) -- same global behavior as before.
+    course_id: Optional[str] = None
+    # Further narrows to one folder within that course (or within
+    # "General") -- optional, only meaningful alongside course_id.
+    folder_id: Optional[str] = None
     # Text already extracted client-side from a file attached via the chat
     # composer's "use for this conversation only" option (see
     # POST /documents/extract-temp) -- injected straight into this turn's
@@ -89,13 +98,41 @@ _DOC_TYPES = Literal[
 class DocumentPatchRequest(BaseModel):
     """Used by the bulk-upload review screen to correct an auto-detected
     course, and by the documents page to re-title a document, re-tag its
-    type, or override its importance rating."""
+    type, move it to a different folder, or override its importance
+    rating."""
 
     course_id: Optional[str] = None
     title: Optional[str] = None
     needs_review: Optional[bool] = None
     importance: Optional[Literal["low", "normal", "high"]] = None
     doc_type: Optional[_DOC_TYPES] = None
+    # Moving a document into (or out of, via null) a subfolder. Setting this
+    # always marks `folder_source: manual` server-side (see
+    # POST /documents/{id}) so the Archivist's auto-sort never re-files a
+    # document a student has already moved themselves.
+    folder_id: Optional[str] = None
+
+
+# ---- Folders ----
+class FolderCreateRequest(BaseModel):
+    """A new folder/divider — either at a class's top level (``course_id``
+    set, no ``parent_folder_id``), inside "General" (neither set), or as a
+    subfolder of an existing folder (``parent_folder_id`` set — its scope,
+    course or General, is inherited from that parent; any ``course_id``
+    passed alongside a parent is ignored)."""
+
+    name: str
+    course_id: Optional[str] = None
+    parent_folder_id: Optional[str] = None
+
+
+class FolderPatchRequest(BaseModel):
+    """Rename, reorder, or move a folder to a different parent within the
+    same class/General scope."""
+
+    name: Optional[str] = None
+    parent_folder_id: Optional[str] = None
+    sort_order: Optional[int] = None
 
 
 # ---- Courses ----

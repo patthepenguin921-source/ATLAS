@@ -4,10 +4,15 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Empty, Badge, Modal, SkeletonList, ActionMenu } from "@/components/ui";
+import { FolderPane } from "@/components/FolderPane";
 import { apiGet, apiUpload, apiPost, apiPatch, apiDelete, API_BASE } from "@/lib/api";
 import { pickFromDrive, driveConfigured } from "@/lib/googleDrive";
 
 const ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
+
+// Sentinel course-select value meaning "General" (not tied to any class) --
+// distinct from "" (nothing picked yet), which still blocks upload.
+const GENERAL = "__general__";
 
 const IMPORTANCE_LABEL: Record<string, string> = { low: "Low", normal: "Normal", high: "High" };
 
@@ -59,6 +64,10 @@ export default function DocumentsPage() {
   const [bulkPct, setBulkPct] = useState<number | null>(null);
   const [review, setReview] = useState<BulkResult[] | null>(null);
   const [reviewChoice, setReviewChoice] = useState<Record<string, string>>({});
+  // Which divider is showing below: "all" is the flat, everything-at-once
+  // list (the original behavior); otherwise a class id or "general" shows
+  // that divider's own folder tree via FolderPane.
+  const [divider, setDivider] = useState<string>("all");
 
   async function load() {
     const [d, c] = await Promise.all([apiGet("/documents"), apiGet("/courses")]);
@@ -99,7 +108,7 @@ export default function DocumentsPage() {
 
   function requireCourse(): boolean {
     if (!courseId) {
-      setStatus({ ok: false, text: "Pick a course first — every document must be filed under a class." });
+      setStatus({ ok: false, text: "Pick a class first, or choose General if it doesn't belong to one." });
       return false;
     }
     return true;
@@ -124,7 +133,8 @@ export default function DocumentsPage() {
     try {
       const form = new FormData();
       form.append("file", file);
-      form.append("course_id", courseId);
+      if (courseId === GENERAL) form.append("general", "true");
+      else form.append("course_id", courseId);
       const result = await apiUpload("/documents/upload", form, setUploadPct);
       if (result?.id) triggerProcessing(result.id);
       setStatus({
@@ -143,6 +153,10 @@ export default function DocumentsPage() {
 
   async function importDrive() {
     if (!requireCourse()) return;
+    if (courseId === GENERAL) {
+      setStatus({ ok: false, text: "Drive import needs a specific class — General isn't supported for it yet." });
+      return;
+    }
     setDriveBusy(true);
     setStatus(null);
     try {
@@ -259,7 +273,7 @@ export default function DocumentsPage() {
     }
   }
 
-  const courseName = (id: string) => courses.find((c) => c.id === id)?.name ?? "—";
+  const courseName = (id: string | null) => (id ? courses.find((c) => c.id === id)?.name ?? "—" : "General");
   // Completed classes (Schoology flips `is_active` false once a grading
   // period ends) shouldn't be offered as a destination for new files —
   // existing documents already filed under one still show up fine via
@@ -305,6 +319,7 @@ export default function DocumentsPage() {
             >
               <option value="">Select a class…</option>
               {activeCourses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              <option value={GENERAL}>General (not a specific class)</option>
             </select>
           </div>
           <div>
@@ -363,6 +378,36 @@ export default function DocumentsPage() {
 
       {!docs && <SkeletonList rows={3} />}
       {docs && !docs.length && <Empty>No documents yet. Upload your first file.</Empty>}
+
+      {docs && docs.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          <button
+            className={`pill ${divider === "all" ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+            onClick={() => setDivider("all")}
+          >
+            All
+          </button>
+          {activeCourses.map((c) => (
+            <button
+              key={c.id}
+              className={`pill ${divider === c.id ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+              onClick={() => setDivider(c.id)}
+            >
+              {c.name}
+            </button>
+          ))}
+          <button
+            className={`pill ${divider === "general" ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+            onClick={() => setDivider("general")}
+          >
+            General
+          </button>
+        </div>
+      )}
+
+      {divider !== "all" ? (
+        <FolderPane courseId={divider === "general" ? null : divider} />
+      ) : (
       <div className="space-y-2">
         {docs?.map((d) => (
           <div
@@ -448,6 +493,7 @@ export default function DocumentsPage() {
           </div>
         ))}
       </div>
+      )}
 
       <Modal
         open={!!review?.length}

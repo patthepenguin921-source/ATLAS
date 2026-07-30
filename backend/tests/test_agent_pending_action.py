@@ -15,7 +15,9 @@ USER_ID = "user-1"
 
 
 def _install_context(monkeypatch):
-    async def _fake_build_context(user_id, message, *, include_semantic=True):
+    async def _fake_build_context(
+        user_id, message, *, include_semantic=True, course_id=None, folder_id=None,
+    ):
         return {"courses": [], "upcoming": [], "relevant_passages": []}
 
     async def _fake_search(query):

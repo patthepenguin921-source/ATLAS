@@ -8,6 +8,7 @@ from app.config import settings
 from app.core.supabase_client import eq, supabase
 from app.embeddings.embedder import embed_text
 from app.llm import claude
+from app.services.folders import find_or_create_folder, top_level_folders
 
 
 class Archivist(Agent):
@@ -56,7 +57,7 @@ DOCUMENT:
         # `schedule_extraction._tag_as_glance`) — fetched once upfront rather
         # than as two separate round trips.
         existing = await supabase.select(
-            "documents", columns="importance_source,doc_type_source",
+            "documents", columns="importance_source,doc_type_source,folder_source,course_id",
             filters={"id": eq(document_id)}, limit=1,
         )
         existing_row = existing[0] if existing else {}
@@ -81,6 +82,28 @@ DOCUMENT:
             if existing_row.get("importance_source") != "manual":
                 update["importance"] = importance
                 update["importance_source"] = "ai"
+
+        # Auto-file into a topic/unit folder within the document's class (or
+        # within "General" for a document with no class) — never when a
+        # student already moved it themselves (see `folder_source`, same
+        # override-survives-re-enrichment idiom as doc_type/importance
+        # above). Reuses an existing folder by name when one fits; only
+        # invents a new one when nothing does — see `classify_folder`.
+        if existing_row.get("folder_source") != "manual":
+            course_id = existing_row.get("course_id")
+            candidates, parent_folder_id = await top_level_folders(user_id, course_id=course_id)
+            try:
+                guess = await self.classify_folder(excerpt[:6000], candidates)
+            except Exception:
+                guess = {"folder_name": None}
+            folder_name = guess.get("folder_name")
+            if folder_name:
+                folder_id = await find_or_create_folder(
+                    user_id, folder_name, course_id=course_id, parent_folder_id=parent_folder_id,
+                )
+                if folder_id:
+                    update["folder_id"] = folder_id
+                    update["folder_source"] = "ai"
 
         await supabase.update(
             "documents", update, filters={"id": eq(document_id)}
@@ -168,6 +191,37 @@ DOCUMENT EXCERPT:
             except (TypeError, ValueError):
                 confidence = 0.0
         return {"course_id": course_id, "confidence": max(0.0, min(1.0, confidence))}
+
+    async def classify_folder(
+        self, excerpt: str, folders: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Suggest a topic/unit folder for a document, within its class (or
+        General, for a document with no class) — reusing an existing folder
+        by name when one fits, inventing a short new one otherwise. Unlike
+        `classify_course`, this never forces a guess: a document with no
+        clear topic just stays at the class's top level (`folder_name: null`)
+        rather than being crammed into an unrelated folder.
+        """
+        names = [f["name"] for f in folders]
+        prompt = f"""\
+A student's document needs a topic/unit folder within one of their classes
+(or a general "not tied to a class" area). Suggest ONE short folder name for
+it — reuse one of the EXISTING FOLDERS below if it clearly fits, or invent a
+short new topic/unit name (e.g. "Unit 3 - Cell Biology", "Homework", "Study
+guides", "Labs") if none of them do. If the document doesn't clearly belong
+to any particular topic, return null instead of forcing a fit.
+
+Return JSON: {{"folder_name": "<name>" | null}}
+
+EXISTING FOLDERS: {names}
+
+DOCUMENT EXCERPT:
+{excerpt}"""
+        data = await claude.complete_json(
+            system=self.persona, prompt=prompt, max_tokens=150, fast=True
+        )
+        name = (data.get("folder_name") or "").strip()
+        return {"folder_name": name or None}
 
     async def _upsert_concept(self, user_id: str, concept: dict[str, Any]) -> str | None:
         name = (concept.get("name") or "").strip()

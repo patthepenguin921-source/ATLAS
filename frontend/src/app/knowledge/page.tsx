@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 import { DailyPlanCard } from "@/components/DailyPlanCard";
-import { Empty, Loading, Badge, Section, gradeTone } from "@/components/ui";
+import { Empty, Badge, Section, SkeletonGrid, SkeletonList, gradeTone } from "@/components/ui";
 import { apiGet, apiPost, apiPut } from "@/lib/api";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -18,12 +18,16 @@ type Tab = (typeof TABS)[number]["id"];
 
 function TabBar({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5 mb-6">
+    <div className="flex flex-wrap gap-1.5 mb-6 border-b border-atlas-border">
       {TABS.map((t) => (
         <button
           key={t.id}
-          className={`pill ${tab === t.id ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
           onClick={() => onChange(t.id)}
+          className={`px-4 py-2.5 -mb-px text-sm font-medium border-b-2 transition-colors ${
+            tab === t.id
+              ? "border-atlas-accent text-atlas-text"
+              : "border-transparent text-atlas-muted hover:text-atlas-text hover:border-atlas-border"
+          }`}
         >
           {t.label}
         </button>
@@ -37,12 +41,18 @@ function TabBar({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
  *  nothing others). Read by the Planner instead of a flat guess. */
 function AvailabilityEditor() {
   const [minutes, setMinutes] = useState<number[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
   async function load() {
-    const a = await apiGet("/study-availability");
-    setMinutes(Array.from({ length: 7 }, (_, d) => Number(a?.[d] ?? 60)));
+    try {
+      const a = await apiGet("/study-availability");
+      setMinutes(Array.from({ length: 7 }, (_, d) => Number(a?.[d] ?? 60)));
+      setLoadError(null);
+    } catch (e: any) {
+      setLoadError(e.message);
+    }
   }
   useEffect(() => {
     load();
@@ -66,7 +76,16 @@ function AvailabilityEditor() {
     }
   }
 
-  if (!minutes) return <Loading />;
+  if (loadError && !minutes) {
+    return (
+      <div className="card border-atlas-bad/40 text-sm">
+        <div className="font-medium text-atlas-bad">Couldn't load your schedule</div>
+        <div className="text-atlas-muted mt-1">{loadError}</div>
+        <button className="btn-ghost text-xs mt-2" onClick={() => load()}>Retry</button>
+      </div>
+    );
+  }
+  if (!minutes) return <SkeletonList rows={1} />;
 
   return (
     <div className="card">
@@ -142,7 +161,7 @@ function TodayTab() {
           </button>
         }
       >
-        {!loaded && <Loading />}
+        {!loaded && <SkeletonList rows={2} />}
         {loaded && !plan && (
           <Empty>No plan for today yet -- generate one above, grounded in your real assignments and the time you set.</Empty>
         )}
@@ -374,12 +393,19 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
   const [message, setMessage] = useState<string | null>(null);
 
   const [deck, setDeck] = useState<any[] | null>(null);
+  const [deckError, setDeckError] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
 
   async function loadDeck() {
-    const q = await apiGet("/flashcards/review-queue");
-    setDeck(q ?? []);
+    try {
+      const q = await apiGet("/flashcards/review-queue");
+      setDeck(q ?? []);
+      setDeckError(null);
+    } catch (e: any) {
+      setDeckError(e.message);
+      return;
+    }
     setIndex(0);
     setFlipped(false);
   }
@@ -492,7 +518,14 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
       </Section>
 
       <Section title={`Review${deck ? ` (${deck.length} due)` : ""}`}>
-        {!deck && <Loading />}
+        {!deck && !deckError && <SkeletonList rows={1} />}
+        {deckError && !deck && (
+          <div className="card border-atlas-bad/40 text-sm">
+            <div className="font-medium text-atlas-bad">Couldn't load your review deck</div>
+            <div className="text-atlas-muted mt-1">{deckError}</div>
+            <button className="btn-ghost text-xs mt-2" onClick={() => loadDeck()}>Retry</button>
+          </div>
+        )}
         {deck && !deck.length && <Empty>Nothing due for review right now.</Empty>}
         {current && (
           <div className="card">
@@ -535,14 +568,20 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
 function ReviewMasteryTab() {
   const [model, setModel] = useState<any[] | null>(null);
   const [queue, setQueue] = useState<any[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   async function load() {
-    const [m, q] = await Promise.all([
-      apiGet("/knowledge/model"),
-      apiGet("/knowledge/review-queue"),
-    ]);
-    setModel(m);
-    setQueue(q);
+    try {
+      const [m, q] = await Promise.all([
+        apiGet("/knowledge/model"),
+        apiGet("/knowledge/review-queue"),
+      ]);
+      setModel(m);
+      setQueue(q);
+      setLoadError(null);
+    } catch (e: any) {
+      setLoadError(e.message);
+    }
   }
   useEffect(() => {
     load();
@@ -588,7 +627,14 @@ function ReviewMasteryTab() {
       </Section>
 
       <Section title="Concept mastery">
-        {!model && <Loading />}
+        {!model && !loadError && <SkeletonGrid items={4} />}
+        {loadError && !model && (
+          <div className="card border-atlas-bad/40 text-sm">
+            <div className="font-medium text-atlas-bad">Couldn't load your knowledge model</div>
+            <div className="text-atlas-muted mt-1">{loadError}</div>
+            <button className="btn-ghost text-xs mt-2" onClick={() => load()}>Retry</button>
+          </div>
+        )}
         {model && !model.length && <Empty>No concepts tracked yet. Upload documents to build your map.</Empty>}
         <div className="grid md:grid-cols-2 gap-3">
           {model?.map((m) => (
@@ -622,7 +668,7 @@ export default function KnowledgePage() {
   }, []);
 
   return (
-    <AppShell title="Study" subtitle="Study time, tailored practice, flashcards, and what Atlas thinks you understand">
+    <AppShell title="Study">
       <TabBar tab={tab} onChange={setTab} />
       {tab === "today" && <TodayTab />}
       {tab === "practice" && <PracticeTab courses={courses} />}

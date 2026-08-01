@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
-import { Stat, Section, Empty, Loading, Badge, gradeTone } from "@/components/ui";
+import { Stat, Section, Empty, SkeletonStats, SkeletonList, Badge, gradeTone } from "@/components/ui";
 import { ColorPicker } from "@/components/ColorPicker";
 import { FolderPane } from "@/components/FolderPane";
 import { CourseAssistant } from "@/components/CourseAssistant";
@@ -186,7 +186,10 @@ export default function CourseDetailPage() {
   if (!course) {
     return (
       <AppShell title="Course">
-        <Loading />
+        <SkeletonStats count={3} />
+        <div className="mt-6">
+          <SkeletonList rows={4} />
+        </div>
       </AppShell>
     );
   }

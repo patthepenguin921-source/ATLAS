@@ -124,6 +124,37 @@ export function SkeletonList({ rows = 3 }: { rows?: number }) {
   );
 }
 
+/** Row of stat-card-shaped placeholders -- dashboard/analytics headline
+ *  numbers (GPA, streaks, risk counts, …) while their data is in flight. */
+export function SkeletonStats({ count = 4 }: { count?: number }) {
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="card">
+          <Skeleton className="h-3 w-2/3 mb-2" />
+          <Skeleton className="h-7 w-1/2" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Grid of card-shaped placeholders -- course tiles and other grid layouts
+ *  while their data is in flight. */
+export function SkeletonGrid({ items = 6 }: { items?: number }) {
+  return (
+    <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {Array.from({ length: items }).map((_, i) => (
+        <div key={i} className="card space-y-2">
+          <Skeleton className="h-4 w-3/4" />
+          <Skeleton className="h-3 w-1/2" />
+          <Skeleton className="h-2 w-full mt-3" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 const RISK_TONE: Record<string, string> = {
   low: "text-atlas-good border-atlas-good/40 bg-atlas-good/10",
   medium: "text-atlas-warn border-atlas-warn/40 bg-atlas-warn/10",

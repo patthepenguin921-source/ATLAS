@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { DailyPlanCard } from "@/components/DailyPlanCard";
-import { Stat, RevealStat, Section, Empty, Loading, gradeTone, Badge, RiskBadge } from "@/components/ui";
+import { Stat, RevealStat, Section, Empty, SkeletonStats, SkeletonList, gradeTone, Badge, RiskBadge } from "@/components/ui";
 import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import { formatCalendarDate } from "@/lib/date";
 
@@ -142,7 +142,14 @@ export default function DashboardPage() {
           {error} — is the backend running &amp; are you signed in?
         </div>
       )}
-      {!data && !error && <Loading label="Assembling your briefing…" />}
+      {!data && !error && (
+        <>
+          <SkeletonStats count={4} />
+          <div className="mt-6">
+            <SkeletonList rows={3} />
+          </div>
+        </>
+      )}
 
       {data && (
         <>

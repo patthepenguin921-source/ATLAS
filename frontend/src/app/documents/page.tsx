@@ -52,6 +52,7 @@ export default function DocumentsPage() {
   const router = useRouter();
   const [docs, setDocs] = useState<any[] | null>(null);
   const [courses, setCourses] = useState<any[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [courseId, setCourseId] = useState("");
   const [busy, setBusy] = useState(false);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
@@ -70,10 +71,19 @@ export default function DocumentsPage() {
   const [divider, setDivider] = useState<string>("all");
 
   async function load() {
-    const [d, c] = await Promise.all([apiGet("/documents"), apiGet("/courses")]);
-    setDocs(d);
-    setCourses(c);
-    return d;
+    try {
+      const [d, c] = await Promise.all([apiGet("/documents"), apiGet("/courses")]);
+      setDocs(d);
+      setCourses(c);
+      setLoadError(null);
+      return d;
+    } catch (err: any) {
+      // Without this, a failed request left `docs` at its initial `null`
+      // forever -- the skeleton below just spins with no explanation and no
+      // way to retry, which reads as "the documents tab won't load" with no
+      // clue why.
+      setLoadError(friendlyError(err));
+    }
   }
   useEffect(() => {
     load();
@@ -376,7 +386,14 @@ export default function DocumentsPage() {
         </p>
       </form>
 
-      {!docs && <SkeletonList rows={3} />}
+      {!docs && !loadError && <SkeletonList rows={3} />}
+      {loadError && !docs && (
+        <div className="card border-atlas-bad/40 text-sm mb-6">
+          <div className="font-medium text-atlas-bad">Couldn't load your documents</div>
+          <div className="text-atlas-muted mt-1">{loadError}</div>
+          <button className="btn-ghost text-xs mt-2" onClick={() => load()}>Retry</button>
+        </div>
+      )}
       {docs && !docs.length && <Empty>No documents yet. Upload your first file.</Empty>}
 
       {docs && docs.length > 0 && (

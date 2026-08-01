@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { apiPost, apiGet } from "@/lib/api";
+import { apiPost, apiGet, apiPatch } from "@/lib/api";
 
 export type PendingAction = {
   name: string;
@@ -20,6 +20,12 @@ export type Msg = {
    *  display only, the extracted text already went to the backend as part
    *  of the request that produced this message. */
   attachmentName?: string | null;
+  /** The persisted `messages` row id -- assistant messages only, used to
+   *  target `PATCH /agents/messages/{id}/feedback`. A message sent before
+   *  the backend replies (or an inline error bubble) has none. */
+  id?: string | null;
+  /** This reply's thumbs up/down, if the student has left one. */
+  feedback?: "up" | "down" | null;
 };
 
 /** A file attached via the composer's "use for this conversation only"
@@ -65,7 +71,12 @@ export function useChat(onNewConversation?: () => void, courseId?: string | null
       setMessages(
         (msgs ?? [])
           .filter((m: any) => m.role === "user" || m.role === "assistant")
-          .map((m: any) => ({ role: m.role, content: m.content }))
+          .map((m: any) => ({
+            role: m.role,
+            content: m.content,
+            id: m.role === "assistant" ? m.id : null,
+            feedback: m.feedback ?? null,
+          }))
       );
     } catch {
       /* ignore */
@@ -87,12 +98,53 @@ export function useChat(onNewConversation?: () => void, courseId?: string | null
         course_id: courseId || undefined,
       });
       setConv(r.conversation_id);
-      setMessages((m) => [...m, { role: "assistant", content: r.reply, pendingAction: r.pending_action ?? null }]);
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: r.reply, pendingAction: r.pending_action ?? null, id: r.message_id ?? null },
+      ]);
       if (isNew) onNewConversation?.();
     } catch (e: any) {
       setMessages((m) => [...m, { role: "assistant", content: `⚠️ ${e.message}` }]);
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Re-runs Atlas's most recent reply in place (see POST /agents/regenerate)
+  // -- only offered once a conversation is actually persisted (`conv` set)
+  // and the last turn finished normally (no pending action mid-flight).
+  async function regenerate() {
+    if (busy || !conv || !messages.length) return;
+    const last = messages[messages.length - 1];
+    if (last.role !== "assistant") return;
+    setMessages((m) => m.slice(0, -1));
+    setBusy(true);
+    try {
+      const r = await apiPost("/agents/regenerate", {
+        conversation_id: conv, agent, course_id: courseId || undefined,
+      });
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: r.reply, pendingAction: r.pending_action ?? null, id: r.message_id ?? null },
+      ]);
+    } catch (e: any) {
+      setMessages((m) => [...m, { role: "assistant", content: `⚠️ ${e.message}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Thumbs up/down on one of Atlas's own replies -- optimistic (flips the
+  // button immediately), clicking the same reaction again clears it.
+  async function setFeedback(index: number, rating: "up" | "down") {
+    const target = messages[index];
+    if (!target?.id) return;
+    const next = target.feedback === rating ? null : rating;
+    setMessages((m) => m.map((msg, i) => (i === index ? { ...msg, feedback: next } : msg)));
+    try {
+      await apiPatch(`/agents/messages/${target.id}/feedback`, { rating: next });
+    } catch {
+      setMessages((m) => m.map((msg, i) => (i === index ? { ...msg, feedback: target.feedback ?? null } : msg)));
     }
   }
 
@@ -122,6 +174,6 @@ export function useChat(onNewConversation?: () => void, courseId?: string | null
 
   return {
     agent, setAgent, messages, conv, busy, reset, openConversation, send, confirmAction, dismissAction,
-    attachment, setAttachment,
+    attachment, setAttachment, regenerate, setFeedback,
   };
 }

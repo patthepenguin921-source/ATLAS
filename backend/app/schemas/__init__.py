@@ -31,6 +31,21 @@ class ChatRequest(BaseModel):
     attachment_filename: Optional[str] = None
 
 
+class RegenerateRequest(BaseModel):
+    """Re-runs Atlas's most recent reply in a conversation in place -- see
+    `POST /agents/regenerate`. `agent` is whichever specialist is currently
+    selected in the composer (may differ from the one that produced the
+    original reply, same as if the student had switched agents and re-sent).
+    `course_id`/`folder_id` mirror `ChatRequest`'s -- a regenerate from a
+    course-scoped chat (see `CourseAssistant`) must keep that same scoping,
+    not silently fall back to the student's whole academic record."""
+
+    conversation_id: str
+    agent: str = "general"
+    course_id: Optional[str] = None
+    folder_id: Optional[str] = None
+
+
 class ActionConfirmRequest(BaseModel):
     """Confirms a destructive action the chat agent proposed (see
     `app.agents.tools`) -- `name`/`arguments` are exactly what that turn's
@@ -40,6 +55,15 @@ class ActionConfirmRequest(BaseModel):
     name: str
     arguments: dict[str, Any]
     conversation_id: str
+
+
+class MessageFeedbackRequest(BaseModel):
+    """A thumbs up/down left on one of Atlas's own replies (see
+    `POST /agents/messages/{id}/feedback`) -- `rating: None` clears a
+    previously-set reaction rather than requiring a separate delete."""
+
+    rating: Optional[Literal["up", "down"]] = None
+    note: Optional[str] = None
 
 
 class PlanRequest(BaseModel):

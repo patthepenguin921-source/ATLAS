@@ -17,6 +17,18 @@ from app.services.grading import ASSIGNMENT_WEIGHTS
 # wins over this category-based guess.
 _HEAVY_CATEGORIES = {"test", "exam", "project", "essay"}
 
+# Category-based *floors* on the final risk_level label -- a major-weighted
+# assignment (or a test/exam, even one with no explicit weight set) never
+# reads as less than "high" risk, and a quiz never less than "medium",
+# regardless of what the raw points x difficulty x urgency formula happens
+# to compute (a low-point test still deserves more attention than a
+# high-point daily homework assignment). This only ever raises the label the
+# formula produced, never lowers it -- an overdue major test that already
+# scores "extreme" stays "extreme", it doesn't get capped down to "high".
+_HIGH_RISK_FLOOR_CATEGORIES = {"test", "exam"}
+_MEDIUM_RISK_FLOOR_CATEGORIES = {"quiz"}
+_RISK_LEVEL_ORDER = {"low": 0, "medium": 1, "high": 2, "extreme": 3}
+
 
 async def predicted_gpa(user_id: str, weighted: bool = True) -> float | None:
     val = await supabase.rpc("predicted_gpa", {"p_user_id": user_id, "p_weighted": weighted})
@@ -115,7 +127,7 @@ async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str
         scored.append({
             **a,
             "risk_score": round(risk, 2),
-            "risk_level": _risk_level(risk),
+            "risk_level": _risk_level(risk, a["category"], a.get("weight")),
             "days_left": round(days_left, 1),
             "overdue": a["status"] in ("missing", "late"),
         })
@@ -123,15 +135,28 @@ async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str
     return scored[:limit]
 
 
-def _risk_level(score: float) -> str:
-    """Bucket a raw risk score into a human label (low/medium/high/extreme)."""
+def _risk_level(score: float, category: str | None = None, weight: float | None = None) -> str:
+    """Bucket a raw risk score into a human label (low/medium/high/extreme),
+    then apply this category's floor (see `_HIGH_RISK_FLOOR_CATEGORIES`/
+    `_MEDIUM_RISK_FLOOR_CATEGORIES`) if it's stricter than what the score
+    alone produced."""
     if score >= 120:
-        return "extreme"
-    if score >= 60:
-        return "high"
-    if score >= 25:
-        return "medium"
-    return "low"
+        level = "extreme"
+    elif score >= 60:
+        level = "high"
+    elif score >= 25:
+        level = "medium"
+    else:
+        level = "low"
+
+    floor = None
+    if (weight is not None and weight >= ASSIGNMENT_WEIGHTS["major"]) or category in _HIGH_RISK_FLOOR_CATEGORIES:
+        floor = "high"
+    elif category in _MEDIUM_RISK_FLOOR_CATEGORIES:
+        floor = "medium"
+    if floor and _RISK_LEVEL_ORDER[floor] > _RISK_LEVEL_ORDER[level]:
+        return floor
+    return level
 
 
 async def snapshot(user_id: str) -> dict[str, Any]:

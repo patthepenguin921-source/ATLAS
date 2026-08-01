@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { AgentPicker } from "@/components/AgentPicker";
 import { ChatAttachButton } from "@/components/ChatAttachButton";
+import { FolderPane } from "@/components/FolderPane";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import { AGENTS, useChat } from "@/lib/useChat";
 
@@ -26,10 +27,18 @@ type Conversation = {
 type Project = { id: string; name: string; color?: string | null };
 
 export default function AskAtlasPage() {
-  const chat = useChat(loadConversations);
+  // "all" = unscoped (the original global behavior); a class id scopes both
+  // the conversation (see useChat's courseId) and reveals that class's
+  // folders below; "general" just reveals the General folders (there's no
+  // class to scope the chat itself to) -- see FolderPane.
+  const [scope, setScope] = useState<string>("all");
+  const scopeCourseId = scope !== "all" && scope !== "general" ? scope : null;
+  const chat = useChat(loadConversations, scopeCourseId);
   const [input, setInput] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [courses, setCourses] = useState<any[]>([]);
+  const [showFolders, setShowFolders] = useState(false);
   const [menuId, setMenuId] = useState<string | null>(null);
   const [filterTag, setFilterTag] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -49,9 +58,17 @@ export default function AskAtlasPage() {
       /* ignore */
     }
   }
+  async function loadCourses() {
+    try {
+      setCourses((await apiGet("/courses")) ?? []);
+    } catch {
+      /* ignore */
+    }
+  }
   useEffect(() => {
     loadConversations();
     loadProjects();
+    loadCourses();
   }, []);
 
   useEffect(() => {
@@ -70,6 +87,13 @@ export default function AskAtlasPage() {
     if (!name?.trim()) return;
     await apiPost("/chat-projects", { name: name.trim() });
     loadProjects();
+  }
+
+  async function deleteProject(p: Project) {
+    if (!window.confirm(`Delete "${p.name}"? Its chats move back to ungrouped, not deleted.`)) return;
+    await apiDelete(`/chat-projects/${p.id}`);
+    loadProjects();
+    loadConversations();
   }
 
   async function patchConv(id: string, body: any) {
@@ -149,6 +173,8 @@ export default function AskAtlasPage() {
   }
 
   const activeAgent = AGENTS.find((a) => a.id === chat.agent);
+  const activeCourses = courses.filter((c) => c.is_active !== false);
+  const scopeName = scope === "general" ? "General" : courses.find((c) => c.id === scope)?.name ?? "this class";
 
   return (
     <AppShell
@@ -157,6 +183,47 @@ export default function AskAtlasPage() {
       actions={<button className="btn-ghost" onClick={chat.reset}>New chat</button>}
       fullWidth
     >
+      <div className="flex flex-wrap items-center gap-1.5 mb-4">
+        <span className="text-xs text-atlas-muted mr-1">Scope:</span>
+        <button
+          className={`pill ${scope === "all" ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+          onClick={() => setScope("all")}
+        >
+          All
+        </button>
+        {activeCourses.map((c) => (
+          <button
+            key={c.id}
+            className={`pill ${scope === c.id ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+            onClick={() => setScope(c.id)}
+          >
+            {c.name}
+          </button>
+        ))}
+        <button
+          className={`pill ${scope === "general" ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+          onClick={() => setScope("general")}
+        >
+          General
+        </button>
+      </div>
+
+      {scope !== "all" && (
+        <div className="card mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm">
+              {scope === "general"
+                ? "Chatting isn't scoped by General — it's a folder for documents with no class."
+                : `This chat is scoped to ${scopeName} — grounded in just its assignments, grades, and documents.`}
+            </div>
+            <button className="btn-ghost text-xs shrink-0" onClick={() => setShowFolders((s) => !s)}>
+              {showFolders ? "Hide folders" : "Show folders"}
+            </button>
+          </div>
+          {showFolders && <FolderPane courseId={scope === "general" ? null : scope} />}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-[16rem_1fr] gap-4">
         {/* Projects / history rail */}
         <aside className="hidden lg:flex flex-col gap-2 min-h-0">
@@ -183,9 +250,16 @@ export default function AskAtlasPage() {
               const chats = byProject(p.id);
               if (!chats.length && (filterTag || showArchived)) return null;
               return (
-                <div key={p.id}>
+                <div key={p.id} className="group">
                   <div className="text-[11px] uppercase tracking-wide text-atlas-muted px-1 mb-1 flex items-center gap-1">
                     <span>📁</span> {p.name}
+                    <button
+                      className="ml-auto opacity-0 group-hover:opacity-100 normal-case text-atlas-muted hover:text-atlas-bad"
+                      title="Delete project (chats move back to ungrouped)"
+                      onClick={() => deleteProject(p)}
+                    >
+                      ×
+                    </button>
                   </div>
                   <div className="space-y-0.5">
                     {chats.length ? chats.map((c) => <ChatRow key={c.id} c={c} />)

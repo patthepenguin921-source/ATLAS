@@ -17,8 +17,13 @@ class Tutor(Agent):
         "the student's known misconceptions and prior mistakes."
     )
 
-    async def explain(self, user_id: str, topic: str, *, depth: str = "standard") -> dict[str, Any]:
-        ctx = await memory.build_context(user_id, topic, include_semantic=True)
+    async def explain(
+        self, user_id: str, topic: str, *, depth: str = "standard",
+        course_id: str | None = None, folder_id: str | None = None,
+    ) -> dict[str, Any]:
+        ctx = await memory.build_context(
+            user_id, topic, include_semantic=True, course_id=course_id, folder_id=folder_id,
+        )
         context_text = memory.render_context(ctx)
         style = {
             "quick": "Give a crisp 3-4 sentence explanation.",
@@ -37,13 +42,31 @@ class Tutor(Agent):
         )
         return {"agent": self.role, "topic": topic, "explanation": text}
 
-    async def quiz(self, user_id: str, topic: str, num_questions: int = 5) -> dict[str, Any]:
-        ctx = await memory.build_context(user_id, topic, include_semantic=True)
+    async def quiz(
+        self, user_id: str, topic: str, num_questions: int = 5, *, mode: str = "quiz",
+        course_id: str | None = None, folder_id: str | None = None,
+    ) -> dict[str, Any]:
+        """`mode="quiz"` is a quick active-recall check; `mode="test"` is a
+        longer, exam-style practice test -- both share this one generator so
+        "give me a quick quiz on X" and "give me a practice test on X" only
+        differ in length/difficulty, not in how they're grounded."""
+        ctx = await memory.build_context(
+            user_id, topic, include_semantic=True, course_id=course_id, folder_id=folder_id,
+        )
         context_text = memory.render_context(ctx)
+        style = {
+            "quiz": "a quick active-recall quiz -- mostly straightforward recall, one or two application questions",
+            "test": (
+                "a longer, exam-style practice test -- mix difficulty deliberately (recall, "
+                "application, and at least one multi-step/synthesis question), the way a real "
+                "unit test would, not just definition recall"
+            ),
+        }.get(mode, "a quiz")
         prompt = f"""\
-Create a {num_questions}-question active-recall quiz on: {topic}.
-Mix recall and application. Prefer material from my own documents/context when
-available. Return JSON:
+Create {style} with {num_questions} questions on: {topic}.
+Prefer material from my own documents/context when available -- ground
+questions in what's actually in scope rather than the topic in the abstract.
+Return JSON:
 {{
   "topic": "{topic}",
   "questions": [
@@ -53,6 +76,6 @@ available. Return JSON:
   ]
 }}"""
         data = await claude.complete_json(
-            system=self.system_prompt(context_text), prompt=prompt, max_tokens=2000
+            system=self.system_prompt(context_text), prompt=prompt, max_tokens=2400
         )
-        return {"agent": self.role, **data}
+        return {"agent": self.role, "mode": mode, **data}

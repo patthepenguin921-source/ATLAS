@@ -34,12 +34,39 @@ class Planner(Agent):
         risk = await analytics.at_risk_assignments(user_id, limit=8)
         context_text = memory.render_context(ctx)
 
+        capacity_note = (
+            f"You have about {available_minutes} minutes of real study time today — this is "
+            "the student's own configured availability for today (after-school activities, work, "
+            "practice, etc. already accounted for), not a rough guess, so respect it strictly "
+            "rather than overloading the day."
+        )
+        if available_minutes <= 20:
+            capacity_note += (
+                " That's very little time — give at most one short, high-priority item (or "
+                "explicitly say there's nothing urgent enough to justify even that), don't cram "
+                "a normal day's worth of tasks into it."
+            )
+        elif available_minutes <= 45:
+            capacity_note += " That's a light day — keep it to the one or two things that matter most."
+
         prompt = f"""\
-Plan out what needs to get done starting {plan_date}, using about
-{available_minutes} minutes of study time today as a rough gauge of daily
-capacity. Do NOT assign clock times or build a schedule — only figure out
-what needs to happen and by when. Prioritize at-risk and time-sensitive work,
-and interleave review of weak concepts.
+Plan out what needs to get done starting {plan_date}. {capacity_note} Do NOT
+assign clock times or build a schedule — only figure out what needs to
+happen and by when. Prioritize at-risk and time-sensitive work, and
+interleave review of weak concepts.
+
+Every task must name a REAL, SPECIFIC thing to do, using the student's own
+courses/assignments/documents shown in the context above — never a vague
+subject-level suggestion. For example:
+- "Complete the Lab Report for AP Biology" (a real assignment), not
+  "study biology"
+- "Read the Unit 3 slideshow for AP Biology" (a real document from
+  "Documents you have on file" in the context) when a course needs review
+  time but has no assignment due soon, not "review notes"
+- "Review [concept name]" only when that concept is actually listed under
+  "Concepts due for review" in the context — never invent a concept name
+- If nothing concrete justifies a task for a course today, leave it out
+  entirely rather than manufacturing a generic placeholder.
 
 If a single assignment is large enough that it can't reasonably be finished
 in one sitting (e.g. a multi-page paper, a big project, exam prep spanning a
@@ -47,7 +74,7 @@ unit), split it into several dated chunks (e.g. "Outline", "Draft body",
 "Revise + cite") spread across the days between now and its due date instead
 of leaving it as one task the night before.
 
-At-risk assignments (highest first): {[{'title': a['title'], 'risk': a['risk_score'], 'days_left': a['days_left']} for a in risk]}
+At-risk assignments (highest first): {[{'title': a['title'], 'risk': a['risk_score'], 'risk_level': a['risk_level'], 'days_left': a['days_left']} for a in risk]}
 
 Return JSON with this exact shape:
 {{

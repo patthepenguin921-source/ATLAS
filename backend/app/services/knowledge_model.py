@@ -35,20 +35,13 @@ async def _get_or_create(user_id: str, concept_id: str) -> dict[str, Any]:
     return created[0]
 
 
-async def review(
-    user_id: str, concept_id: str, quality: int, *, confidence: float | None = None
-) -> dict[str, Any]:
-    """Record a review outcome and reschedule (SM-2).
-
-    quality: 0..5 (0 = total blackout, 5 = perfect recall).
-    """
+def compute_sm2(quality: int, ease: float, reps: int, interval: int) -> tuple[float, int, int]:
+    """The core SM-2 step: given a 0-5 recall quality and the current ease/
+    repetitions/interval, returns the next (ease, repetitions, interval_days).
+    Shared by the concept knowledge model below and flashcard review (see
+    `app.services.flashcards.review`) -- same spaced-repetition math, two
+    different tables it gets applied to."""
     quality = max(0, min(5, quality))
-    k = await _get_or_create(user_id, concept_id)
-
-    ease = float(k.get("ease_factor") or 2.5)
-    reps = int(k.get("repetitions") or 0)
-    interval = int(k.get("interval_days") or 0)
-
     if quality < 3:
         reps = 0
         interval = 1
@@ -61,6 +54,25 @@ async def review(
         else:
             interval = round(interval * ease)
     ease = max(1.3, ease + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)))
+    return round(ease, 3), reps, interval
+
+
+async def review(
+    user_id: str, concept_id: str, quality: int, *, confidence: float | None = None
+) -> dict[str, Any]:
+    """Record a review outcome and reschedule (SM-2).
+
+    quality: 0..5 (0 = total blackout, 5 = perfect recall).
+    """
+    quality = max(0, min(5, quality))
+    k = await _get_or_create(user_id, concept_id)
+
+    ease, reps, interval = compute_sm2(
+        quality,
+        float(k.get("ease_factor") or 2.5),
+        int(k.get("repetitions") or 0),
+        int(k.get("interval_days") or 0),
+    )
 
     now = datetime.now(timezone.utc)
     next_review = now + timedelta(days=interval)

@@ -1,6 +1,7 @@
 """Agent endpoints — grounded chat + specialized agent actions."""
 from __future__ import annotations
 
+from datetime import date as date_cls
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,6 +15,7 @@ from app.core.supabase_client import eq, supabase
 from app.schemas import (ActionConfirmRequest, AnalyzeRequest, ChatRequest, ExplainRequest,
                          MessageFeedbackRequest, PlanRequest, QuizRequest, RegenerateRequest,
                          ReviewRequest)
+from app.services import schedule
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -174,17 +176,26 @@ async def confirm_action(body: ActionConfirmRequest, user: CurrentUser = Depends
 
 @router.post("/planner/daily-plan")
 async def daily_plan(body: PlanRequest, user: CurrentUser = Depends(get_current_user)):
-    return await Planner().generate_daily_plan(user.id, body.plan_date, body.available_minutes)
+    plan_date = date_cls.fromisoformat(body.plan_date) if body.plan_date else date_cls.today()
+    available_minutes = body.available_minutes
+    if available_minutes is None:
+        available_minutes = await schedule.get_minutes_for(user.id, plan_date)
+    return await Planner().generate_daily_plan(user.id, plan_date.isoformat(), available_minutes)
 
 
 @router.post("/tutor/explain")
 async def explain(body: ExplainRequest, user: CurrentUser = Depends(get_current_user)):
-    return await Tutor().explain(user.id, body.topic, depth=body.depth)
+    return await Tutor().explain(
+        user.id, body.topic, depth=body.depth, course_id=body.course_id, folder_id=body.folder_id,
+    )
 
 
 @router.post("/tutor/quiz")
 async def quiz(body: QuizRequest, user: CurrentUser = Depends(get_current_user)):
-    return await Tutor().quiz(user.id, body.topic, body.num_questions)
+    return await Tutor().quiz(
+        user.id, body.topic, body.num_questions, mode=body.mode,
+        course_id=body.course_id, folder_id=body.folder_id,
+    )
 
 
 @router.post("/analyst/analyze")

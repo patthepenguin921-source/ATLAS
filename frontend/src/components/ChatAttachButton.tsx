@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import { Modal } from "@/components/ui";
+import { Icon } from "@/components/Icon";
 import type { PendingAttachment } from "@/lib/useChat";
 
 /** Paperclip button for the chat composer -- lets the student attach a
@@ -75,20 +76,21 @@ export function ChatAttachButton({
         type="button"
         className="btn-ghost !px-2.5"
         title="Attach a document"
+        aria-label="Attach a document"
         onClick={pick}
       >
-        📎
+        <Icon name="paperclip" className="w-4 h-4" />
       </button>
       {attachment && (
         <span className="pill text-atlas-accent border-atlas-accent/40 !py-0.5 gap-1">
-          📎 {attachment.filename}
+          <Icon name="paperclip" className="w-3 h-3" /> {attachment.filename}
           <button
             type="button"
             className="text-atlas-muted hover:text-atlas-text"
             onClick={onClear}
             aria-label="Remove attachment"
           >
-            ×
+            <Icon name="close" className="w-3 h-3" />
           </button>
         </span>
       )}

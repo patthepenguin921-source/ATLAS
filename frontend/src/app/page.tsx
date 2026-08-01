@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { DailyPlanCard } from "@/components/DailyPlanCard";
 import { Stat, RevealStat, Section, Empty, SkeletonStats, SkeletonList, gradeTone, Badge, RiskBadge } from "@/components/ui";
+import { Icon } from "@/components/Icon";
 import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import { formatCalendarDate } from "@/lib/date";
 
@@ -215,8 +216,9 @@ export default function DashboardPage() {
                         className="w-full text-left text-sm px-2 py-1.5 rounded-lg hover:bg-atlas-panel2"
                         onClick={() => router.push(`/documents/${d.id}`)}
                       >
-                        <div className="truncate">
-                          📄 {d.title} <span className="text-xs text-atlas-muted">· {courseName(d.course_id)}</span>
+                        <div className="truncate flex items-center gap-1.5">
+                          <Icon name="document" className="w-3.5 h-3.5 text-atlas-muted shrink-0" />
+                          {d.title} <span className="text-xs text-atlas-muted">· {courseName(d.course_id)}</span>
                         </div>
                         {d.snippet && (
                           <div className="text-xs text-atlas-muted truncate pl-5" title={d.snippet}>
@@ -228,10 +230,11 @@ export default function DashboardPage() {
                     {results.assignments?.map((a: any) => (
                       <button
                         key={a.id}
-                        className="w-full text-left text-sm px-2 py-1.5 rounded-lg hover:bg-atlas-panel2 truncate"
+                        className="w-full text-left text-sm px-2 py-1.5 rounded-lg hover:bg-atlas-panel2 truncate flex items-center gap-1.5"
                         onClick={() => router.push("/assignments")}
                       >
-                        📝 {a.title} <span className="text-xs text-atlas-muted">· {courseName(a.course_id)}</span>
+                        <Icon name="assignment" className="w-3.5 h-3.5 text-atlas-muted shrink-0" />
+                        {a.title} <span className="text-xs text-atlas-muted">· {courseName(a.course_id)}</span>
                       </button>
                     ))}
                   </div>
@@ -304,7 +307,7 @@ export default function DashboardPage() {
                   ))}
                 </div>
               ) : (
-                <Empty>Nothing due soon. 🎉</Empty>
+                <Empty>Nothing due soon.</Empty>
               )}
             </Section>
 

@@ -66,6 +66,115 @@ def test_classifies_and_persists_a_confident_match(fake_db, monkeypatch):
     assert fake_db.updates == [{"course_id": BIO_ID}]
 
 
+def test_direct_mention_classifies_without_ever_calling_the_model(fake_db, monkeypatch):
+    called = False
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        nonlocal called
+        called = True
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "What's due in AP Biology this week?", "The lab report.",
+    ))
+
+    assert fake_db.updates == [{"course_id": BIO_ID}]
+    assert not called  # the literal name match never needed the model at all
+
+
+def test_direct_mention_also_checks_atlas_own_reply(fake_db, monkeypatch):
+    """The student's phrasing can be vague ("what's due this week") while
+    Atlas's grounded answer names the class directly -- that should still
+    count as a mention."""
+    called = False
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        nonlocal called
+        called = True
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "what's due this week", "Your AP Biology lab report is due Friday.",
+    ))
+
+    assert fake_db.updates == [{"course_id": BIO_ID}]
+    assert not called
+
+
+def test_direct_mention_is_word_boundary_matched(fake_db, monkeypatch):
+    """A course named "AP Biology" (multi-word) is used elsewhere in these
+    tests; here a short single-word course name must not fire on a
+    substring of some other word."""
+    fake_db.courses.append({"id": "art-id", "name": "Art"})
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "Let's start the AP Bio review now.", "Sure thing.",
+    ))
+
+    # "start" contains "art" as a substring but not as a whole word -- must
+    # not have matched the "Art" course.
+    assert fake_db.updates == []
+
+
+def test_direct_mention_word_boundary_positive_match(fake_db, monkeypatch):
+    fake_db.courses.append({"id": "art-id", "name": "Art"})
+    called = False
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        nonlocal called
+        called = True
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "What's the Art project due date?", "Friday.",
+    ))
+
+    assert fake_db.updates == [{"course_id": "art-id"}]
+    assert not called
+
+
+def test_multiple_direct_mentions_fall_back_to_the_model_instead_of_guessing(fake_db, monkeypatch):
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "Is AP Biology harder than AP Calculus?", "Depends on the student.",
+    ))
+
+    assert fake_db.updates == []
+
+
+def test_allow_llm_fallback_false_skips_the_model_when_nothing_is_named_directly(fake_db, monkeypatch):
+    called = False
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        nonlocal called
+        called = True
+        return {"course_name": "AP Biology"}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "what's on my plate today", "Not much.", allow_llm_fallback=False,
+    ))
+
+    assert not called
+    assert fake_db.updates == []
+
+
 def test_does_nothing_when_the_model_finds_no_single_class(fake_db, monkeypatch):
     async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
         return {"course_name": None}

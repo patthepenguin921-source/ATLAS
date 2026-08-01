@@ -1,26 +1,61 @@
-"""Chat scope classifier -- auto-sorts a brand-new, unscoped conversation
-into the class it's actually about, so it shows up in that class's own
-section of the sidebar without the student having to file it by hand.
+"""Chat scope classifier -- auto-sorts a conversation into the class it's
+actually about, so it shows up in that class's own section of the sidebar
+without the student having to file it by hand.
 
 Distinct from MemoryKeeper (durable facts about the student) and the
-ConversationSummarizer (compressing a long thread): this looks at one fresh
-exchange and decides which single class, if any, the whole conversation
-belongs to. Only ever runs once, right after a conversation's first turn --
-see `app.routers.agents.chat`, which calls this only when the request itself
-carried no explicit `course_id` (the student wasn't already on a class-
-scoped page) and the conversation was just created. A conversation that
-already has a `course_id` -- set explicitly or by a prior pass of this same
-function -- is never reconsidered, so a manual re-scope from the sidebar
-always sticks.
+ConversationSummarizer (compressing a long thread): this looks at one
+exchange and decides which single class, if any, the conversation belongs
+to. See `app.routers.agents.chat`, which calls this on every turn of a
+conversation that has no explicit `course_id` on the request (the student
+wasn't on a class-scoped page) -- but only ever *acts* once, since a
+conversation that already has a `course_id` -- set explicitly or by an
+earlier pass of this same function -- is never reconsidered, so a manual
+re-scope from the sidebar always sticks.
+
+Two ways a turn gets sorted:
+1. Direct mention -- one of the student's real course names appears
+   verbatim in the exchange, either their own message (e.g. "what's due in
+   AP Biology") or Atlas's reply (a grounded answer routinely names the
+   class even when the student's own phrasing didn't). This is the literal
+   "a course got mentioned" case, checked on *every* unscoped turn,
+   deterministically and without an LLM call.
+2. Model judgment -- for a turn that doesn't name a class directly but
+   still clearly reads as belonging to one (e.g. "what's due in bio" for a
+   student with only one science class), asked only once, on a brand-new
+   conversation's first turn (see `allow_llm_fallback`) -- repeating a
+   speculative judgment call on every later turn of a genuinely general
+   conversation would just burn model calls for no benefit.
 """
 from __future__ import annotations
+
+import re
 
 from app.core.supabase_client import eq, supabase
 from app.llm import claude
 
 
+def _direct_mention(user_message: str, reply: str, courses: list[dict]) -> dict | None:
+    """A course whose real name appears as a whole phrase in either side of
+    the exchange -- the student's own words, or Atlas's reply (grounded
+    answers routinely name the class even when the student's own phrasing
+    was vague, e.g. "what's due this week" answered with "your AP Biology
+    lab report"). Word-boundary matched so e.g. a course named "Art"
+    doesn't fire on "start" or "smart". Returns None unless exactly one
+    course matches (multiple direct mentions means the turn isn't actually
+    about just one class, so it's left for the model fallback -- or
+    unscoped -- rather than guessed)."""
+    low = f"{user_message}\n{reply}".lower()
+    matches = []
+    for c in courses:
+        name = (c.get("name") or "").strip()
+        if name and re.search(rf"\b{re.escape(name.lower())}\b", low):
+            matches.append(c)
+    return matches[0] if len(matches) == 1 else None
+
+
 async def maybe_classify_scope(
     user_id: str, conversation_id: str, user_message: str, reply: str,
+    *, allow_llm_fallback: bool = True,
 ) -> None:
     """Best-effort: swallows all errors. Called after the turn has already
     been persisted and replied to, so nothing here should ever surface to
@@ -39,6 +74,17 @@ async def maybe_classify_scope(
             filters={"user_id": eq(user_id), "is_active": eq("true")},
         ) or []
         if not courses:
+            return
+
+        direct = _direct_mention(user_message, reply, courses)
+        if direct:
+            await supabase.update(
+                "conversations", {"course_id": direct["id"]},
+                filters={"user_id": eq(user_id), "id": eq(conversation_id)},
+            )
+            return
+
+        if not allow_llm_fallback:
             return
 
         names_block = "\n".join(f"- {c['name']}" for c in courses)

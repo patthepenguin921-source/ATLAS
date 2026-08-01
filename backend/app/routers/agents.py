@@ -104,7 +104,13 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
         course_id=body.course_id, folder_id=body.folder_id,
         conversation_summary=conversation_summary, project_instructions=project_instructions,
     )
-    is_new_and_unscoped = not body.conversation_id and not body.course_id
+    # A brand-new, unscoped conversation's first turn is also the only turn
+    # the classifier's speculative LLM judgment call runs for (see
+    # `chat_scope.maybe_classify_scope`'s `allow_llm_fallback`) -- repeating
+    # that guess every turn of a conversation that never names a class would
+    # just burn model calls. Its cheap, deterministic direct-mention check
+    # still runs on every unscoped turn below, regardless.
+    is_first_turn = not body.conversation_id
     conv_id, assistant_message_id = await _persist_turn(
         user.id, body.conversation_id, body.agent, body.message,
         result["reply"], result.get("context_used", {}), course_id=body.course_id,
@@ -119,9 +125,11 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
         await maybe_update_summary(user.id, conv_id)
     except Exception:
         pass  # rolling summary refresh is best-effort; never break the chat turn
-    if is_new_and_unscoped:
+    if not body.course_id:
         try:
-            await chat_scope.maybe_classify_scope(user.id, conv_id, body.message, result["reply"])
+            await chat_scope.maybe_classify_scope(
+                user.id, conv_id, body.message, result["reply"], allow_llm_fallback=is_first_turn,
+            )
         except Exception:
             pass  # auto-sorting a chat into a class is best-effort; never break the chat turn
     return {**result, "conversation_id": conv_id, "message_id": assistant_message_id}

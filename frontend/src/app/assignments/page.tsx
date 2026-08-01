@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
-import { Empty, Loading, Badge, Modal, SkeletonList } from "@/components/ui";
+import { Empty, Loading, Badge, Modal, RiskBadge, SkeletonList } from "@/components/ui";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import { formatCalendarDate } from "@/lib/date";
 
@@ -29,24 +29,32 @@ const WEIGHT_OPTIONS: { value: string; label: string }[] = [
 const statusTone = (s: string) =>
   s === "graded" || s === "submitted" ? "good" : s === "missing" ? "bad" : "default";
 
+// 1 (easiest) .. 5 (hardest) -- feeds directly into the at-risk score (see
+// backend/app/services/analytics.py's at_risk_assignments), same as weight.
+const DIFFICULTY_OPTIONS = [1, 2, 3, 4, 5];
+
 export default function AssignmentsPage() {
   const [items, setItems] = useState<any[] | null>(null);
   const [courses, setCourses] = useState<any[]>([]);
+  const [risk, setRisk] = useState<Record<string, { risk_level: string; risk_score: number }>>({});
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<any | null>(null);
   const [editing, setEditing] = useState(false);
-  const [detail, setDetail] = useState<{ description: string; notes: string }>({
-    description: "", notes: "",
-  });
+  const [detail, setDetail] = useState<{
+    description: string; notes: string; weight: string; difficulty: string; points_possible: string;
+  }>({ description: "", notes: "", weight: "", difficulty: "", points_possible: "" });
   const [form, setForm] = useState<any>({
     title: "", course_id: "", category: "homework", due_date: "", estimated_minutes: 30,
     description: "", notes: "", weight: "",
   });
 
   async function load() {
-    const [a, c] = await Promise.all([apiGet("/assignments"), apiGet("/courses")]);
+    const [a, c, r] = await Promise.all([
+      apiGet("/assignments"), apiGet("/courses"), apiGet("/analytics/at-risk?limit=100"),
+    ]);
     setItems(a);
     setCourses(c);
+    setRisk(Object.fromEntries((r ?? []).map((x: any) => [x.id, x])));
   }
   useEffect(() => {
     load();
@@ -69,16 +77,25 @@ export default function AssignmentsPage() {
   function openDetail(a: any) {
     setSelected(a);
     setEditing(false);
-    setDetail({ description: a.description ?? "", notes: a.notes ?? "" });
+    setDetail({
+      description: a.description ?? "", notes: a.notes ?? "",
+      weight: a.weight != null ? String(a.weight) : "",
+      difficulty: a.difficulty != null ? String(a.difficulty) : "",
+      points_possible: a.points_possible != null ? String(a.points_possible) : "",
+    });
   }
 
   async function saveDetail() {
     if (!selected) return;
-    await apiPatch(`/assignments/${selected.id}`, {
+    const patch = {
       description: detail.description,
       notes: detail.notes,
-    });
-    setSelected((s: any) => (s ? { ...s, ...detail } : s));
+      weight: detail.weight ? Number(detail.weight) : null,
+      difficulty: detail.difficulty ? Number(detail.difficulty) : null,
+      points_possible: detail.points_possible ? Number(detail.points_possible) : null,
+    };
+    await apiPatch(`/assignments/${selected.id}`, patch);
+    setSelected((s: any) => (s ? { ...s, ...patch } : s));
     setEditing(false);
     load();
   }
@@ -183,6 +200,7 @@ export default function AssignmentsPage() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+              {risk[a.id] && <RiskBadge level={risk[a.id].risk_level} />}
               <Badge tone={statusTone(a.status) as any}>{a.status.replace("_", " ")}</Badge>
               <select
                 className="input !w-auto text-xs py-1"
@@ -236,6 +254,7 @@ export default function AssignmentsPage() {
               <Badge tone={statusTone(selected.status) as any}>{selected.status.replace("_", " ")}</Badge>
               <Badge>{selected.category}</Badge>
               <Badge tone="accent">{courseName(selected.course_id)}</Badge>
+              {risk[selected.id] && <RiskBadge level={risk[selected.id].risk_level} />}
             </div>
             {selected.due_date && (
               <div className="text-atlas-muted">
@@ -256,6 +275,31 @@ export default function AssignmentsPage() {
                   <textarea className="input min-h-[70px]" value={detail.notes}
                     onChange={(e) => setDetail({ ...detail, notes: e.target.value })}
                     placeholder="Your own notes…" />
+                </div>
+                <div>
+                  <div className="label">Risk factors (drive the risk badge above)</div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="text-xs text-atlas-muted">Weight</label>
+                      <select className="input text-sm" value={detail.weight}
+                        onChange={(e) => setDetail({ ...detail, weight: e.target.value })}>
+                        {WEIGHT_OPTIONS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-atlas-muted">Difficulty</label>
+                      <select className="input text-sm" value={detail.difficulty}
+                        onChange={(e) => setDetail({ ...detail, difficulty: e.target.value })}>
+                        <option value="">Not set</option>
+                        {DIFFICULTY_OPTIONS.map((d) => <option key={d} value={d}>{d}/5</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-atlas-muted">Points</label>
+                      <input type="number" min={0} className="input text-sm" value={detail.points_possible}
+                        onChange={(e) => setDetail({ ...detail, points_possible: e.target.value })} />
+                    </div>
+                  </div>
                 </div>
               </>
             ) : (

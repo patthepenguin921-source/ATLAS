@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.agents import get_agent, tools
+from app.agents import chat_scope, get_agent, tools
 from app.agents.memory_keeper import MemoryKeeper
 from app.agents.registry import Analyst, Coach, Planner, Tutor
 from app.agents.summarizer import get_summary, maybe_update_summary
@@ -28,11 +28,18 @@ MAX_HISTORY_MESSAGES = 20
 
 
 async def _persist_turn(user_id: str, conv_id: str | None, agent: str, user_msg: str,
-                        reply: str, context_used: dict) -> tuple[str, str | None]:
+                        reply: str, context_used: dict, *, course_id: str | None = None,
+                        ) -> tuple[str, str | None]:
     if not conv_id:
+        # `course_id` is whatever class scope was active when this brand-new
+        # conversation started (see ChatRequest.course_id) -- the same
+        # auto-sort a conversation started from a class-scoped page always
+        # gets. One started unscoped (course_id None here) may still pick up
+        # a scope shortly after, via chat()'s best-effort call to
+        # `app.agents.chat_scope.maybe_classify_scope`.
         conv = await supabase.insert(
             "conversations",
-            {"user_id": user_id, "agent": agent, "title": user_msg[:60]},
+            {"user_id": user_id, "agent": agent, "title": user_msg[:60], "course_id": course_id},
         )
         conv_id = conv[0]["id"]
     # PostgREST rejects a bulk insert whose objects don't share the exact same
@@ -54,6 +61,27 @@ async def _persist_turn(user_id: str, conv_id: str | None, agent: str, user_msg:
     return conv_id, assistant_message_id
 
 
+async def _get_project_instructions(user_id: str, conversation_id: str | None) -> str | None:
+    """Custom instructions for the project a conversation is filed under
+    (see `chat_projects.instructions`, migration 0027) -- a brand-new
+    conversation has no project yet (that only happens after creation, via
+    the sidebar's "Move to project"), so this is always None for one."""
+    if not conversation_id:
+        return None
+    conv_rows = await supabase.select(
+        "conversations", columns="project_id",
+        filters={"user_id": eq(user_id), "id": eq(conversation_id)}, limit=1,
+    )
+    project_id = conv_rows[0].get("project_id") if conv_rows else None
+    if not project_id:
+        return None
+    proj_rows = await supabase.select(
+        "chat_projects", columns="instructions",
+        filters={"user_id": eq(user_id), "id": eq(project_id)}, limit=1,
+    )
+    return proj_rows[0].get("instructions") if proj_rows else None
+
+
 @router.post("/chat")
 async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user)):
     agent = get_agent(body.agent)
@@ -68,16 +96,18 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
         ) or []
         history = [{"role": m["role"], "content": m["content"]} for m in prior]
         conversation_summary = await get_summary(user.id, body.conversation_id)
+    project_instructions = await _get_project_instructions(user.id, body.conversation_id)
 
     result = await agent.respond(
         user.id, body.message, history=history, include_semantic=body.include_semantic,
         attachment_text=body.attachment_text, attachment_filename=body.attachment_filename,
         course_id=body.course_id, folder_id=body.folder_id,
-        conversation_summary=conversation_summary,
+        conversation_summary=conversation_summary, project_instructions=project_instructions,
     )
+    is_new_and_unscoped = not body.conversation_id and not body.course_id
     conv_id, assistant_message_id = await _persist_turn(
         user.id, body.conversation_id, body.agent, body.message,
-        result["reply"], result.get("context_used", {}),
+        result["reply"], result.get("context_used", {}), course_id=body.course_id,
     )
     try:
         await MemoryKeeper().extract_facts(
@@ -89,6 +119,11 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
         await maybe_update_summary(user.id, conv_id)
     except Exception:
         pass  # rolling summary refresh is best-effort; never break the chat turn
+    if is_new_and_unscoped:
+        try:
+            await chat_scope.maybe_classify_scope(user.id, conv_id, body.message, result["reply"])
+        except Exception:
+            pass  # auto-sorting a chat into a class is best-effort; never break the chat turn
     return {**result, "conversation_id": conv_id, "message_id": assistant_message_id}
 
 
@@ -115,12 +150,13 @@ async def regenerate(body: RegenerateRequest, user: CurrentUser = Depends(get_cu
         for m in all_msgs[:-2]
     ][-MAX_HISTORY_MESSAGES:]
     conversation_summary = await get_summary(user.id, body.conversation_id)
+    project_instructions = await _get_project_instructions(user.id, body.conversation_id)
 
     agent = get_agent(body.agent)
     result = await agent.respond(
         user.id, last_user["content"], history=history,
         course_id=body.course_id, folder_id=body.folder_id,
-        conversation_summary=conversation_summary,
+        conversation_summary=conversation_summary, project_instructions=project_instructions,
     )
     await supabase.delete("messages", filters={"user_id": eq(user.id), "id": eq(last_assistant["id"])})
     inserted = await supabase.insert("messages", {
@@ -221,13 +257,15 @@ async def conversations(
         filters["project_id"] = eq(project_id)
     return await supabase.select(
         "conversations",
-        columns="id,title,agent,project_id,tags,archived,created_at,updated_at",
+        columns="id,title,agent,project_id,course_id,pinned,tags,archived,created_at,updated_at",
         filters=filters, order="updated_at.desc", limit=200,
     )
 
 
 # Whitelisted fields a client may change on one of its conversations.
-_CONV_WRITABLE = {"title", "project_id", "tags", "archived"}
+# `course_id` lets the student manually re-file a chat that auto-sorted (or
+# didn't sort) into the wrong class, the same way `project_id` already does.
+_CONV_WRITABLE = {"title", "project_id", "course_id", "pinned", "tags", "archived"}
 
 
 @router.patch("/conversations/{conversation_id}")

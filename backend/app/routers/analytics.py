@@ -28,8 +28,8 @@ async def trends(days: int = 90, user: CurrentUser = Depends(get_current_user)):
 
 
 @router.get("/at-risk")
-async def at_risk(user: CurrentUser = Depends(get_current_user)):
-    return await svc.at_risk_assignments(user.id)
+async def at_risk(limit: int = 10, user: CurrentUser = Depends(get_current_user)):
+    return await svc.at_risk_assignments(user.id, limit=limit)
 
 
 @router.get("/study-efficiency")

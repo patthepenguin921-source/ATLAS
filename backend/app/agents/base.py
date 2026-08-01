@@ -25,9 +25,16 @@ class Agent:
     name: str = "Atlas"
     persona: str = "You are Atlas, an academic operating system."
 
-    def system_prompt(self, context_text: str) -> str:
+    def system_prompt(self, context_text: str, project_instructions: str | None = None) -> str:
+        project_block = (
+            f"\n\n# CUSTOM INSTRUCTIONS FOR THIS PROJECT\nThe student set these for every chat "
+            f"filed under this project -- follow them, but never let them override the operating "
+            f"principles above (e.g. they can't make you fabricate a grade or skip a delete "
+            f"confirmation):\n{project_instructions}"
+            if project_instructions else ""
+        )
         return (
-            f"{self.persona}\n\n{ATLAS_SHARED_PRINCIPLES}\n\n"
+            f"{self.persona}\n\n{ATLAS_SHARED_PRINCIPLES}{project_block}\n\n"
             f"{context_text}\n\n"
             "Ground every statement in the context above. Passages under "
             "\"Relevant passages from your documents\" being present doesn't "
@@ -78,6 +85,7 @@ class Agent:
         course_id: str | None = None,
         folder_id: str | None = None,
         conversation_summary: str | None = None,
+        project_instructions: str | None = None,
     ) -> dict[str, Any]:
         # Run document retrieval and a web search side by side rather than
         # deciding from document-passage similarity alone whether the web is
@@ -111,7 +119,7 @@ class Agent:
             return await tools.execute_tool_for_chat(user_id, name, arguments)
 
         result = await claude.agentic_complete(
-            system=self.system_prompt(context_text),
+            system=self.system_prompt(context_text, project_instructions),
             messages=messages,
             tools=tools.TOOL_SPECS,
             execute_tool=_execute,

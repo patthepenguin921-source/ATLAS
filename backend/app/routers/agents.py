@@ -8,16 +8,25 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.agents import get_agent, tools
 from app.agents.memory_keeper import MemoryKeeper
 from app.agents.registry import Analyst, Coach, Planner, Tutor
+from app.agents.summarizer import get_summary, maybe_update_summary
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.schemas import (ActionConfirmRequest, AnalyzeRequest, ChatRequest, ExplainRequest,
-                         PlanRequest, QuizRequest, ReviewRequest)
+                         MessageFeedbackRequest, PlanRequest, QuizRequest, RegenerateRequest,
+                         ReviewRequest)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
+# How many of a conversation's most recent turns `chat()` sends an agent as
+# raw history. Kept as a module constant (rather than a literal in the query
+# below) because `app.agents.summarizer` needs the exact same number to know
+# which turns it's responsible for summarizing vs. which `chat()` already
+# sends verbatim.
+MAX_HISTORY_MESSAGES = 20
+
 
 async def _persist_turn(user_id: str, conv_id: str | None, agent: str, user_msg: str,
-                        reply: str, context_used: dict) -> str:
+                        reply: str, context_used: dict) -> tuple[str, str | None]:
     if not conv_id:
         conv = await supabase.insert(
             "conversations",
@@ -27,40 +36,44 @@ async def _persist_turn(user_id: str, conv_id: str | None, agent: str, user_msg:
     # PostgREST rejects a bulk insert whose objects don't share the exact same
     # set of keys (PGRST102 "All object keys must match"), so both rows must
     # carry context_used even though only the assistant turn has real data.
-    await supabase.insert("messages", [
+    inserted = await supabase.insert("messages", [
         {"user_id": user_id, "conversation_id": conv_id, "role": "user",
          "content": user_msg, "context_used": {}},
         {"user_id": user_id, "conversation_id": conv_id, "role": "assistant",
          "content": reply, "context_used": context_used},
     ])
+    assistant_message_id = inserted[1]["id"] if inserted and len(inserted) > 1 else None
     # bump the conversation so recent chats sort to the top of the sidebar
     await supabase.update(
         "conversations",
         {"updated_at": datetime.now(timezone.utc).isoformat()},
         filters={"id": eq(conv_id)},
     )
-    return conv_id
+    return conv_id, assistant_message_id
 
 
 @router.post("/chat")
 async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user)):
     agent = get_agent(body.agent)
     history: list[dict[str, str]] = []
+    conversation_summary: str | None = None
     if body.conversation_id:
         prior = await supabase.select(
             "messages", columns="role,content",
             filters={"user_id": eq(user.id), "conversation_id": eq(body.conversation_id),
                      "role": "in.(user,assistant)"},
-            order="created_at.asc", limit=20,
+            order="created_at.asc", limit=MAX_HISTORY_MESSAGES,
         ) or []
         history = [{"role": m["role"], "content": m["content"]} for m in prior]
+        conversation_summary = await get_summary(user.id, body.conversation_id)
 
     result = await agent.respond(
         user.id, body.message, history=history, include_semantic=body.include_semantic,
         attachment_text=body.attachment_text, attachment_filename=body.attachment_filename,
         course_id=body.course_id, folder_id=body.folder_id,
+        conversation_summary=conversation_summary,
     )
-    conv_id = await _persist_turn(
+    conv_id, assistant_message_id = await _persist_turn(
         user.id, body.conversation_id, body.agent, body.message,
         result["reply"], result.get("context_used", {}),
     )
@@ -70,7 +83,77 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
         )
     except Exception:
         pass  # learning long-term facts is best-effort; never break the chat turn
-    return {**result, "conversation_id": conv_id}
+    try:
+        await maybe_update_summary(user.id, conv_id)
+    except Exception:
+        pass  # rolling summary refresh is best-effort; never break the chat turn
+    return {**result, "conversation_id": conv_id, "message_id": assistant_message_id}
+
+
+@router.post("/regenerate")
+async def regenerate(body: RegenerateRequest, user: CurrentUser = Depends(get_current_user)):
+    """Re-runs Atlas's most recent reply in a conversation -- the rejected
+    attempt is replaced in place (its row is deleted, a fresh one inserted)
+    rather than appended, so reopening the conversation later shows one
+    reply per turn, not the original sitting above its replacement. Unlike
+    `chat()`, no new user message is inserted -- the student didn't say
+    anything new, so nothing new needs remembering either (MemoryKeeper /
+    the rolling summarizer are both skipped here on purpose)."""
+    all_msgs = await supabase.select(
+        "messages", columns="id,role,content",
+        filters={"user_id": eq(user.id), "conversation_id": eq(body.conversation_id),
+                 "role": "in.(user,assistant)"},
+        order="created_at.asc", limit=500,
+    ) or []
+    if len(all_msgs) < 2 or all_msgs[-1]["role"] != "assistant" or all_msgs[-2]["role"] != "user":
+        raise HTTPException(400, "Nothing to regenerate.")
+    last_assistant, last_user = all_msgs[-1], all_msgs[-2]
+    history = [
+        {"role": m["role"], "content": m["content"]}
+        for m in all_msgs[:-2]
+    ][-MAX_HISTORY_MESSAGES:]
+    conversation_summary = await get_summary(user.id, body.conversation_id)
+
+    agent = get_agent(body.agent)
+    result = await agent.respond(
+        user.id, last_user["content"], history=history,
+        course_id=body.course_id, folder_id=body.folder_id,
+        conversation_summary=conversation_summary,
+    )
+    await supabase.delete("messages", filters={"user_id": eq(user.id), "id": eq(last_assistant["id"])})
+    inserted = await supabase.insert("messages", {
+        "user_id": user.id, "conversation_id": body.conversation_id, "role": "assistant",
+        "content": result["reply"], "context_used": result.get("context_used", {}),
+    })
+    await supabase.update(
+        "conversations",
+        {"updated_at": datetime.now(timezone.utc).isoformat()},
+        filters={"id": eq(body.conversation_id)},
+    )
+    return {
+        **result,
+        "conversation_id": body.conversation_id,
+        "message_id": inserted[0]["id"] if inserted else None,
+    }
+
+
+@router.patch("/messages/{message_id}/feedback")
+async def set_message_feedback(
+    message_id: str, body: MessageFeedbackRequest, user: CurrentUser = Depends(get_current_user)
+):
+    """A thumbs up/down (+ optional reason) on one of Atlas's own replies --
+    see `messages.feedback` (migration 0025) for why this exists: it's the
+    concrete signal for improving Atlas's prompts/personas/tools over time,
+    since there's no model here to fine-tune directly. `rating: null` clears
+    a previously-set reaction (e.g. the student clicks the same thumb twice)."""
+    updated = await supabase.update(
+        "messages",
+        {"feedback": body.rating, "feedback_note": body.note},
+        filters={"user_id": eq(user.id), "id": eq(message_id), "role": eq("assistant")},
+    )
+    if not updated:
+        raise HTTPException(404, "Message not found")
+    return {"ok": True}
 
 
 @router.post("/actions/confirm")
@@ -164,7 +247,7 @@ async def delete_conversation(conversation_id: str, user: CurrentUser = Depends(
 @router.get("/conversations/{conversation_id}/messages")
 async def conversation_messages(conversation_id: str, user: CurrentUser = Depends(get_current_user)):
     return await supabase.select(
-        "messages", columns="role,content,created_at,context_used",
+        "messages", columns="id,role,content,created_at,context_used,feedback",
         filters={"user_id": eq(user.id), "conversation_id": eq(conversation_id)},
         order="created_at.asc", limit=200,
     )

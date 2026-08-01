@@ -71,6 +71,7 @@ class Agent:
         attachment_filename: str | None = None,
         course_id: str | None = None,
         folder_id: str | None = None,
+        conversation_summary: str | None = None,
     ) -> dict[str, Any]:
         # Run document retrieval and a web search side by side rather than
         # deciding from document-passage similarity alone whether the web is
@@ -90,6 +91,8 @@ class Agent:
         )
         ctx["web_results"] = web_results
         ctx["web_search_error"] = web_search_error
+        if conversation_summary:
+            ctx["conversation_summary"] = conversation_summary
         if attachment_text:
             ctx["attachment"] = {
                 "filename": attachment_filename or "attached file", "text": attachment_text,

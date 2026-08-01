@@ -120,6 +120,70 @@ def test_explicit_major_weight_outranks_an_unweighted_heavy_category(monkeypatch
     )
 
 
+def test_test_and_exam_categories_are_floored_to_high_risk(monkeypatch):
+    """A low-point, far-off test/exam would otherwise score "low" by the
+    raw formula -- its category alone should still put it at "high"."""
+    now = datetime.now(timezone.utc)
+    far_off = (now + timedelta(days=9)).isoformat()
+    rows = [
+        _assignment(title="Small Test", category="test", status="not_started",
+                    due_date=far_off, points_possible=5, difficulty=1),
+        _assignment(title="Small Exam", category="exam", status="not_started",
+                    due_date=far_off, points_possible=5, difficulty=1),
+    ]
+    _install(monkeypatch, rows)
+
+    result = asyncio.run(analytics.at_risk_assignments(USER_ID))
+    by_title = {r["title"]: r for r in result}
+
+    assert by_title["Small Test"]["risk_level"] == "high"
+    assert by_title["Small Exam"]["risk_level"] == "high"
+
+
+def test_quiz_category_is_floored_to_medium_risk(monkeypatch):
+    now = datetime.now(timezone.utc)
+    rows = [
+        _assignment(title="Pop Quiz", category="quiz", status="not_started",
+                    due_date=(now + timedelta(days=9)).isoformat(),
+                    points_possible=5, difficulty=1),
+    ]
+    _install(monkeypatch, rows)
+
+    result = asyncio.run(analytics.at_risk_assignments(USER_ID))
+
+    assert result[0]["risk_level"] == "medium"
+
+
+def test_major_weight_is_floored_to_high_risk_even_outside_test_exam_category(monkeypatch):
+    now = datetime.now(timezone.utc)
+    rows = [
+        _assignment(title="Major Project", category="project", status="not_started",
+                    due_date=(now + timedelta(days=9)).isoformat(),
+                    points_possible=5, difficulty=1, weight=0.7),
+    ]
+    _install(monkeypatch, rows)
+
+    result = asyncio.run(analytics.at_risk_assignments(USER_ID))
+
+    assert result[0]["risk_level"] == "high"
+
+
+def test_category_floor_never_downgrades_an_already_higher_score(monkeypatch):
+    """The floor only ever raises the label -- an overdue test the formula
+    already scores "extreme" must not be capped down to "high"."""
+    now = datetime.now(timezone.utc)
+    rows = [
+        _assignment(title="Overdue Final Exam", category="exam", status="missing",
+                    due_date=(now - timedelta(days=3)).isoformat(),
+                    points_possible=200, difficulty=5, weight=0.7),
+    ]
+    _install(monkeypatch, rows)
+
+    result = asyncio.run(analytics.at_risk_assignments(USER_ID))
+
+    assert result[0]["risk_level"] == "extreme"
+
+
 def test_graded_and_excused_assignments_are_never_at_risk(monkeypatch):
     now = datetime.now(timezone.utc)
     rows = [

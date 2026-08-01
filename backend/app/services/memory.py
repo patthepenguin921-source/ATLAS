@@ -254,6 +254,13 @@ def render_context(ctx: dict[str, Any]) -> str:
         c = courses.get(cid or "")
         return c["name"] if c else "—"
 
+    if ctx.get("conversation_summary"):
+        lines.append(
+            "\n## Earlier in this conversation (summarized -- older turns have "
+            "scrolled out of the raw history below)"
+        )
+        lines.append(ctx["conversation_summary"])
+
     if ctx.get("focused_course"):
         lines.append(
             f"\n## Currently viewing: {ctx['focused_course']}\n"

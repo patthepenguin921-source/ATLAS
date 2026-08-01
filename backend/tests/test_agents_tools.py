@@ -63,11 +63,19 @@ class FakeSupabase:
         self.deleted.append((table, filters))
         return removed
 
+    async def update(self, table, patch, *, filters):
+        updated = []
+        for row in self.tables.setdefault(table, []):
+            if self._match(row, filters):
+                row.update(patch)
+                updated.append(row)
+        return updated
+
 
 @pytest.fixture
 def fake_db(monkeypatch):
     fake = FakeSupabase()
-    for name in ("select", "insert", "delete"):
+    for name in ("select", "insert", "delete", "update"):
         monkeypatch.setattr(supabase, name, getattr(fake, name))
     fake.tables["courses"].append({"id": COURSE_ID, "user_id": USER_ID, "name": "AP Biology"})
     return fake
@@ -146,6 +154,65 @@ def test_add_calendar_event_with_a_time_is_not_all_day(fake_db):
     stored = fake_db.tables["calendar_events"][0]
     assert stored["all_day"] is False
     assert stored["starts_at"] == "2026-10-01T15:30:00"
+
+
+def test_update_assignment_status_marks_submitted_with_a_timestamp(fake_db):
+    fake_db.tables["assignments"].append({
+        "id": "a1", "user_id": USER_ID, "title": "Lab Report", "course_id": COURSE_ID, "status": "in_progress",
+    })
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "update_assignment_status", {"title": "Lab Report", "status": "submitted"},
+    ))
+
+    assert result["status"] == "done"
+    stored = fake_db.tables["assignments"][0]
+    assert stored["status"] == "submitted"
+    assert "submitted_at" in stored
+
+
+def test_update_assignment_status_is_non_destructive_and_never_confirms(fake_db):
+    """Unlike delete_*, this is directly performed by execute_tool_for_chat
+    (the model-facing entry point) -- there's no pending-confirmation step
+    to reverse, since nothing here is destructive."""
+    fake_db.tables["assignments"].append({
+        "id": "a1", "user_id": USER_ID, "title": "Quiz 2", "course_id": COURSE_ID, "status": "not_started",
+    })
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "update_assignment_status", {"title": "Quiz 2", "status": "in_progress"},
+    ))
+
+    assert result["status"] == "done"
+    assert fake_db.tables["assignments"][0]["status"] == "in_progress"
+
+
+def test_update_assignment_status_rejects_a_status_it_should_never_guess(fake_db):
+    """'graded' only ever comes from a real grade sync -- a student
+    declaring it via chat should be rejected, not written through."""
+    fake_db.tables["assignments"].append({
+        "id": "a1", "user_id": USER_ID, "title": "Essay", "course_id": COURSE_ID, "status": "in_progress",
+    })
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "update_assignment_status", {"title": "Essay", "status": "graded"},
+    ))
+
+    assert result["status"] == "error"
+    assert fake_db.tables["assignments"][0]["status"] == "in_progress"  # unchanged
+
+
+def test_update_assignment_status_reports_ambiguous_matches_instead_of_guessing(fake_db):
+    fake_db.tables["assignments"].append({"id": "a1", "user_id": USER_ID, "title": "Quiz", "course_id": COURSE_ID, "status": "not_started"})
+    fake_db.tables["assignments"].append({"id": "a2", "user_id": USER_ID, "title": "Quiz", "course_id": COURSE_ID, "status": "not_started"})
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "update_assignment_status", {"title": "Quiz", "status": "submitted"},
+    ))
+
+    assert result["status"] == "error"
+    assert result["error"] == "ambiguous"
+    assert all(a["status"] == "not_started" for a in fake_db.tables["assignments"])
 
 
 def test_resync_document_delegates_to_the_shared_core_function(fake_db, monkeypatch):

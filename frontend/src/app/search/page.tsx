@@ -4,8 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { AgentPicker } from "@/components/AgentPicker";
 import { ChatAttachButton } from "@/components/ChatAttachButton";
+import { ChatMessageActions } from "@/components/ChatMessageActions";
+import { ChatMessageContent } from "@/components/ChatMessageContent";
 import { FolderPane } from "@/components/FolderPane";
+import { ThinkingDots } from "@/components/ThinkingDots";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
+import { useAutoResizeTextarea } from "@/lib/useAutoResizeTextarea";
 import { AGENTS, useChat } from "@/lib/useChat";
 
 const EXAMPLES = [
@@ -43,6 +47,7 @@ export default function AskAtlasPage() {
   const [filterTag, setFilterTag] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useAutoResizeTextarea(input);
 
   async function loadConversations() {
     try {
@@ -314,33 +319,44 @@ export default function AskAtlasPage() {
                   </div>
                 </div>
               )}
-              {chat.messages.map((m, i) => (
-                <div key={i} className={m.role === "user" ? "flex justify-end" : "animate-fade-in"}>
-                  {m.role === "user" ? (
-                    <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-atlas-accent text-white">
-                      {m.attachmentName && (
-                        <div className="text-xs text-white/80 mb-1">📎 {m.attachmentName}</div>
-                      )}
-                      {m.content}
-                    </div>
-                  ) : (
-                    <div>
-                      <div className="text-[15px] leading-relaxed whitespace-pre-wrap">{m.content}</div>
-                      {m.pendingAction && (
-                        <div className="flex gap-2 mt-2">
-                          <button className="btn-primary !py-1.5 !px-3 text-sm" onClick={() => chat.confirmAction(i)}>
-                            Confirm
-                          </button>
-                          <button className="btn-ghost !py-1.5 !px-3 text-sm" onClick={() => chat.dismissAction(i)}>
-                            Cancel
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-              {chat.busy && <div className="text-xs text-atlas-muted animate-fade-in">{activeAgent?.label} is thinking…</div>}
+              {chat.messages.map((m, i) => {
+                const isLastAssistant = m.role === "assistant" && i === chat.messages.length - 1 && !chat.busy;
+                return (
+                  <div key={i} className={m.role === "user" ? "flex justify-end" : "animate-fade-in"}>
+                    {m.role === "user" ? (
+                      <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-atlas-accent text-white">
+                        {m.attachmentName && (
+                          <div className="text-xs text-white/80 mb-1">📎 {m.attachmentName}</div>
+                        )}
+                        {m.content}
+                      </div>
+                    ) : (
+                      <div>
+                        <ChatMessageContent content={m.content} />
+                        {m.pendingAction && (
+                          <div className="flex gap-2 mt-2">
+                            <button className="btn-primary !py-1.5 !px-3 text-sm" onClick={() => chat.confirmAction(i)}>
+                              Confirm
+                            </button>
+                            <button className="btn-ghost !py-1.5 !px-3 text-sm" onClick={() => chat.dismissAction(i)}>
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+                        {!m.pendingAction && (
+                          <ChatMessageActions
+                            content={m.content}
+                            feedback={m.feedback}
+                            onFeedback={m.id ? (rating) => chat.setFeedback(i, rating) : undefined}
+                            onRegenerate={isLastAssistant ? chat.regenerate : undefined}
+                          />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {chat.busy && <ThinkingDots label={`${activeAgent?.label} is thinking`} />}
               <div ref={endRef} />
             </div>
           </div>
@@ -349,7 +365,8 @@ export default function AskAtlasPage() {
           <div className="w-full pt-3">
             <div className="rounded-2xl border border-atlas-border bg-atlas-panel2 p-2.5 shadow-soft">
               <textarea
-                className="w-full bg-transparent outline-none text-sm resize-none px-2 pt-1 min-h-[44px] max-h-40 placeholder:text-atlas-muted"
+                ref={textareaRef}
+                className="w-full bg-transparent outline-none text-sm resize-none px-2 pt-1 min-h-[44px] max-h-40 overflow-y-auto placeholder:text-atlas-muted"
                 placeholder={`Message the ${activeAgent?.label}…`}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}

@@ -18,6 +18,7 @@ never gets a handle to), not by asking the model nicely to wait.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from app.core.supabase_client import eq, supabase
@@ -35,6 +36,12 @@ _ASSIGNMENT_CATEGORIES = (
     "homework", "classwork", "quiz", "test", "exam", "project", "essay",
     "lab", "discussion", "presentation", "reading", "participation", "other",
 )
+
+# Statuses a student would plausibly declare themselves via chat. Deliberately
+# excludes 'graded' (only a real grade sync produces that) and 'excused'
+# (a teacher's call, not the student's) -- update_assignment_status never
+# guesses at either.
+_ASSIGNMENT_STATUSES = ("not_started", "in_progress", "submitted", "missing", "late")
 
 TOOL_SPECS: list[dict[str, Any]] = [
     {
@@ -91,6 +98,31 @@ TOOL_SPECS: list[dict[str, Any]] = [
                 "description": {"type": "string"},
             },
             "required": ["title", "date"],
+        },
+    },
+    {
+        "name": "update_assignment_status",
+        "description": (
+            "Update the status of an assignment the student already has tracked. Use "
+            "this when they say they've started, finished, turned in, or are missing "
+            "something (e.g. \"I just submitted the lab report\", \"haven't started "
+            "the essay yet\"). Not for creating a new assignment -- use add_assignment "
+            "for that."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "The assignment's title (or a close match)."},
+                "course_name": {"type": "string", "description": "Narrows the search if ambiguous."},
+                "status": {
+                    "type": "string", "enum": list(_ASSIGNMENT_STATUSES),
+                    "description": "The new status: 'submitted' for turned in/finished-and-sent, "
+                                   "'in_progress' for started but not done, 'missing' only if the "
+                                   "student says so themselves, 'not_started' to reset, 'late' if "
+                                   "they say it's overdue but they're still doing it.",
+                },
+            },
+            "required": ["title", "status"],
         },
     },
     {
@@ -283,6 +315,26 @@ async def _add_calendar_event(user_id: str, args: dict[str, Any]) -> dict[str, A
     }
 
 
+async def _update_assignment_status(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    title = (args.get("title") or "").strip()
+    status = args.get("status")
+    if not title or status not in _ASSIGNMENT_STATUSES:
+        return {"status": "error", "message": "Need both an assignment title and a valid status."}
+    course_id, err = await _resolve_course_id(user_id, args.get("course_name"))
+    if err:
+        return err
+    row, err = await _find_one(
+        "assignments", user_id, title, course_id=course_id, columns="id,title,course_id,status",
+    )
+    if err:
+        return err
+    patch: dict[str, Any] = {"status": status}
+    if status == "submitted":
+        patch["submitted_at"] = datetime.now(timezone.utc).isoformat()
+    await supabase.update("assignments", patch, filters={"user_id": eq(user_id), "id": eq(row["id"])})
+    return {"status": "done", "message": f'Marked "{row["title"]}" as {status.replace("_", " ")}.'}
+
+
 async def _resync_document(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
     title = (args.get("document_title") or "").strip()
     if not title:
@@ -370,6 +422,7 @@ async def _perform_delete_document(user_id: str, args: dict[str, Any]) -> dict[s
 _NON_DESTRUCTIVE_HANDLERS = {
     "add_assignment": _add_assignment,
     "add_calendar_event": _add_calendar_event,
+    "update_assignment_status": _update_assignment_status,
     "resync_document": _resync_document,
 }
 

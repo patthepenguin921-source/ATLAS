@@ -126,6 +126,63 @@ TOOL_SPECS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "generate_practice_quiz",
+        "description": (
+            "Generate a practice quiz or exam-style practice test on a topic, grounded "
+            "in the student's own course material. Use this when they ask to be quizzed, "
+            "tested, or given practice questions (e.g. \"quiz me on photosynthesis\", "
+            "\"give me a practice test on bio unit 3\"). Reply with the generated "
+            "questions formatted clearly (numbered) as part of your answer -- don't just "
+            "say you generated them without showing them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "What to quiz/test on."},
+                "course_name": {"type": "string", "description": "The class this relates to, if named."},
+                "unit_name": {
+                    "type": "string",
+                    "description": "A specific unit/folder within that class, if named (e.g. 'unit 3').",
+                },
+                "mode": {
+                    "type": "string", "enum": ["quiz", "test"],
+                    "description": "'quiz' for a quick check, 'test' for a longer exam-style practice "
+                                   "test. Default 'quiz' unless the student says 'test' or 'exam'.",
+                },
+                "num_questions": {
+                    "type": "integer",
+                    "description": "How many questions, if the student says. Defaults to 5 for a "
+                                   "quiz, 8 for a test.",
+                },
+            },
+            "required": ["topic"],
+        },
+    },
+    {
+        "name": "generate_flashcards",
+        "description": (
+            "Generate flashcards (key term + definition pairs) from a document or a whole "
+            "unit's documents, saved for spaced-repetition review in the Knowledge tab. "
+            "Use this when the student asks to make or gather flashcards or key terms "
+            "from a document or unit (e.g. \"make flashcards from this doc\", \"gather "
+            "key terms from bio unit 3\")."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "document_title": {
+                    "type": "string", "description": "A specific document's title, if the student named one.",
+                },
+                "unit_name": {
+                    "type": "string", "description": "A unit/folder to gather from, if not one specific document.",
+                },
+                "course_name": {"type": "string", "description": "The class this relates to, if named."},
+                "max_cards": {"type": "integer", "description": "Max flashcards to generate. Defaults to 15."},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "resync_document",
         "description": (
             "Re-fetch the latest version of a document Atlas already has on file, "
@@ -230,6 +287,32 @@ async def _resolve_course_id(
     return None, {
         "status": "error", "error": "course_not_found",
         "message": f'No class matching "{course_name}" found. Their classes: {names}.',
+    }
+
+
+async def _resolve_folder_id(
+    user_id: str, unit_name: str | None, *, course_id: str | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Fuzzy-match `unit_name` against the student's own folders within the
+    given course (or General, when `course_id` is None) -- same contract as
+    `_resolve_course_id`: (None, None) when no name was given, (id, None) on
+    a match, (None, {error}) when a name was given but nothing matches."""
+    if not unit_name:
+        return None, None
+    filters: dict[str, Any] = {"user_id": eq(user_id)}
+    filters["course_id"] = eq(course_id) if course_id else "is.null"
+    folders = await supabase.select("folders", columns="id,name", filters=filters) or []
+    low = unit_name.strip().lower()
+    for f in folders:
+        if (f.get("name") or "").strip().lower() == low:
+            return f["id"], None
+    for f in folders:
+        if low in (f.get("name") or "").lower():
+            return f["id"], None
+    names = ", ".join(f["name"] for f in folders if f.get("name")) or "no units/folders there yet"
+    return None, {
+        "status": "error", "error": "unit_not_found",
+        "message": f'No unit/folder matching "{unit_name}" found there. Existing: {names}.',
     }
 
 
@@ -354,6 +437,71 @@ async def _resync_document(user_id: str, args: dict[str, Any]) -> dict[str, Any]
     return {"status": "done", "message": f'Re-fetched and reprocessed "{row["title"]}".'}
 
 
+async def _generate_practice_quiz(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    topic = (args.get("topic") or "").strip()
+    if not topic:
+        return {"status": "error", "message": "What topic should the practice cover?"}
+    course_id, err = await _resolve_course_id(user_id, args.get("course_name"))
+    if err:
+        return err
+    folder_id, err = await _resolve_folder_id(user_id, args.get("unit_name"), course_id=course_id)
+    if err:
+        return err
+    mode = args.get("mode") if args.get("mode") in ("quiz", "test") else "quiz"
+    num_questions = args.get("num_questions") or (8 if mode == "test" else 5)
+    try:
+        num_questions = max(1, min(int(num_questions), 15))
+    except (TypeError, ValueError):
+        num_questions = 8 if mode == "test" else 5
+
+    from app.agents.tutor import Tutor  # deferred: see the module docstring
+    result = await Tutor().quiz(
+        user_id, topic, num_questions, mode=mode, course_id=course_id, folder_id=folder_id,
+    )
+    questions = result.get("questions") or []
+    if not questions:
+        return {"status": "error", "message": "Couldn't generate questions for that -- try a more specific topic."}
+    return {"status": "done", "mode": mode, "topic": result.get("topic", topic), "questions": questions}
+
+
+async def _generate_flashcards_tool(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    course_id, err = await _resolve_course_id(user_id, args.get("course_name"))
+    if err:
+        return err
+    document_id = None
+    document_title = (args.get("document_title") or "").strip()
+    if document_title:
+        row, err = await _find_one(
+            "documents", user_id, document_title, course_id=course_id, columns="id,title,course_id",
+        )
+        if err:
+            return err
+        document_id = row["id"]
+    folder_id, err = await _resolve_folder_id(user_id, args.get("unit_name"), course_id=course_id)
+    if err:
+        return err
+    if not document_id and not folder_id and not course_id:
+        return {"status": "error", "message": "Which document, unit, or class should Atlas make flashcards from?"}
+
+    from app.services import flashcards as flashcards_service  # deferred: see the module docstring
+    try:
+        max_cards = int(args.get("max_cards") or 15)
+    except (TypeError, ValueError):
+        max_cards = 15
+    result = await flashcards_service.generate(
+        user_id, document_id=document_id, course_id=course_id, folder_id=folder_id, max_cards=max_cards,
+    )
+    if result.get("status") == "error":
+        return result
+    return {
+        "status": "done", "count": result["count"], "source_label": result["source_label"],
+        "message": (
+            f'Generated {result["count"]} flashcards from "{result["source_label"]}" -- '
+            "find them in the Knowledge tab to review."
+        ),
+    }
+
+
 async def _resolve_delete_target(
     table: str, user_id: str, args: dict[str, Any], columns: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -423,6 +571,8 @@ _NON_DESTRUCTIVE_HANDLERS = {
     "add_assignment": _add_assignment,
     "add_calendar_event": _add_calendar_event,
     "update_assignment_status": _update_assignment_status,
+    "generate_practice_quiz": _generate_practice_quiz,
+    "generate_flashcards": _generate_flashcards_tool,
     "resync_document": _resync_document,
 }
 

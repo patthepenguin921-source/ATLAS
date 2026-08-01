@@ -215,6 +215,80 @@ def test_update_assignment_status_reports_ambiguous_matches_instead_of_guessing(
     assert all(a["status"] == "not_started" for a in fake_db.tables["assignments"])
 
 
+def test_generate_practice_quiz_delegates_to_tutor_with_resolved_scope(fake_db, monkeypatch):
+    fake_db.tables["folders"] = [{"id": "f1", "user_id": USER_ID, "course_id": COURSE_ID, "name": "Unit 3"}]
+    seen = {}
+
+    async def _fake_quiz(self, user_id, topic, num_questions, *, mode, course_id, folder_id):
+        seen.update(user_id=user_id, topic=topic, num_questions=num_questions,
+                    mode=mode, course_id=course_id, folder_id=folder_id)
+        return {"topic": topic, "questions": [{"q": "What is mitosis?", "answer": "Cell division."}]}
+
+    from app.agents.tutor import Tutor
+    monkeypatch.setattr(Tutor, "quiz", _fake_quiz)
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "generate_practice_quiz",
+        {"topic": "cell division", "course_name": "ap bio", "unit_name": "unit 3", "mode": "test"},
+    ))
+
+    assert result["status"] == "done"
+    assert len(result["questions"]) == 1
+    assert seen == {
+        "user_id": USER_ID, "topic": "cell division", "num_questions": 8,
+        "mode": "test", "course_id": COURSE_ID, "folder_id": "f1",
+    }
+
+
+def test_generate_practice_quiz_requires_a_topic(fake_db):
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "generate_practice_quiz", {},
+    ))
+
+    assert result["status"] == "error"
+
+
+def test_generate_practice_quiz_reports_an_unmatched_unit_instead_of_guessing(fake_db):
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "generate_practice_quiz",
+        {"topic": "cell division", "course_name": "ap bio", "unit_name": "nonexistent unit"},
+    ))
+
+    assert result["status"] == "error"
+    assert result["error"] == "unit_not_found"
+
+
+def test_generate_flashcards_tool_resolves_a_named_document_and_calls_the_service(fake_db, monkeypatch):
+    fake_db.tables["documents"].append({
+        "id": "d1", "user_id": USER_ID, "title": "Unit 3 Slideshow", "course_id": COURSE_ID,
+    })
+    seen = {}
+
+    async def _fake_generate(user_id, *, document_id, course_id, folder_id, max_cards):
+        seen.update(user_id=user_id, document_id=document_id, course_id=course_id,
+                    folder_id=folder_id, max_cards=max_cards)
+        return {"status": "done", "count": 3, "source_label": "Unit 3 Slideshow", "cards": []}
+
+    from app.services import flashcards as flashcards_service
+    monkeypatch.setattr(flashcards_service, "generate", _fake_generate)
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "generate_flashcards",
+        {"document_title": "unit 3 slideshow", "course_name": "ap bio"},
+    ))
+
+    assert result["status"] == "done"
+    assert result["count"] == 3
+    assert seen["document_id"] == "d1"
+    assert seen["course_id"] == COURSE_ID
+
+
+def test_generate_flashcards_tool_requires_some_scope(fake_db):
+    result = asyncio.run(tools_module.execute_tool_for_chat(USER_ID, "generate_flashcards", {}))
+
+    assert result["status"] == "error"
+
+
 def test_resync_document_delegates_to_the_shared_core_function(fake_db, monkeypatch):
     doc_id = str(uuid.uuid4())
     fake_db.tables["documents"].append({

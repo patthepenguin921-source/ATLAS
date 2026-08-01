@@ -68,17 +68,26 @@ class MessageFeedbackRequest(BaseModel):
 
 class PlanRequest(BaseModel):
     plan_date: Optional[str] = None
-    available_minutes: int = 180
+    # None means "use the student's configured weekly availability for this
+    # date" (see app.services.schedule) rather than a flat guess -- only
+    # ever set explicitly by a caller overriding that for one day (e.g. "I
+    # actually only have 20 minutes today").
+    available_minutes: Optional[int] = None
 
 
 class ExplainRequest(BaseModel):
     topic: str
     depth: str = "standard"  # quick | standard | deep
+    course_id: Optional[str] = None
+    folder_id: Optional[str] = None
 
 
 class QuizRequest(BaseModel):
     topic: str
     num_questions: int = 5
+    mode: str = "quiz"  # quiz | test
+    course_id: Optional[str] = None
+    folder_id: Optional[str] = None
 
 
 class AnalyzeRequest(BaseModel):
@@ -89,11 +98,36 @@ class ReviewRequest(BaseModel):
     week_start: Optional[str] = None
 
 
+# ---- Study planning ----
+class StudyAvailabilityRequest(BaseModel):
+    """Replaces the student's whole weekly study-availability schedule in one
+    call -- see `PUT /study-availability`. Keys are 0 (Monday) through 6
+    (Sunday); values are minutes available that day. `0` is a legitimate
+    "no time that day", not "unset"."""
+
+    schedule: dict[int, int]
+
+
 # ---- Knowledge model ----
 class KnowledgeReviewRequest(BaseModel):
     concept_id: str
     quality: int = Field(ge=0, le=5)
     confidence: Optional[float] = None
+
+
+# ---- Flashcards ----
+class FlashcardGenerateRequest(BaseModel):
+    """Exactly one scope: a single document, a unit/folder, or a whole
+    class -- see `POST /flashcards/generate`."""
+
+    document_id: Optional[str] = None
+    course_id: Optional[str] = None
+    folder_id: Optional[str] = None
+    max_cards: int = 15
+
+
+class FlashcardReviewRequest(BaseModel):
+    quality: int = Field(ge=0, le=5)
 
 
 # ---- Search ----

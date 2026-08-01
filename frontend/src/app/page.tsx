@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
+import { DailyPlanCard } from "@/components/DailyPlanCard";
 import { Stat, RevealStat, Section, Empty, Loading, gradeTone, Badge, RiskBadge } from "@/components/ui";
 import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import { formatCalendarDate } from "@/lib/date";
@@ -25,25 +26,6 @@ const CATEGORY_TAGS: [string, string][] = [
   ["discussion", "Discussion"], ["presentation", "Presentation"], ["reading", "Reading"],
   ["participation", "Participation"], ["other", "Other"],
 ];
-
-function dayLabel(dateStr: string, planDate: string): string {
-  const d = new Date(dateStr + "T00:00:00");
-  const today = new Date(planDate + "T00:00:00");
-  const diffDays = Math.round((d.getTime() - today.getTime()) / 86400000);
-  if (diffDays === 0) return "Today";
-  if (diffDays === 1) return "Tomorrow";
-  return d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
-}
-
-function groupTasksByDate(tasks: any[]): [string, any[]][] {
-  const groups = new Map<string, any[]>();
-  for (const t of tasks ?? []) {
-    const key = t.date ?? "unscheduled";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(t);
-  }
-  return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
-}
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -129,7 +111,10 @@ export default function DashboardPage() {
   async function generatePlan() {
     setPlanning(true);
     try {
-      await apiPost("/agents/planner/daily-plan", { available_minutes: 180 });
+      // No available_minutes -- the backend reads today's real availability
+      // from the student's own weekly schedule (see /study-availability,
+      // configured on the Knowledge page) instead of a flat guess.
+      await apiPost("/agents/planner/daily-plan", {});
       await load();
     } catch (e: any) {
       setError(e.message);
@@ -287,51 +272,7 @@ export default function DashboardPage() {
 
           {data.daily_plan && (
             <Section title="What needs to happen">
-              <div className="card">
-                <p className="text-sm">{data.daily_plan.summary}</p>
-                {!!data.daily_plan.priorities?.length && (
-                  <ul className="text-sm list-disc list-inside mt-3 space-y-0.5">
-                    {data.daily_plan.priorities.map((p: string, i: number) => (
-                      <li key={i}>{p}</li>
-                    ))}
-                  </ul>
-                )}
-                <div className="mt-4 space-y-4">
-                  {groupTasksByDate(data.daily_plan.blocks).map(([date, tasks]) => (
-                    <div key={date}>
-                      <div className="text-xs font-semibold text-atlas-accent2 uppercase tracking-wide mb-1.5">
-                        {date === "unscheduled" ? "Whenever you can" : dayLabel(date, data.daily_plan.plan_date)}
-                      </div>
-                      <div className="space-y-2">
-                        {tasks.map((t: any, i: number) => (
-                          <div key={i} className="flex items-start justify-between gap-3 text-sm">
-                            <div className="min-w-0">
-                              <span>{t.task}</span>
-                              {t.part && <span className="text-atlas-muted"> · {t.part}</span>}
-                              {(t.course || t.why) && (
-                                <div className="text-xs text-atlas-muted">
-                                  {[t.course, t.why].filter(Boolean).join(" — ")}
-                                </div>
-                              )}
-                            </div>
-                            <div className="text-xs text-atlas-muted whitespace-nowrap text-right">
-                              {t.due_date && t.due_date !== date && (
-                                <div>due {formatCalendarDate(t.due_date)}</div>
-                              )}
-                              {t.estimated_minutes ? <div>{t.estimated_minutes}m</div> : null}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                {data.daily_plan.motivational_note && (
-                  <p className="text-xs text-atlas-muted mt-4 italic">
-                    {data.daily_plan.motivational_note}
-                  </p>
-                )}
-              </div>
+              <DailyPlanCard plan={data.daily_plan} />
             </Section>
           )}
 

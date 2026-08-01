@@ -58,6 +58,8 @@ export const apiPost = <T = any>(p: string, body?: unknown, timeoutMs?: number) 
   api<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined, timeoutMs });
 export const apiPatch = <T = any>(p: string, body: unknown) =>
   api<T>(p, { method: "PATCH", body: JSON.stringify(body) });
+export const apiPut = <T = any>(p: string, body: unknown) =>
+  api<T>(p, { method: "PUT", body: JSON.stringify(body) });
 export const apiDelete = (p: string) => api(p, { method: "DELETE" });
 
 /** Multipart upload (for documents) with auth header, no JSON content-type.

@@ -49,7 +49,7 @@ _CRUD = [
                      writable={"assignment_id", "title", "body", "remind_at", "sent"},
                      default_order="remind_at.asc"),
     make_crud_router(table="chat_projects", prefix="/chat-projects", tag="chat_projects",
-                     writable={"name", "color"},
+                     writable={"name", "color", "instructions"},
                      default_order="created_at.asc"),
     # Clubs/activities (DECA, etc.) — tracked separately from academic
     # courses; see app.integrations.course_mapping.is_club.

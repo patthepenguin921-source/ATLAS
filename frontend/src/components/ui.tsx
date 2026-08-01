@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Icon } from "./Icon";
 
 /** Same layout as Stat, but the value is blurred until the user taps it —
  *  for numbers like GPA that someone might not want visible over your shoulder. */
@@ -207,10 +208,10 @@ export function Modal({
             <h3 className="text-lg font-semibold">{title}</h3>
             <button
               onClick={onClose}
-              className="text-atlas-muted hover:text-atlas-text text-xl leading-none"
+              className="text-atlas-muted hover:text-atlas-text"
               aria-label="Close"
             >
-              ×
+              <Icon name="close" className="w-5 h-5" />
             </button>
           </div>
         )}
@@ -320,7 +321,7 @@ export function ActionMenu({
           setOpen((o) => !o);
         }}
       >
-        ⋯
+        <Icon name="moreVertical" className="w-4 h-4" />
       </button>
       {open && (
         <div className="absolute right-0 top-full mt-1 w-52 rounded-xl border border-atlas-border bg-atlas-panel shadow-soft z-20 py-1 text-sm overflow-hidden">

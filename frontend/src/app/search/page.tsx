@@ -8,6 +8,8 @@ import { ChatMessageActions } from "@/components/ChatMessageActions";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 import { FolderPane } from "@/components/FolderPane";
 import { ThinkingDots } from "@/components/ThinkingDots";
+import { Icon } from "@/components/Icon";
+import { Modal } from "@/components/ui";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import { useAutoResizeTextarea } from "@/lib/useAutoResizeTextarea";
 import { AGENTS, useChat } from "@/lib/useChat";
@@ -56,6 +58,18 @@ export default function AskAtlasPage() {
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useAutoResizeTextarea(input);
 
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null);
+  const [deletingProject, setDeletingProject] = useState(false);
+  const [instructionsTarget, setInstructionsTarget] = useState<Project | null>(null);
+  const [instructionsValue, setInstructionsValue] = useState("");
+  const [savingInstructions, setSavingInstructions] = useState(false);
+  const [addTagTarget, setAddTagTarget] = useState<Conversation | null>(null);
+  const [tagValue, setTagValue] = useState("");
+  const [addingTag, setAddingTag] = useState(false);
+
   async function loadConversations() {
     try {
       setConversations((await apiGet("/agents/conversations")) ?? []);
@@ -94,29 +108,52 @@ export default function AskAtlasPage() {
     chat.send(t);
   }
 
-  async function newProject() {
-    const name = window.prompt("Project name (e.g. AP Biology, Calc Unit 3)");
-    if (!name?.trim()) return;
-    await apiPost("/chat-projects", { name: name.trim() });
-    loadProjects();
+  function openNewProject() {
+    setNewProjectName("");
+    setNewProjectOpen(true);
   }
 
-  async function deleteProject(p: Project) {
-    if (!window.confirm(`Delete "${p.name}"? Its chats move back to ungrouped, not deleted.`)) return;
-    await apiDelete(`/chat-projects/${p.id}`);
-    loadProjects();
-    loadConversations();
+  async function submitNewProject() {
+    const name = newProjectName.trim();
+    if (!name) return;
+    setCreatingProject(true);
+    try {
+      await apiPost("/chat-projects", { name });
+      setNewProjectOpen(false);
+      loadProjects();
+    } finally {
+      setCreatingProject(false);
+    }
   }
 
-  async function editProjectInstructions(p: Project) {
-    const next = window.prompt(
-      `Custom instructions for "${p.name}" — applied to every chat filed under this project ` +
-        `(e.g. "always show your work", "focus on MLA citations"). Leave blank to clear:`,
-      p.instructions ?? ""
-    );
-    if (next === null) return; // cancelled
-    await apiPatch(`/chat-projects/${p.id}`, { instructions: next });
-    loadProjects();
+  async function confirmDeleteProject() {
+    if (!deleteProjectTarget) return;
+    setDeletingProject(true);
+    try {
+      await apiDelete(`/chat-projects/${deleteProjectTarget.id}`);
+      setDeleteProjectTarget(null);
+      loadProjects();
+      loadConversations();
+    } finally {
+      setDeletingProject(false);
+    }
+  }
+
+  function openEditInstructions(p: Project) {
+    setInstructionsValue(p.instructions ?? "");
+    setInstructionsTarget(p);
+  }
+
+  async function submitEditInstructions() {
+    if (!instructionsTarget) return;
+    setSavingInstructions(true);
+    try {
+      await apiPatch(`/chat-projects/${instructionsTarget.id}`, { instructions: instructionsValue });
+      setInstructionsTarget(null);
+      loadProjects();
+    } finally {
+      setSavingInstructions(false);
+    }
   }
 
   async function patchConv(id: string, body: any) {
@@ -130,11 +167,24 @@ export default function AskAtlasPage() {
     if (chat.conv === id) chat.reset();
     loadConversations();
   }
-  async function addTag(c: Conversation) {
-    const tag = window.prompt("Add a tag (class, subject, or unit):");
-    if (!tag?.trim()) return;
-    const tags = Array.from(new Set([...(c.tags ?? []), tag.trim()]));
-    patchConv(c.id, { tags });
+  function openAddTag(c: Conversation) {
+    setTagValue("");
+    setAddTagTarget(c);
+    setMenuId(null);
+  }
+
+  async function submitAddTag() {
+    if (!addTagTarget) return;
+    const tag = tagValue.trim();
+    if (!tag) return;
+    setAddingTag(true);
+    try {
+      const tags = Array.from(new Set([...(addTagTarget.tags ?? []), tag]));
+      await patchConv(addTagTarget.id, { tags });
+      setAddTagTarget(null);
+    } finally {
+      setAddingTag(false);
+    }
   }
 
   const allTags = useMemo(
@@ -153,8 +203,20 @@ export default function AskAtlasPage() {
 
   function ChatRow({ c }: { c: Conversation }) {
     const active = chat.conv === c.id;
+    const open = menuId === c.id;
+    const menuRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+      if (!open) return;
+      const onClick = (e: MouseEvent) => {
+        if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuId(null);
+      };
+      window.addEventListener("mousedown", onClick);
+      return () => window.removeEventListener("mousedown", onClick);
+    }, [open]);
+
     return (
-      <div className="relative group">
+      <div className="relative group" ref={menuRef}>
         <button
           onClick={() => chat.openConversation(c.id, c.agent)}
           className={`w-full text-left pl-3 pr-8 py-2 rounded-lg text-sm transition-colors truncate ${
@@ -164,23 +226,25 @@ export default function AskAtlasPage() {
           }`}
           title={c.title ?? "Conversation"}
         >
-          {c.pinned && <span className="mr-1" title="Pinned">📌</span>}
+          {c.pinned && <Icon name="pin" className="inline w-3 h-3 mr-1 mb-0.5" />}
           {c.title || "Untitled chat"}
           {c.tags?.length ? (
             <span className="ml-1 text-[10px] text-atlas-accent2">#{c.tags[0]}{c.tags.length > 1 ? "…" : ""}</span>
           ) : null}
         </button>
         <button
-          onClick={() => setMenuId(menuId === c.id ? null : c.id)}
+          onClick={() => setMenuId(open ? null : c.id)}
+          aria-label="Conversation options"
           className="absolute right-1.5 top-1/2 -translate-y-1/2 text-atlas-muted hover:text-atlas-text opacity-0 group-hover:opacity-100 px-1"
         >
-          ⋯
+          <Icon name="moreVertical" className="w-4 h-4" />
         </button>
-        {menuId === c.id && (
+        {open && (
           <div className="absolute right-1 top-full z-30 mt-1 w-52 max-h-72 overflow-y-auto rounded-xl border border-atlas-border bg-atlas-panel shadow-soft p-1 text-sm animate-fade-in">
-            <button className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-atlas-panel2"
+            <button className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-atlas-panel2 flex items-center gap-1.5"
               onClick={() => patchConv(c.id, { pinned: !c.pinned })}>
-              {c.pinned ? "Unpin" : "📌 Pin"}
+              {!c.pinned && <Icon name="pin" className="w-3.5 h-3.5" />}
+              {c.pinned ? "Unpin" : "Pin"}
             </button>
             <div className="border-t border-atlas-border my-1" />
             <div className="px-2 py-1 text-[11px] uppercase text-atlas-muted">Move to class</div>
@@ -200,7 +264,7 @@ export default function AskAtlasPage() {
             ))}
             <div className="border-t border-atlas-border my-1" />
             <button className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-atlas-panel2"
-              onClick={() => addTag(c)}>Add tag…</button>
+              onClick={() => openAddTag(c)}>Add tag…</button>
             <button className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-atlas-panel2"
               onClick={() => patchConv(c.id, { archived: !c.archived })}>
               {c.archived ? "Unarchive" : "Archive"}
@@ -232,7 +296,10 @@ export default function AskAtlasPage() {
             isOpen ? "bg-atlas-accent/10 text-atlas-accent" : "text-atlas-muted hover:bg-atlas-panel2 hover:text-atlas-text"
           }`}
         >
-          <span className="truncate">{isOpen ? "▾" : "▸"} {label}</span>
+          <span className="truncate flex items-center gap-1">
+            <Icon name={isOpen ? "chevronDown" : "chevronRight"} className="w-3.5 h-3.5 shrink-0" />
+            {label}
+          </span>
           <span className="text-[10px] shrink-0">{chats.length || ""}</span>
         </button>
         {isOpen && (
@@ -278,7 +345,7 @@ export default function AskAtlasPage() {
                 {showFolders ? "Hide folders" : "Show folders"}
               </button>
               <button className="btn-ghost text-xs" onClick={() => setScope("all")}>
-                ✕ Clear scope
+                <Icon name="close" className="w-3.5 h-3.5" /> Clear scope
               </button>
             </div>
           </div>
@@ -291,7 +358,9 @@ export default function AskAtlasPage() {
         <aside className="hidden lg:flex flex-col gap-2 min-h-0">
           <div className="flex gap-2">
             <button className="btn-primary flex-1 !py-1.5 text-sm" onClick={chat.reset}>+ New chat</button>
-            <button className="btn-ghost !py-1.5 text-sm" onClick={newProject} title="New project">📁</button>
+            <button className="btn-ghost !py-1.5 text-sm !px-2.5" onClick={openNewProject} title="New project" aria-label="New project">
+              <Icon name="folder" className="w-4 h-4" />
+            </button>
           </div>
 
           {allTags.length > 0 && (
@@ -314,20 +383,22 @@ export default function AskAtlasPage() {
               return (
                 <div key={p.id} className="group">
                   <div className="text-[11px] uppercase tracking-wide text-atlas-muted px-1 mb-1 flex items-center gap-1">
-                    <span>📁</span> {p.name}
+                    <Icon name="folder" className="w-3 h-3 shrink-0" /> {p.name}
                     <button
                       className="opacity-0 group-hover:opacity-100 normal-case text-atlas-muted hover:text-atlas-text"
                       title="Edit custom instructions for this project"
-                      onClick={() => editProjectInstructions(p)}
+                      aria-label={`Edit instructions for ${p.name}`}
+                      onClick={() => openEditInstructions(p)}
                     >
-                      ✎
+                      <Icon name="pencil" className="w-3.5 h-3.5" />
                     </button>
                     <button
                       className="ml-auto opacity-0 group-hover:opacity-100 normal-case text-atlas-muted hover:text-atlas-bad"
                       title="Delete project (chats move back to ungrouped)"
-                      onClick={() => deleteProject(p)}
+                      aria-label={`Delete project ${p.name}`}
+                      onClick={() => setDeleteProjectTarget(p)}
                     >
-                      ×
+                      <Icon name="close" className="w-3.5 h-3.5" />
                     </button>
                   </div>
                   <div className="space-y-0.5">
@@ -393,7 +464,9 @@ export default function AskAtlasPage() {
                     {m.role === "user" ? (
                       <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-atlas-accent text-white">
                         {m.attachmentName && (
-                          <div className="text-xs text-white/80 mb-1">📎 {m.attachmentName}</div>
+                          <div className="text-xs text-white/80 mb-1 flex items-center gap-1">
+                            <Icon name="paperclip" className="w-3 h-3 shrink-0" /> {m.attachmentName}
+                          </div>
                         )}
                         {m.content}
                       </div>
@@ -473,6 +546,100 @@ export default function AskAtlasPage() {
           </div>
         </div>
       </div>
+
+      <Modal
+        open={newProjectOpen}
+        onClose={() => setNewProjectOpen(false)}
+        title="New project"
+        footer={
+          <>
+            <button className="btn-ghost" onClick={() => setNewProjectOpen(false)}>Cancel</button>
+            <button className="btn-primary" disabled={creatingProject || !newProjectName.trim()} onClick={submitNewProject}>
+              {creatingProject ? "Creating…" : "Create"}
+            </button>
+          </>
+        }
+      >
+        <input
+          className="input"
+          autoFocus
+          placeholder="e.g. AP Biology, Calc Unit 3"
+          value={newProjectName}
+          onChange={(e) => setNewProjectName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submitNewProject()}
+        />
+      </Modal>
+
+      <Modal
+        open={!!deleteProjectTarget}
+        onClose={() => setDeleteProjectTarget(null)}
+        title={`Delete "${deleteProjectTarget?.name}"?`}
+        footer={
+          <>
+            <button className="btn-ghost" onClick={() => setDeleteProjectTarget(null)}>Cancel</button>
+            <button
+              className="btn-primary !bg-atlas-bad hover:!brightness-110"
+              disabled={deletingProject}
+              onClick={confirmDeleteProject}
+            >
+              {deletingProject ? "Deleting…" : "Delete"}
+            </button>
+          </>
+        }
+      >
+        <p className="text-sm text-atlas-muted">Its chats move back to ungrouped — they aren&apos;t deleted.</p>
+      </Modal>
+
+      <Modal
+        open={!!instructionsTarget}
+        onClose={() => setInstructionsTarget(null)}
+        title={`Custom instructions — ${instructionsTarget?.name}`}
+        footer={
+          <>
+            <button className="btn-ghost" onClick={() => setInstructionsTarget(null)}>Cancel</button>
+            <button className="btn-primary" disabled={savingInstructions} onClick={submitEditInstructions}>
+              {savingInstructions ? "Saving…" : "Save"}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-2">
+          <p className="text-xs text-atlas-muted">
+            Applied to every chat filed under this project (e.g. &quot;always show your work&quot;,
+            &quot;focus on MLA citations&quot;). Leave blank to clear.
+          </p>
+          <textarea
+            className="input"
+            rows={4}
+            autoFocus
+            value={instructionsValue}
+            onChange={(e) => setInstructionsValue(e.target.value)}
+          />
+        </div>
+      </Modal>
+
+      <Modal
+        open={!!addTagTarget}
+        onClose={() => setAddTagTarget(null)}
+        title="Add a tag"
+        footer={
+          <>
+            <button className="btn-ghost" onClick={() => setAddTagTarget(null)}>Cancel</button>
+            <button className="btn-primary" disabled={addingTag || !tagValue.trim()} onClick={submitAddTag}>
+              {addingTag ? "Adding…" : "Add"}
+            </button>
+          </>
+        }
+      >
+        <input
+          className="input"
+          autoFocus
+          placeholder="Class, subject, or unit…"
+          value={tagValue}
+          onChange={(e) => setTagValue(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submitAddTag()}
+        />
+      </Modal>
     </AppShell>
   );
 }

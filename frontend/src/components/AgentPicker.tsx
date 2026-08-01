@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { AGENTS } from "@/lib/useChat";
+import { Icon } from "./Icon";
 
 /** A Claude-model-selector-style dropdown for choosing which agent answers. */
 export function AgentPicker({
@@ -55,7 +56,7 @@ export function AgentPicker({
             >
               <div className="text-sm font-medium flex items-center gap-2">
                 {a.label}
-                {a.id === agent && <span className="text-atlas-accent text-xs">✓</span>}
+                {a.id === agent && <Icon name="check" className="w-3.5 h-3.5 text-atlas-accent" />}
               </div>
               <div className="text-[11px] text-atlas-muted">{a.blurb}</div>
             </button>

@@ -8,6 +8,16 @@ import { Empty, Badge, Section, SkeletonGrid, SkeletonList, gradeTone } from "@/
 import { apiGet, apiPost, apiPut } from "@/lib/api";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/** Color-codes the spaced-repetition quality buttons so "Again" reads as an
+ *  alarm and "Easy" as a green light, instead of four identical gray
+ *  buttons a student has to read to tell apart. */
+const REVIEW_QUALITY_TONE: Record<string, string> = {
+  bad: "text-atlas-bad hover:border-atlas-bad/50",
+  warn: "text-atlas-warn hover:border-atlas-warn/50",
+  good: "text-atlas-good hover:border-atlas-good/50",
+  default: "",
+};
 const TABS = [
   { id: "today", label: "Today" },
   { id: "practice", label: "Practice" },
@@ -187,6 +197,7 @@ function PracticeTab({ courses }: { courses: any[] }) {
   const [explainDepth, setExplainDepth] = useState<"quick" | "standard" | "deep">("standard");
   const [explaining, setExplaining] = useState(false);
   const [explanation, setExplanation] = useState<string | null>(null);
+  const [explainError, setExplainError] = useState<string | null>(null);
 
   useEffect(() => {
     setFolderId("");
@@ -232,6 +243,7 @@ function PracticeTab({ courses }: { courses: any[] }) {
     if (!explainTopic.trim()) return;
     setExplaining(true);
     setExplanation(null);
+    setExplainError(null);
     try {
       const r = await apiPost("/agents/tutor/explain", {
         topic: explainTopic.trim(),
@@ -241,7 +253,7 @@ function PracticeTab({ courses }: { courses: any[] }) {
       });
       setExplanation(r.explanation);
     } catch (e: any) {
-      setExplanation(`⚠️ ${e.message}`);
+      setExplainError(e.message);
     } finally {
       setExplaining(false);
     }
@@ -372,6 +384,9 @@ function PracticeTab({ courses }: { courses: any[] }) {
               {explaining ? "Thinking…" : "Explain"}
             </button>
           </div>
+          {explainError && (
+            <div className="mt-3 border-t border-atlas-border pt-3 text-sm text-atlas-bad">{explainError}</div>
+          )}
           {explanation && (
             <div className="mt-3 border-t border-atlas-border pt-3">
               <ChatMessageContent content={explanation} className="text-sm leading-relaxed" />
@@ -390,7 +405,7 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
   const [docs, setDocs] = useState<any[]>([]);
   const [docId, setDocId] = useState("");
   const [generating, setGenerating] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [deck, setDeck] = useState<any[] | null>(null);
   const [deckError, setDeckError] = useState<string | null>(null);
@@ -445,10 +460,10 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
         folder_id: docId ? undefined : (folderId || undefined),
         max_cards: 15,
       });
-      setMessage(`Generated ${r.count} flashcards from "${r.source_label}".`);
+      setMessage({ ok: true, text: `Generated ${r.count} flashcards from "${r.source_label}".` });
       loadDeck();
     } catch (e: any) {
-      setMessage(`⚠️ ${e.message}`);
+      setMessage({ ok: false, text: e.message });
     } finally {
       setGenerating(false);
     }
@@ -513,7 +528,11 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
           <button className="btn-primary text-sm mt-3" onClick={generate} disabled={generating || !scopeReady}>
             {generating ? "Generating…" : "Generate flashcards"}
           </button>
-          {message && <div className="text-xs text-atlas-muted mt-2">{message}</div>}
+          {message && (
+            <div className={`text-xs mt-2 ${message.ok ? "text-atlas-good" : "text-atlas-bad"}`}>
+              {message.text}
+            </div>
+          )}
         </div>
       </Section>
 
@@ -552,7 +571,11 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
                   { q: 4, label: "Good", tone: "default" },
                   { q: 5, label: "Easy", tone: "good" },
                 ].map((b) => (
-                  <button key={b.q} className="btn-ghost text-xs py-1" onClick={() => reviewCard(b.q)}>
+                  <button
+                    key={b.q}
+                    className={`btn-ghost text-xs py-1 ${REVIEW_QUALITY_TONE[b.tone]}`}
+                    onClick={() => reviewCard(b.q)}
+                  >
                     {b.label}
                   </button>
                 ))}
@@ -614,8 +637,11 @@ function ReviewMasteryTab() {
                     { q: 4, label: "Good", tone: "default" },
                     { q: 5, label: "Easy", tone: "good" },
                   ].map((b) => (
-                    <button key={b.q} className="btn-ghost text-xs py-1"
-                      onClick={() => review(r.concept_id, b.q)}>
+                    <button
+                      key={b.q}
+                      className={`btn-ghost text-xs py-1 ${REVIEW_QUALITY_TONE[b.tone]}`}
+                      onClick={() => review(r.concept_id, b.q)}
+                    >
                       {b.label}
                     </button>
                   ))}

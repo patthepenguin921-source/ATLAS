@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Skeleton, Modal, Badge } from "@/components/ui";
+import { Icon } from "@/components/Icon";
 import { apiGet } from "@/lib/api";
 import { courseColor } from "@/lib/courseColor";
 
@@ -127,7 +128,7 @@ export default function CalendarPage() {
             onClick={() => setCursor((c) => new Date(c.getFullYear(), c.getMonth() - 1, 1))}
             aria-label="Previous month"
           >
-            ←
+            <Icon name="chevronLeft" className="w-4 h-4" />
           </button>
           <div className="text-sm font-medium w-36 text-center">{monthLabel}</div>
           <button
@@ -135,7 +136,7 @@ export default function CalendarPage() {
             onClick={() => setCursor((c) => new Date(c.getFullYear(), c.getMonth() + 1, 1))}
             aria-label="Next month"
           >
-            →
+            <Icon name="chevronRight" className="w-4 h-4" />
           </button>
         </div>
       }
@@ -172,14 +173,12 @@ export default function CalendarPage() {
               const items = itemsByDay.get(key) ?? [];
               const visible = items.slice(0, 3);
               const overflow = items.length - visible.length;
-              return (
-                <button
-                  key={key}
-                  onClick={() => items.length && setSelectedDay(key)}
-                  className={`min-h-24 border-b border-r border-atlas-border p-1.5 text-left align-top transition-colors ${
-                    inMonth ? "bg-transparent" : "bg-atlas-panel2/40"
-                  } ${items.length ? "hover:bg-atlas-panel2 cursor-pointer" : "cursor-default"}`}
-                >
+              const hasItems = items.length > 0;
+              const cellClassName = `min-h-24 border-b border-r border-atlas-border p-1.5 text-left align-top transition-colors ${
+                inMonth ? "bg-transparent" : "bg-atlas-panel2/40"
+              } ${hasItems ? "hover:bg-atlas-panel2 cursor-pointer" : ""}`;
+              const cellContent = (
+                <>
                   <div
                     className={`text-xs mb-1 inline-flex items-center justify-center w-5 h-5 rounded-full ${
                       isToday ? "bg-atlas-accent text-white" : inMonth ? "text-atlas-text" : "text-atlas-muted"
@@ -191,22 +190,31 @@ export default function CalendarPage() {
                     {visible.map((item) => (
                       <div
                         key={item.id}
-                        className="text-[10px] leading-tight truncate rounded px-1 py-0.5"
+                        className="text-[10px] leading-tight truncate rounded px-1 py-0.5 flex items-center gap-0.5"
                         style={{
                           background: `${courseColor(item.course_id ?? "other", courses.find((c) => c.id === item.course_id)?.color)}22`,
                           color: courseColor(item.course_id ?? "other", courses.find((c) => c.id === item.course_id)?.color),
                         }}
                         title={item.title}
                       >
-                        {item.kind === "assignment" ? "▸ " : ""}
-                        {item.title}
+                        {item.kind === "assignment" && <Icon name="chevronRight" className="w-2.5 h-2.5 shrink-0" />}
+                        <span className="truncate">{item.title}</span>
                       </div>
                     ))}
                     {overflow > 0 && (
                       <div className="text-[10px] text-atlas-muted px-1">+{overflow} more</div>
                     )}
                   </div>
+                </>
+              );
+              return hasItems ? (
+                <button key={key} onClick={() => setSelectedDay(key)} className={cellClassName}>
+                  {cellContent}
                 </button>
+              ) : (
+                <div key={key} className={cellClassName}>
+                  {cellContent}
+                </div>
               );
             })}
           </div>

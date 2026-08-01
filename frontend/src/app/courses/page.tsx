@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Empty, SkeletonGrid, Badge, Ring, gradeTone } from "@/components/ui";
+import { Icon } from "@/components/Icon";
 import { ColorPicker } from "@/components/ColorPicker";
 import { courseColor } from "@/lib/courseColor";
 import { apiGet, apiPatch, apiPost } from "@/lib/api";
@@ -334,7 +335,7 @@ export default function CoursesPage() {
             onClick={() => setShowCompleted((s) => !s)}
           >
             <span className="transition-transform inline-block" style={{ transform: showCompleted ? "rotate(90deg)" : "none" }}>
-              ▸
+              <Icon name="chevronRight" className="w-4 h-4" />
             </span>
             Completed classes ({completedGroups.length})
           </button>

@@ -12,7 +12,7 @@ export default function LoginPage() {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -28,7 +28,7 @@ export default function LoginPage() {
       if (mode === "signup") {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
-        setMsg("Check your email to confirm, then sign in.");
+        setMsg({ ok: true, text: "Check your email to confirm, then sign in." });
         setMode("signin");
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
@@ -36,7 +36,7 @@ export default function LoginPage() {
         router.replace("/");
       }
     } catch (err: any) {
-      setMsg(err.message ?? "Something went wrong");
+      setMsg({ ok: false, text: err.message ?? "Something went wrong" });
     } finally {
       setBusy(false);
     }
@@ -76,7 +76,9 @@ export default function LoginPage() {
               placeholder="••••••••"
             />
           </div>
-          {msg && <div className="text-xs text-atlas-warn">{msg}</div>}
+          {msg && (
+            <div className={`text-xs ${msg.ok ? "text-atlas-good" : "text-atlas-bad"}`}>{msg.text}</div>
+          )}
           <button className="btn-primary w-full" disabled={busy}>
             {busy ? "…" : mode === "signin" ? "Sign in" : "Create account"}
           </button>

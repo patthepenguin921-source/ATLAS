@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Empty, Badge, ActionMenu, Loading } from "@/components/ui";
+import { Empty, Badge, ActionMenu, Loading, Modal } from "@/components/ui";
+import { Icon } from "@/components/Icon";
 import { apiGet, apiPost, apiPatch, apiDelete, apiUpload } from "@/lib/api";
 
 type FolderRow = {
@@ -66,7 +67,10 @@ function FolderNode({
         style={{ marginLeft: depth * 14 }}
         onClick={() => onSelect(folder.id)}
       >
-        <span className="truncate">📁 {folder.name}</span>
+        <span className="truncate flex items-center gap-1.5">
+          <Icon name="folder" className="w-3.5 h-3.5 text-atlas-muted shrink-0" />
+          {folder.name}
+        </span>
         <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
           <button
             className="text-atlas-muted hover:text-atlas-text text-xs px-1"
@@ -114,7 +118,12 @@ export function FolderPane({
   const [addingUnder, setAddingUnder] = useState<string | null>(null);
   const [subfolderName, setSubfolderName] = useState("");
   const [uploading, setUploading] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<FolderRow | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<FolderRow | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   async function loadFolders() {
     const f = await apiGet(`/folders?${scopeQuery}`);
@@ -168,19 +177,40 @@ export function FolderPane({
     loadFolders();
   }
 
-  async function renameFolder(folder: FolderRow) {
-    const name = window.prompt("Rename folder:", folder.name)?.trim();
-    if (!name || name === folder.name) return;
-    await apiPatch(`/folders/${folder.id}`, { name });
-    loadFolders();
+  function openRename(folder: FolderRow) {
+    setRenameTarget(folder);
+    setRenameValue(folder.name);
   }
 
-  async function deleteFolder(folder: FolderRow) {
-    if (!window.confirm(`Delete "${folder.name}"? Documents inside move back to the top level.`)) return;
-    await apiDelete(`/folders/${folder.id}`);
-    if (filter === folder.id) setFilter("all");
-    loadFolders();
-    loadDocs(filter === folder.id ? "all" : filter);
+  async function submitRename() {
+    if (!renameTarget) return;
+    const name = renameValue.trim();
+    if (!name || name === renameTarget.name) {
+      setRenameTarget(null);
+      return;
+    }
+    setRenaming(true);
+    try {
+      await apiPatch(`/folders/${renameTarget.id}`, { name });
+      setRenameTarget(null);
+      loadFolders();
+    } finally {
+      setRenaming(false);
+    }
+  }
+
+  async function confirmDeleteFolder() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await apiDelete(`/folders/${deleteTarget.id}`);
+      if (filter === deleteTarget.id) setFilter("all");
+      loadFolders();
+      loadDocs(filter === deleteTarget.id ? "all" : filter);
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
+    }
   }
 
   async function moveDocument(docId: string, folderId: string) {
@@ -207,10 +237,10 @@ export function FolderPane({
       if (result?.id) {
         apiPost(`/documents/${result.id}/process`, {}, 120000).catch(() => {}).finally(() => loadDocs());
       }
-      setStatus(`Uploaded "${file.name}" — processing…`);
+      setStatus({ ok: true, text: `Uploaded "${file.name}" — processing…` });
       loadDocs();
     } catch (err: any) {
-      setStatus(`⚠️ ${err.message}`);
+      setStatus({ ok: false, text: err.message });
     } finally {
       setUploading(false);
       e.target.value = "";
@@ -255,7 +285,7 @@ export function FolderPane({
             key={f.id} folder={f} byParent={byParent} depth={0}
             selected={filter} onSelect={setFilter}
             onAddChild={(id) => setAddingUnder(id)}
-            onRename={renameFolder} onDelete={deleteFolder}
+            onRename={openRename} onDelete={setDeleteTarget}
           />
         ))}
         {addingUnder && (
@@ -289,7 +319,11 @@ export function FolderPane({
             {uploading ? "Uploading…" : "+ Upload here"}
             <input type="file" className="hidden" accept={ACCEPT} onChange={upload} disabled={uploading} />
           </label>
-          {status && <span className="text-xs text-atlas-muted truncate">{status}</span>}
+          {status && (
+            <span className={`text-xs truncate ${status.ok ? "text-atlas-good" : "text-atlas-bad"}`}>
+              {status.text}
+            </span>
+          )}
         </div>
         {docs.length ? (
           <div className="space-y-2">
@@ -324,6 +358,54 @@ export function FolderPane({
           <Empty>No documents here yet.</Empty>
         )}
       </div>
+
+      <Modal
+        open={!!renameTarget}
+        onClose={() => setRenameTarget(null)}
+        title="Rename folder"
+        footer={
+          <>
+            <button className="btn-ghost" onClick={() => setRenameTarget(null)}>Cancel</button>
+            <button
+              className="btn-primary"
+              disabled={renaming || !renameValue.trim()}
+              onClick={submitRename}
+            >
+              {renaming ? "Saving…" : "Save"}
+            </button>
+          </>
+        }
+      >
+        <input
+          className="input"
+          autoFocus
+          value={renameValue}
+          onChange={(e) => setRenameValue(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submitRename()}
+        />
+      </Modal>
+
+      <Modal
+        open={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        title={`Delete "${deleteTarget?.name}"?`}
+        footer={
+          <>
+            <button className="btn-ghost" onClick={() => setDeleteTarget(null)}>Cancel</button>
+            <button
+              className="btn-primary !bg-atlas-bad hover:!brightness-110"
+              disabled={deleting}
+              onClick={confirmDeleteFolder}
+            >
+              {deleting ? "Deleting…" : "Delete"}
+            </button>
+          </>
+        }
+      >
+        <p className="text-sm text-atlas-muted">
+          Documents inside move back to the top level — they aren&apos;t deleted.
+        </p>
+      </Modal>
     </div>
   );
 }

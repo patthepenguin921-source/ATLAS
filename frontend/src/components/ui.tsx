@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
+import { useFloatingPanel } from "@/lib/useFloatingPanel";
 
 /** Same layout as Stat, but the value is blurred until the user taps it —
  *  for numbers like GPA that someone might not want visible over your shoulder. */
@@ -172,13 +173,6 @@ export function RiskBadge({ level }: { level?: string | null }) {
   );
 }
 
-const MODAL_MIN_W = 320;
-const MODAL_MIN_H = 200;
-
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v));
-}
-
 /** Lightweight modal with a backdrop. Closes on backdrop click / Esc.
  *
  *  By default it's centered and fixed-size, with its body scrolling
@@ -214,58 +208,9 @@ export function Modal({
   }, [open, onClose]);
 
   const floating = draggable || resizable;
-  const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
-  const dragState = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
-  const resizeState = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null);
-
-  // Re-centers the floating window each time it opens, sized to fit the
-  // viewport (with a sane cap) rather than remembering wherever a previous
-  // assignment/document's window was left. useLayoutEffect (not useEffect)
-  // so `rect` is set before the first paint -- otherwise the very first
-  // open briefly renders the plain centered modal instead of the floating
-  // one, then jumps.
-  useLayoutEffect(() => {
-    if (!open || !floating) return;
-    const w = Math.min(560, window.innerWidth - 32);
-    const h = Math.min(640, window.innerHeight - 32);
-    setRect({ x: Math.round((window.innerWidth - w) / 2), y: Math.round((window.innerHeight - h) / 2), w, h });
-  }, [open, floating]);
-
-  useEffect(() => {
-    if (!floating) return;
-    function onMove(e: PointerEvent) {
-      setRect((r) => {
-        if (!r) return r;
-        if (dragState.current) {
-          const d = dragState.current;
-          return {
-            ...r,
-            x: clamp(d.origX + (e.clientX - d.startX), 0, window.innerWidth - 80),
-            y: clamp(d.origY + (e.clientY - d.startY), 0, window.innerHeight - 40),
-          };
-        }
-        if (resizeState.current) {
-          const d = resizeState.current;
-          return {
-            ...r,
-            w: clamp(d.origW + (e.clientX - d.startX), MODAL_MIN_W, window.innerWidth - r.x - 8),
-            h: clamp(d.origH + (e.clientY - d.startY), MODAL_MIN_H, window.innerHeight - r.y - 8),
-          };
-        }
-        return r;
-      });
-    }
-    function onUp() {
-      dragState.current = null;
-      resizeState.current = null;
-    }
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-  }, [floating]);
+  const { rect, startDrag, startResize } = useFloatingPanel({
+    open: open && floating, defaultWidth: 560, defaultHeight: 640,
+  });
 
   if (!open) return null;
 
@@ -280,10 +225,7 @@ export function Modal({
           {title && (
             <div
               className={`flex items-start justify-between gap-4 mb-3 shrink-0 ${draggable ? "cursor-move select-none" : ""}`}
-              onPointerDown={(e) => {
-                if (!draggable) return;
-                dragState.current = { startX: e.clientX, startY: e.clientY, origX: rect.x, origY: rect.y };
-              }}
+              onPointerDown={(e) => draggable && startDrag(e)}
             >
               <h3 className="text-lg font-semibold">{title}</h3>
               <button
@@ -304,7 +246,7 @@ export function Modal({
               className="absolute bottom-0.5 right-0.5 w-4 h-4 cursor-nwse-resize text-atlas-muted"
               onPointerDown={(e) => {
                 e.stopPropagation();
-                resizeState.current = { startX: e.clientX, startY: e.clientY, origW: rect.w, origH: rect.h };
+                startResize(e);
               }}
             >
               <Icon name="expand" className="w-full h-full" />

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useAutoResizeTextarea } from "@/lib/useAutoResizeTextarea";
 import { useChat } from "@/lib/useChat";
+import { useFloatingPanel } from "@/lib/useFloatingPanel";
 import { Icon } from "./Icon";
 import { AgentPicker } from "./AgentPicker";
 import { ChatAttachButton } from "./ChatAttachButton";
@@ -11,7 +12,11 @@ import { ChatMessageActions } from "./ChatMessageActions";
 import { ChatMessageContent } from "./ChatMessageContent";
 import { ThinkingDots } from "./ThinkingDots";
 
-/** A floating, always-available chat popup (bottom-right on every page). */
+/** A floating, always-available chat popup (bottom-right on every page).
+ *  Movable by its header and resizable from its bottom-right corner (see
+ *  lib/useFloatingPanel, shared with the assignment detail modal's own
+ *  draggable/resizable mode) so it can be dragged out of the way of
+ *  whatever it's covering instead of being stuck in the corner. */
 export function FloatingChat() {
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
@@ -21,6 +26,10 @@ export function FloatingChat() {
   } = useChat();
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useAutoResizeTextarea(input);
+  const { rect, startDrag, startResize } = useFloatingPanel({
+    open, defaultWidth: 368, defaultHeight: 480, minWidth: 280, minHeight: 320,
+    anchor: "bottom-right", marginX: 24, marginY: 96,
+  });
 
   useEffect(() => {
     if (open) setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
@@ -35,9 +44,15 @@ export function FloatingChat() {
 
   return (
     <>
-      {open && (
-        <div className="fixed bottom-24 right-6 z-40 w-[min(23rem,calc(100vw-3rem))] h-[30rem] max-h-[70vh] flex flex-col rounded-2xl border border-atlas-border bg-atlas-panel shadow-soft animate-fade-in">
-          <div className="flex items-center justify-between gap-2 p-3 border-b border-atlas-border">
+      {open && rect && (
+        <div
+          className="fixed z-40 flex flex-col rounded-2xl border border-atlas-border bg-atlas-panel shadow-soft animate-fade-in"
+          style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
+        >
+          <div
+            className="flex items-center justify-between gap-2 p-3 border-b border-atlas-border cursor-move select-none"
+            onPointerDown={startDrag}
+          >
             <AgentPicker agent={agent} onChange={setAgent} />
             <div className="flex items-center gap-1">
               <button onClick={reset} title="New chat" aria-label="New chat"
@@ -118,6 +133,16 @@ export function FloatingChat() {
               rows={1}
             />
             <button className="btn-primary !px-3 !py-1.5" onClick={submit} disabled={busy}>Send</button>
+          </div>
+
+          <div
+            className="absolute bottom-0.5 right-0.5 w-4 h-4 cursor-nwse-resize text-atlas-muted"
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              startResize(e);
+            }}
+          >
+            <Icon name="expand" className="w-full h-full" />
           </div>
         </div>
       )}

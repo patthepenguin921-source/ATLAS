@@ -13,6 +13,7 @@ import { Modal } from "@/components/ui";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import { useAutoResizeTextarea } from "@/lib/useAutoResizeTextarea";
 import { AGENTS, useChat } from "@/lib/useChat";
+import { groupCourses, currentMember } from "@/lib/courseGroups";
 
 const EXAMPLES = [
   "What mistakes do I keep making in AP Calculus?",
@@ -200,6 +201,20 @@ export default function AskAtlasPage() {
   // null = General) -- used to build the sidebar's per-class sections.
   const ungroupedByCourse = (courseId: string | null) =>
     byProject(null).filter((c) => (c.course_id ?? null) === courseId);
+  // Same, but for a class split into linked semester rows (see
+  // lib/courseGroups) -- a chat scoped to *either* half still belongs to
+  // the one merged section, or "calc"/"bio"/"physics" (all semester-split
+  // subjects) would keep showing as two separate sections in the sidebar.
+  const ungroupedByGroup = (courseIds: string[]) =>
+    byProject(null).filter((c) => c.course_id != null && courseIds.includes(c.course_id));
+  // The 3 most recently updated chats, across every scope/project -- shown
+  // in their own always-visible "Recent" section up top so a chat filed
+  // under a class (or a project) doesn't need its section expanded to be
+  // found quickly. Additive, not a replacement: a recent chat still also
+  // shows up in its normal class/project section below.
+  const mostRecentChats = [...visible]
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+    .slice(0, 3);
 
   function ChatRow({ c }: { c: Conversation }) {
     const active = chat.conv === c.id;
@@ -250,9 +265,9 @@ export default function AskAtlasPage() {
             <div className="px-2 py-1 text-[11px] uppercase text-atlas-muted">Move to class</div>
             <button className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-atlas-panel2"
               onClick={() => patchConv(c.id, { course_id: null })}>General</button>
-            {activeCourses.map((cc) => (
-              <button key={cc.id} className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-atlas-panel2 truncate"
-                onClick={() => patchConv(c.id, { course_id: cc.id })}>{cc.name}</button>
+            {courseGroupList.map((g) => (
+              <button key={g.key} className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-atlas-panel2 truncate"
+                onClick={() => patchConv(c.id, { course_id: currentMember(g).id })}>{g.primary.name}</button>
             ))}
             <div className="border-t border-atlas-border my-1" />
             <div className="px-2 py-1 text-[11px] uppercase text-atlas-muted">Move to project</div>
@@ -323,6 +338,12 @@ export default function AskAtlasPage() {
 
   const activeAgent = AGENTS.find((a) => a.id === chat.agent);
   const activeCourses = courses.filter((c) => c.is_active !== false);
+  // A class split into linked semester rows (see lib/courseGroups) is still
+  // one real class -- group them so it shows up as a single sidebar
+  // section / move-to-class option instead of duplicated once per
+  // semester row.
+  const courseGroupList = groupCourses(activeCourses);
+  const scopeGroup = courseGroupList.find((g) => g.key === scope);
   const scopeName = scope === "general" ? "General" : courses.find((c) => c.id === scope)?.name ?? "this class";
 
   return (
@@ -349,7 +370,16 @@ export default function AskAtlasPage() {
               </button>
             </div>
           </div>
-          {showFolders && <FolderPane courseId={scope === "general" ? null : scope} />}
+          {showFolders && (
+            <FolderPane
+              courseId={
+                scope === "general" ? null : scopeGroup?.members.map((m) => m.id).join(",") ?? scope
+              }
+              uploadCourseId={
+                scope === "general" ? null : scopeGroup ? currentMember(scopeGroup).id : scope
+              }
+            />
+          )}
         </div>
       )}
 
@@ -376,6 +406,19 @@ export default function AskAtlasPage() {
           )}
 
           <div className="space-y-3 overflow-auto max-h-[60vh] pr-1 mt-1">
+            {/* Recent -- the 3 most recently updated chats regardless of
+                scope/project, so one buried in a class section is still
+                one click away. Additive: a chat listed here still also
+                shows up in its normal project/class section below. */}
+            {mostRecentChats.length > 0 && (
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-atlas-muted px-1 mb-1">Recent</div>
+                <div className="space-y-0.5">
+                  {mostRecentChats.map((c) => <ChatRow key={c.id} c={c} />)}
+                </div>
+              </div>
+            )}
+
             {/* Projects */}
             {projects.map((p) => {
               const chats = byProject(p.id);
@@ -420,8 +463,11 @@ export default function AskAtlasPage() {
                 </div>
               )}
               <div className="space-y-1">
-                {activeCourses.map((c) => (
-                  <ScopeSection key={c.id} id={c.id} label={c.name} chats={ungroupedByCourse(c.id)} />
+                {courseGroupList.map((g) => (
+                  <ScopeSection
+                    key={g.key} id={g.key} label={g.primary.name}
+                    chats={ungroupedByGroup(g.members.map((m) => m.id))}
+                  />
                 ))}
                 <ScopeSection id="general" label="General" chats={ungroupedByCourse(null)} />
               </div>

@@ -126,6 +126,84 @@ TOOL_SPECS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "update_assignment",
+        "description": (
+            "Edit an assignment's details -- its description/instructions, personal notes, "
+            "difficulty, weight, points possible, or due date. Difficulty and weight are what "
+            "drive the assignment's risk level (shown as the risk badge / used by the at-risk "
+            "list), so use this to raise or lower an assignment's risk when the student says "
+            "it's harder/easier than expected or counts for more/less toward the grade. Not "
+            "for changing status (use update_assignment_status) or creating a new assignment "
+            "(use add_assignment)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "The assignment's title (or a close match)."},
+                "course_name": {"type": "string", "description": "Narrows the search if ambiguous."},
+                "description": {
+                    "type": "string",
+                    "description": "Replaces the instructions/details text, if the student gave new/updated details.",
+                },
+                "notes": {"type": "string", "description": "Replaces the student's own notes, if given."},
+                "difficulty": {
+                    "type": "integer",
+                    "description": "1 (easiest) to 5 (hardest) -- directly raises or lowers this "
+                                   "assignment's risk level. Use this when the student says an "
+                                   "assignment is harder/easier, or asks to raise/lower its risk.",
+                },
+                "weight_category": {
+                    "type": "string", "enum": list(ASSIGNMENT_WEIGHTS),
+                    "description": "How much this counts toward the grade -- also affects risk.",
+                },
+                "points_possible": {"type": "number", "description": "Points it's worth, if given."},
+                "due_date": {"type": "string", "description": "New due date as YYYY-MM-DD, if given."},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "update_document",
+        "description": (
+            "Edit a document's metadata -- its description/summary, keywords, importance, "
+            "document type, title, or which class it's filed under. Use this when the student "
+            "asks to change, correct, fix, or add to a document's description or other details "
+            "(e.g. \"update the description on that syllabus to say...\", \"mark this doc as "
+            "high importance\", \"this is actually for AP Biology, not General\", \"rename that "
+            "file to...\")."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "document_title": {"type": "string", "description": "The document's title (or a close match)."},
+                "course_name": {"type": "string", "description": "Narrows the search if more than one could match."},
+                "summary": {"type": "string", "description": "Replaces the document's description/summary, if given."},
+                "keywords": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Replaces the document's keyword tags, if given.",
+                },
+                "importance": {
+                    "type": "string", "enum": ["low", "normal", "high"],
+                    "description": "How much this document matters to study/keep track of.",
+                },
+                "doc_type": {
+                    "type": "string",
+                    "enum": ["pdf", "powerpoint", "notes", "announcement", "study_guide", "essay",
+                             "practice_problems", "rubric", "personal_note", "email", "image",
+                             "glance", "other"],
+                    "description": "Re-tags what kind of document this is, if the student corrects it.",
+                },
+                "new_course_name": {
+                    "type": "string",
+                    "description": "Move the document to a different class, if the student says it belongs "
+                                   "elsewhere (matched fuzzily against their real classes).",
+                },
+                "new_title": {"type": "string", "description": "Renames the document, if given."},
+            },
+            "required": ["document_title"],
+        },
+    },
+    {
         "name": "generate_practice_quiz",
         "description": (
             "Generate a practice quiz or exam-style practice test on a topic, grounded "
@@ -418,6 +496,45 @@ async def _update_assignment_status(user_id: str, args: dict[str, Any]) -> dict[
     return {"status": "done", "message": f'Marked "{row["title"]}" as {status.replace("_", " ")}.'}
 
 
+async def _update_assignment(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    title = (args.get("title") or "").strip()
+    if not title:
+        return {"status": "error", "message": "Which assignment should Atlas update?"}
+    course_id, err = await _resolve_course_id(user_id, args.get("course_name"))
+    if err:
+        return err
+    row, err = await _find_one(
+        "assignments", user_id, title, course_id=course_id, columns="id,title,course_id",
+    )
+    if err:
+        return err
+
+    patch: dict[str, Any] = {}
+    if args.get("description") is not None:
+        patch["description"] = args["description"]
+    if args.get("notes") is not None:
+        patch["notes"] = args["notes"]
+    if args.get("difficulty") is not None:
+        try:
+            difficulty = int(args["difficulty"])
+        except (TypeError, ValueError):
+            difficulty = None
+        if difficulty is not None and 1 <= difficulty <= 5:
+            patch["difficulty"] = difficulty
+    weight_category = args.get("weight_category")
+    if weight_category in ASSIGNMENT_WEIGHTS:
+        patch["weight"] = ASSIGNMENT_WEIGHTS[weight_category]
+    if args.get("points_possible") is not None:
+        patch["points_possible"] = args["points_possible"]
+    if args.get("due_date"):
+        patch["due_date"] = args["due_date"]
+    if not patch:
+        return {"status": "error", "message": "Nothing to update -- give at least one detail to change."}
+
+    await supabase.update("assignments", patch, filters={"user_id": eq(user_id), "id": eq(row["id"])})
+    return {"status": "done", "message": f'Updated "{row["title"]}".'}
+
+
 async def _resync_document(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
     title = (args.get("document_title") or "").strip()
     if not title:
@@ -435,6 +552,51 @@ async def _resync_document(user_id: str, args: dict[str, Any]) -> dict[str, Any]
     if not result.get("changed"):
         return {"status": "done", "message": f'"{row["title"]}" is already up to date -- nothing changed.'}
     return {"status": "done", "message": f'Re-fetched and reprocessed "{row["title"]}".'}
+
+
+async def _update_document(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    title = (args.get("document_title") or "").strip()
+    if not title:
+        return {"status": "error", "message": "Which document should Atlas update?"}
+    course_id, err = await _resolve_course_id(user_id, args.get("course_name"))
+    if err:
+        return err
+    row, err = await _find_one(
+        "documents", user_id, title, course_id=course_id, columns="id,title,course_id",
+    )
+    if err:
+        return err
+
+    patch: dict[str, Any] = {}
+    if args.get("summary") is not None or args.get("keywords") is not None:
+        if args.get("summary") is not None:
+            patch["summary"] = args["summary"]
+        if args.get("keywords") is not None:
+            patch["keywords"] = args["keywords"]
+        # Same override-survives-re-enrichment idiom as doc_type/importance
+        # below -- see Archivist.enrich's summary_source guard.
+        patch["summary_source"] = "manual"
+    if args.get("importance") in ("low", "normal", "high"):
+        patch["importance"] = args["importance"]
+        patch["importance_source"] = "manual"
+    if args.get("doc_type"):
+        patch["doc_type"] = args["doc_type"]
+        patch["doc_type_source"] = "manual"
+    if args.get("new_title"):
+        patch["title"] = args["new_title"].strip()
+
+    new_course_name = (args.get("new_course_name") or "").strip()
+    if new_course_name:
+        new_course_id, err = await _resolve_course_id(user_id, new_course_name)
+        if err:
+            return err
+        patch["course_id"] = new_course_id
+        patch["needs_review"] = False
+    if not patch:
+        return {"status": "error", "message": "Nothing to update -- give at least one detail to change."}
+
+    await supabase.update("documents", patch, filters={"user_id": eq(user_id), "id": eq(row["id"])})
+    return {"status": "done", "message": f'Updated "{row["title"]}".'}
 
 
 async def _generate_practice_quiz(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -571,9 +733,11 @@ _NON_DESTRUCTIVE_HANDLERS = {
     "add_assignment": _add_assignment,
     "add_calendar_event": _add_calendar_event,
     "update_assignment_status": _update_assignment_status,
+    "update_assignment": _update_assignment,
     "generate_practice_quiz": _generate_practice_quiz,
     "generate_flashcards": _generate_flashcards_tool,
     "resync_document": _resync_document,
+    "update_document": _update_document,
 }
 
 

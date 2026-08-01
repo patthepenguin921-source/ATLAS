@@ -215,6 +215,85 @@ def test_update_assignment_status_reports_ambiguous_matches_instead_of_guessing(
     assert all(a["status"] == "not_started" for a in fake_db.tables["assignments"])
 
 
+def test_update_assignment_edits_description_notes_and_risk_factors(fake_db):
+    fake_db.tables["assignments"].append({
+        "id": "a1", "user_id": USER_ID, "title": "Lab Report", "course_id": COURSE_ID,
+    })
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "update_assignment",
+        {"title": "Lab Report", "description": "New instructions", "notes": "remember the rubric",
+         "difficulty": 5, "weight_category": "major", "points_possible": 50},
+    ))
+
+    assert result["status"] == "done"
+    stored = fake_db.tables["assignments"][0]
+    assert stored["description"] == "New instructions"
+    assert stored["notes"] == "remember the rubric"
+    assert stored["difficulty"] == 5
+    assert stored["weight"] == 0.7
+    assert stored["points_possible"] == 50
+
+
+def test_update_assignment_ignores_an_out_of_range_difficulty(fake_db):
+    fake_db.tables["assignments"].append({
+        "id": "a1", "user_id": USER_ID, "title": "Essay", "course_id": COURSE_ID, "difficulty": 3,
+    })
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "update_assignment", {"title": "Essay", "difficulty": 9},
+    ))
+
+    assert result["status"] == "error"  # no other field given, and difficulty was rejected
+    assert fake_db.tables["assignments"][0]["difficulty"] == 3
+
+
+def test_update_assignment_requires_at_least_one_field(fake_db):
+    fake_db.tables["assignments"].append({"id": "a1", "user_id": USER_ID, "title": "Essay", "course_id": COURSE_ID})
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "update_assignment", {"title": "Essay"},
+    ))
+
+    assert result["status"] == "error"
+
+
+def test_update_document_edits_summary_and_marks_it_manual(fake_db):
+    fake_db.tables["documents"].append({
+        "id": "d1", "user_id": USER_ID, "title": "Syllabus", "course_id": COURSE_ID,
+    })
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "update_document",
+        {"document_title": "Syllabus", "summary": "Updated description",
+         "keywords": ["grading", "policies"], "importance": "high"},
+    ))
+
+    assert result["status"] == "done"
+    stored = fake_db.tables["documents"][0]
+    assert stored["summary"] == "Updated description"
+    assert stored["keywords"] == ["grading", "policies"]
+    assert stored["summary_source"] == "manual"
+    assert stored["importance"] == "high"
+    assert stored["importance_source"] == "manual"
+
+
+def test_update_document_can_move_it_to_a_different_class(fake_db):
+    fake_db.tables["courses"].append({"id": "other-course", "user_id": USER_ID, "name": "AP Calculus"})
+    fake_db.tables["documents"].append({
+        "id": "d1", "user_id": USER_ID, "title": "Notes", "course_id": None, "needs_review": True,
+    })
+
+    result = asyncio.run(tools_module.execute_tool_for_chat(
+        USER_ID, "update_document", {"document_title": "Notes", "new_course_name": "AP Calculus"},
+    ))
+
+    assert result["status"] == "done"
+    stored = fake_db.tables["documents"][0]
+    assert stored["course_id"] == "other-course"
+    assert stored["needs_review"] is False
+
+
 def test_generate_practice_quiz_delegates_to_tutor_with_resolved_scope(fake_db, monkeypatch):
     fake_db.tables["folders"] = [{"id": "f1", "user_id": USER_ID, "course_id": COURSE_ID, "name": "Unit 3"}]
     seen = {}

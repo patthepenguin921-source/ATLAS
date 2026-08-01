@@ -7,6 +7,7 @@ import { Empty, Badge, Modal, SkeletonList, ActionMenu } from "@/components/ui";
 import { FolderPane } from "@/components/FolderPane";
 import { apiGet, apiUpload, apiPost, apiPatch, apiDelete, API_BASE } from "@/lib/api";
 import { pickFromDrive, driveConfigured } from "@/lib/googleDrive";
+import { groupCourses, currentMember } from "@/lib/courseGroups";
 
 const ACCEPT = ".pdf,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.heic,.heif";
 
@@ -289,6 +290,11 @@ export default function DocumentsPage() {
   // existing documents already filed under one still show up fine via
   // `courseName` above, which isn't filtered.
   const activeCourses = courses.filter((c) => c.is_active !== false);
+  // A class split into linked semester rows (see lib/courseGroups) is still
+  // one real class -- group them so it shows up as a single upload option /
+  // divider pill instead of duplicated once per semester row.
+  const courseGroupList = groupCourses(activeCourses);
+  const dividerGroup = courseGroupList.find((g) => g.key === divider);
   const driveReady = driveConfigured();
 
   async function renameDocument(id: string, currentTitle: string) {
@@ -328,7 +334,9 @@ export default function DocumentsPage() {
               required
             >
               <option value="">Select a class…</option>
-              {activeCourses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {courseGroupList.map((g) => (
+                <option key={g.key} value={currentMember(g).id}>{g.primary.name}</option>
+              ))}
               <option value={GENERAL}>General (not a specific class)</option>
             </select>
           </div>
@@ -404,13 +412,13 @@ export default function DocumentsPage() {
           >
             All
           </button>
-          {activeCourses.map((c) => (
+          {courseGroupList.map((g) => (
             <button
-              key={c.id}
-              className={`pill ${divider === c.id ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
-              onClick={() => setDivider(c.id)}
+              key={g.key}
+              className={`pill ${divider === g.key ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+              onClick={() => setDivider(g.key)}
             >
-              {c.name}
+              {g.primary.name}
             </button>
           ))}
           <button
@@ -423,7 +431,16 @@ export default function DocumentsPage() {
       )}
 
       {divider !== "all" ? (
-        <FolderPane courseId={divider === "general" ? null : divider} />
+        <FolderPane
+          courseId={
+            divider === "general"
+              ? null
+              : dividerGroup?.members.map((m) => m.id).join(",") ?? divider
+          }
+          uploadCourseId={
+            divider === "general" ? null : dividerGroup ? currentMember(dividerGroup).id : divider
+          }
+        />
       ) : (
       <div className="space-y-2">
         {docs?.map((d) => (
@@ -530,7 +547,9 @@ export default function DocumentsPage() {
                 onChange={(e) => setReviewChoice((c) => ({ ...c, [r.id!]: e.target.value }))}
               >
                 <option value="">Select a class…</option>
-                {activeCourses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                {courseGroupList.map((g) => (
+                  <option key={g.key} value={currentMember(g).id}>{g.primary.name}</option>
+                ))}
               </select>
               <button
                 className="btn-ghost text-xs"

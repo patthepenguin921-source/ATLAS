@@ -157,13 +157,17 @@ class DocumentPatchRequest(BaseModel):
     """Used by the bulk-upload review screen to correct an auto-detected
     course, and by the documents page to re-title a document, re-tag its
     type, move it to a different folder, or override its importance
-    rating."""
+    rating. Also the write path for the chat agent's `update_document` tool
+    (see `app.agents.tools`), which is how a student edits a document's
+    summary/keywords by asking Atlas rather than typing into a form."""
 
     course_id: Optional[str] = None
     title: Optional[str] = None
     needs_review: Optional[bool] = None
     importance: Optional[Literal["low", "normal", "high"]] = None
     doc_type: Optional[_DOC_TYPES] = None
+    summary: Optional[str] = None
+    keywords: Optional[list[str]] = None
     # Moving a document into (or out of, via null) a subfolder. Setting this
     # always marks `folder_source: manual` server-side (see
     # POST /documents/{id}) so the Archivist's auto-sort never re-files a

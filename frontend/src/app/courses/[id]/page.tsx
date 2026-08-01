@@ -483,7 +483,10 @@ export default function CourseDetailPage() {
       </Section>
 
       <Section title="Files & folders">
-        <FolderPane courseId={id} />
+        <FolderPane
+          courseId={semesters.length > 1 ? semesters.map((s) => s.id).join(",") : id}
+          uploadCourseId={id}
+        />
       </Section>
 
       <Section title="Assistant">

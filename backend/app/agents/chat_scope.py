@@ -12,19 +12,24 @@ conversation that already has a `course_id` -- set explicitly or by an
 earlier pass of this same function -- is never reconsidered, so a manual
 re-scope from the sidebar always sticks.
 
-Two ways a turn gets sorted:
+Three ways a turn gets sorted, checked in order:
 1. Direct mention -- one of the student's real course names appears
    verbatim in the exchange, either their own message (e.g. "what's due in
    AP Biology") or Atlas's reply (a grounded answer routinely names the
    class even when the student's own phrasing didn't). This is the literal
    "a course got mentioned" case, checked on *every* unscoped turn,
    deterministically and without an LLM call.
-2. Model judgment -- for a turn that doesn't name a class directly but
-   still clearly reads as belonging to one (e.g. "what's due in bio" for a
-   student with only one science class), asked only once, on a brand-new
-   conversation's first turn (see `allow_llm_fallback`) -- repeating a
-   speculative judgment call on every later turn of a genuinely general
-   conversation would just burn model calls for no benefit.
+2. Subject/abbreviation mention -- casual shorthand that never appears as a
+   course's literal name ("calc", "calculus", "AP Calc" for a course
+   actually named "AP Calculus AB", or just "math"/"bio") -- see
+   `_SUBJECT_ALIASES`. Same as #1: every unscoped turn, deterministic, no
+   LLM call.
+3. Model judgment -- for a turn that doesn't name or hint at a class
+   directly but still clearly reads as belonging to one, asked only once,
+   on a brand-new conversation's first turn (see `allow_llm_fallback`) --
+   repeating a speculative judgment call on every later turn of a
+   genuinely general conversation would just burn model calls for no
+   benefit.
 """
 from __future__ import annotations
 
@@ -53,6 +58,69 @@ def _direct_mention(user_message: str, reply: str, courses: list[dict]) -> dict 
     return matches[0] if len(matches) == 1 else None
 
 
+# Casual shorthand/abbreviations students actually type ("calc", "bio",
+# "AP Calc") mapped to a regex fragment matched against a course's real
+# name -- `_direct_mention` above only catches a course name appearing
+# *verbatim*, which misses all of these ("calc" isn't a substring of "AP
+# Calculus" as a whole phrase). Each key is checked as its own
+# word-boundary match against the exchange; "math" is deliberately broad
+# (matches any of the specific math subjects below) since a student saying
+# "my math class" means whichever math course they actually have.
+_SUBJECT_ALIASES: dict[str, str] = {
+    "calc": r"calc(ulus)?",
+    "calculus": r"calc(ulus)?",
+    "math": r"\bmath\b|calc(ulus)?|algebra|geometry|trig(onometry)?|"
+            r"pre.?calc(ulus)?|statistics|stats",
+    "algebra": r"algebra",
+    "geometry": r"geometry",
+    "trig": r"trig(onometry)?",
+    "precalc": r"pre.?calc(ulus)?",
+    "stats": r"stat(istics)?",
+    "statistics": r"stat(istics)?",
+    "bio": r"bio(logy)?",
+    "biology": r"bio(logy)?",
+    "chem": r"chem(istry)?",
+    "chemistry": r"chem(istry)?",
+    "physics": r"physics",
+    "phys": r"physics",
+    "english": r"english|lang(uage)?\s*arts|literature",
+    "lit": r"lit(erature)?",
+    "history": r"hist(ory)?",
+    "hist": r"hist(ory)?",
+    "gov": r"gov(ernment|t)?",
+    "government": r"gov(ernment|t)?",
+    "econ": r"econ(omics)?",
+    "economics": r"econ(omics)?",
+    "psych": r"psych(ology)?",
+    "psychology": r"psych(ology)?",
+    "spanish": r"spanish",
+    "french": r"french",
+    "cs": r"comp(uter)?\s*sci(ence)?",
+    "compsci": r"comp(uter)?\s*sci(ence)?",
+}
+
+
+def _subject_mention(user_message: str, reply: str, courses: list[dict]) -> dict | None:
+    """A looser companion to `_direct_mention` for casual subject shorthand
+    that never appears as a course's literal name -- "calc", "calculus",
+    "AP Calc", or just "math" for a student whose real course is named "AP
+    Calculus AB". For each subject word actually typed, matches it against
+    every course's real name via `_SUBJECT_ALIASES`; still returns None
+    unless every alias hit resolves to the exact same single course, so
+    e.g. "math" with two different math classes on file stays unscoped
+    rather than guessing between them."""
+    low = f"{user_message}\n{reply}".lower()
+    matched: dict[str, dict] = {}
+    for alias, pattern in _SUBJECT_ALIASES.items():
+        if not re.search(rf"\b{re.escape(alias)}\b", low):
+            continue
+        for c in courses:
+            name = c.get("name") or ""
+            if re.search(pattern, name, re.I):
+                matched[c["id"]] = c
+    return next(iter(matched.values())) if len(matched) == 1 else None
+
+
 async def maybe_classify_scope(
     user_id: str, conversation_id: str, user_message: str, reply: str,
     *, allow_llm_fallback: bool = True,
@@ -76,7 +144,7 @@ async def maybe_classify_scope(
         if not courses:
             return
 
-        direct = _direct_mention(user_message, reply, courses)
+        direct = _direct_mention(user_message, reply, courses) or _subject_mention(user_message, reply, courses)
         if direct:
             await supabase.update(
                 "conversations", {"course_id": direct["id"]},

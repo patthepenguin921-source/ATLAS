@@ -233,6 +233,8 @@ export default function AssignmentsPage() {
         open={!!selected}
         onClose={() => setSelected(null)}
         title={selected?.title}
+        draggable
+        resizable
         footer={
           selected && (
             <>

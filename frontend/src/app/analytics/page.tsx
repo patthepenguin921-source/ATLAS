@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Stat, RevealStat, Section, Empty, Loading, Badge, RiskBadge } from "@/components/ui";
+import { Stat, RevealStat, Section, Empty, SkeletonStats, Badge, RiskBadge } from "@/components/ui";
 import { apiGet, apiPost } from "@/lib/api";
 
 export default function AnalyticsPage() {
@@ -40,7 +40,7 @@ export default function AnalyticsPage() {
         {busy ? "Analyzing…" : "Ask the Analyst"}
       </button>}
     >
-      {!snap && <Loading />}
+      {!snap && <SkeletonStats count={4} />}
       {snap && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">

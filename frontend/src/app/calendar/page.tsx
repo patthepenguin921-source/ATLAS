@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Loading, Modal, Badge } from "@/components/ui";
+import { Skeleton, Modal, Badge } from "@/components/ui";
 import { apiGet } from "@/lib/api";
 import { courseColor } from "@/lib/courseColor";
 
@@ -141,7 +141,20 @@ export default function CalendarPage() {
       }
     >
       {loading && !data ? (
-        <Loading label="Loading your calendar…" />
+        <div className="card !p-0 overflow-hidden">
+          <div className="grid grid-cols-7 border-b border-atlas-border">
+            {WEEKDAY_LABELS.map((w) => (
+              <div key={w} className="px-2 py-2 text-xs font-medium text-atlas-muted text-center">{w}</div>
+            ))}
+          </div>
+          <div className="grid grid-cols-7">
+            {Array.from({ length: 42 }).map((_, i) => (
+              <div key={i} className="min-h-24 border-b border-r border-atlas-border p-1.5">
+                <Skeleton className="h-3 w-5" />
+              </div>
+            ))}
+          </div>
+        </div>
       ) : (
         <div className="card !p-0 overflow-hidden">
           <div className="grid grid-cols-7 border-b border-atlas-border">

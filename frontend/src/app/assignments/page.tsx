@@ -37,6 +37,7 @@ export default function AssignmentsPage() {
   const [items, setItems] = useState<any[] | null>(null);
   const [courses, setCourses] = useState<any[]>([]);
   const [risk, setRisk] = useState<Record<string, { risk_level: string; risk_score: number }>>({});
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<any | null>(null);
   const [editing, setEditing] = useState(false);
@@ -49,12 +50,19 @@ export default function AssignmentsPage() {
   });
 
   async function load() {
-    const [a, c, r] = await Promise.all([
-      apiGet("/assignments"), apiGet("/courses"), apiGet("/analytics/at-risk?limit=100"),
-    ]);
-    setItems(a);
-    setCourses(c);
-    setRisk(Object.fromEntries((r ?? []).map((x: any) => [x.id, x])));
+    try {
+      const [a, c, r] = await Promise.all([
+        apiGet("/assignments"), apiGet("/courses"), apiGet("/analytics/at-risk?limit=100"),
+      ]);
+      setItems(a);
+      setCourses(c);
+      setRisk(Object.fromEntries((r ?? []).map((x: any) => [x.id, x])));
+      setLoadError(null);
+    } catch (e: any) {
+      // Without this, a failed request left `items` at its initial `null`
+      // forever -- the skeleton below just spins with no explanation.
+      setLoadError(e.message);
+    }
   }
   useEffect(() => {
     load();
@@ -175,7 +183,14 @@ export default function AssignmentsPage() {
         </form>
       )}
 
-      {!items && <SkeletonList rows={4} />}
+      {!items && !loadError && <SkeletonList rows={4} />}
+      {loadError && !items && (
+        <div className="card border-atlas-bad/40 text-sm mb-6">
+          <div className="font-medium text-atlas-bad">Couldn't load your assignments</div>
+          <div className="text-atlas-muted mt-1">{loadError}</div>
+          <button className="btn-ghost text-xs mt-2" onClick={() => load()}>Retry</button>
+        </div>
+      )}
       {items && !items.length && <Empty>No assignments yet.</Empty>}
       <div className="space-y-2">
         {items?.map((a) => (

@@ -19,6 +19,12 @@ export function CourseAssistant({ courseId, courseName }: { courseId: string; co
   const textareaRef = useAutoResizeTextarea(input);
 
   useEffect(() => {
+    // Guarded on `messages.length` -- without it, this fires on the very
+    // first render too (an empty `messages` array still counts as a
+    // dependency change from "undefined" to "[]"), which pulls the whole
+    // course page down to this panel's bottom the instant it mounts, every
+    // time you open a class page.
+    if (!messages.length) return;
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 

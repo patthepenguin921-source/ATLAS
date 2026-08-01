@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
-import { Badge, Empty, Loading, Section } from "@/components/ui";
+import { Badge, Empty, SkeletonList, Section } from "@/components/ui";
 import { apiGet, apiPatch } from "@/lib/api";
 
 const IMPORTANCE_LABEL: Record<string, string> = { low: "Low", normal: "Normal", high: "High" };
@@ -55,7 +55,7 @@ export default function DocumentDetailPage() {
   if (!doc) {
     return (
       <AppShell title="Document">
-        <Loading />
+        <SkeletonList rows={3} />
       </AppShell>
     );
   }

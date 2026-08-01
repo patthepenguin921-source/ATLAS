@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Empty, Loading, Badge, Modal, Section, Ring, ActionMenu } from "@/components/ui";
+import { Empty, Loading, Badge, Modal, Section, Ring, ActionMenu, SkeletonList } from "@/components/ui";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 
 interface Profile {
@@ -70,11 +70,15 @@ function SettingsPageInner() {
 
 function AccountTab() {
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  function load() {
+    apiGet<Profile>("/profile").then(setProfile).catch((e: any) => setLoadError(e.message));
+  }
   useEffect(() => {
-    apiGet<Profile>("/profile").then(setProfile);
+    load();
   }, []);
 
   async function save() {
@@ -96,7 +100,16 @@ function AccountTab() {
     }
   }
 
-  if (!profile) return <Loading />;
+  if (loadError && !profile) {
+    return (
+      <div className="card border-atlas-bad/40 text-sm">
+        <div className="font-medium text-atlas-bad">Couldn't load your profile</div>
+        <div className="text-atlas-muted mt-1">{loadError}</div>
+        <button className="btn-ghost text-xs mt-2" onClick={load}>Retry</button>
+      </div>
+    );
+  }
+  if (!profile) return <SkeletonList rows={1} />;
 
   return (
     <Section title="Profile">
@@ -159,10 +172,16 @@ function AccountTab() {
 
 function MemoryTab() {
   const [facts, setFacts] = useState<Fact[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
 
   async function load() {
-    setFacts(await apiGet<Fact[]>("/agents/facts"));
+    try {
+      setFacts(await apiGet<Fact[]>("/agents/facts"));
+      setLoadError(null);
+    } catch (e: any) {
+      setLoadError(e.message);
+    }
   }
   useEffect(() => {
     load();
@@ -180,7 +199,14 @@ function MemoryTab() {
 
   return (
     <Section title="What Atlas has learned about you">
-      {!facts && <Loading />}
+      {!facts && !loadError && <SkeletonList rows={3} />}
+      {loadError && !facts && (
+        <div className="card border-atlas-bad/40 text-sm">
+          <div className="font-medium text-atlas-bad">Couldn't load what Atlas remembers</div>
+          <div className="text-atlas-muted mt-1">{loadError}</div>
+          <button className="btn-ghost text-xs mt-2" onClick={() => load()}>Retry</button>
+        </div>
+      )}
       {facts && !facts.length && (
         <Empty>
           Nothing yet. As you chat with Atlas, durable preferences and context it picks up
@@ -402,6 +428,7 @@ function IntegrationsTab() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [integrations, setIntegrations] = useState<Integration[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [googleConnecting, setGoogleConnecting] = useState(false);
   const [googleDisconnecting, setGoogleDisconnecting] = useState(false);
   const [googleStatus, setGoogleStatus] = useState<{ ok: boolean; text: string } | null>(null);
@@ -446,7 +473,12 @@ function IntegrationsTab() {
   const [verifyError, setVerifyError] = useState<string | null>(null);
 
   async function load() {
-    setIntegrations(await apiGet<Integration[]>("/integrations"));
+    try {
+      setIntegrations(await apiGet<Integration[]>("/integrations"));
+      setLoadError(null);
+    } catch (e: any) {
+      setLoadError(e.message);
+    }
   }
   useEffect(() => {
     load();
@@ -728,7 +760,16 @@ function IntegrationsTab() {
     await load();
   }
 
-  if (integrations === null) return <Loading />;
+  if (loadError && integrations === null) {
+    return (
+      <div className="card border-atlas-bad/40 text-sm">
+        <div className="font-medium text-atlas-bad">Couldn't load your integrations</div>
+        <div className="text-atlas-muted mt-1">{loadError}</div>
+        <button className="btn-ghost text-xs mt-2" onClick={() => load()}>Retry</button>
+      </div>
+    );
+  }
+  if (integrations === null) return <SkeletonList rows={2} />;
 
   return (
     <>

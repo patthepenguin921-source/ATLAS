@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
-import { Empty, Loading, Badge, Ring, gradeTone } from "@/components/ui";
+import { Empty, SkeletonGrid, Badge, Ring, gradeTone } from "@/components/ui";
 import { ColorPicker } from "@/components/ColorPicker";
 import { courseColor } from "@/lib/courseColor";
 import { apiGet, apiPatch, apiPost } from "@/lib/api";
@@ -97,6 +97,7 @@ const emptyForm = {
 export default function CoursesPage() {
   const router = useRouter();
   const [courses, setCourses] = useState<Course[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [open, setOpen] = useState(false);
   const dragIndex = useRef<number | null>(null);
@@ -105,7 +106,12 @@ export default function CoursesPage() {
   const [showCompleted, setShowCompleted] = useState(false);
 
   async function load() {
-    setCourses(await apiGet("/courses"));
+    try {
+      setCourses(await apiGet("/courses"));
+      setLoadError(null);
+    } catch (e: any) {
+      setLoadError(e.message);
+    }
   }
   useEffect(() => {
     load();
@@ -232,7 +238,14 @@ export default function CoursesPage() {
         </form>
       )}
 
-      {!courses && <Loading />}
+      {!courses && !loadError && <SkeletonGrid items={6} />}
+      {loadError && !courses && (
+        <div className="card border-atlas-bad/40 text-sm mb-6">
+          <div className="font-medium text-atlas-bad">Couldn't load your classes</div>
+          <div className="text-atlas-muted mt-1">{loadError}</div>
+          <button className="btn-ghost text-xs mt-2" onClick={() => load()}>Retry</button>
+        </div>
+      )}
       {courses && !courses.length && <Empty>No courses yet. Add your first one.</Empty>}
       {courses && courses.length > 0 && activeGroups.length === 0 && (
         <Empty>No current classes — see completed classes below.</Empty>

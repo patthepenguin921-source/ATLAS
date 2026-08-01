@@ -297,10 +297,17 @@ async def list_documents(
     -- mutually exclusive with `course_id`. `folder_id` further narrows to
     one subfolder within whichever scope; `unfiled=true` instead narrows to
     documents with no folder at all (that class's/General's own top level).
-    Pass at most one of `folder_id`/`unfiled` alongside `course_id`/`general`."""
+    Pass at most one of `folder_id`/`unfiled` alongside `course_id`/`general`.
+
+    `course_id` accepts a comma-separated list of ids -- a class split into
+    linked semester rows (see `linked_course_id`, migration 0009) is still
+    one real class, so the frontend's merged divider for it passes every
+    member id here rather than just one, or documents filed under the
+    "other half" would go missing from that class's own divider."""
     filters: dict[str, str] = {"user_id": eq(user.id)}
     if course_id:
-        filters["course_id"] = eq(course_id)
+        ids = [c for c in course_id.split(",") if c]
+        filters["course_id"] = eq(ids[0]) if len(ids) == 1 else f"in.({','.join(ids)})"
     elif general:
         filters["course_id"] = "is.null"
     if folder_id:
@@ -576,8 +583,9 @@ async def update_document(
     document_id: str, body: DocumentPatchRequest, user: CurrentUser = Depends(get_current_user),
 ):
     """Used by the bulk-upload review screen to correct an auto-detected
-    course, and by the documents page to rename a document, re-tag its type,
-    or override its importance rating."""
+    course, by the documents page to rename a document, re-tag its type, or
+    override its importance rating, and by the chat agent's update_document
+    tool (see `app.agents.tools`) to edit a document's summary/keywords."""
     patch = body.model_dump(exclude_unset=True)
     if not patch:
         raise HTTPException(400, "No fields to update.")
@@ -594,6 +602,11 @@ async def update_document(
     # and `Archivist.enrich`), not get silently reverted.
     if "doc_type" in patch:
         patch["doc_type_source"] = "manual"
+    # Same idea again for summary/keywords — a manually edited description
+    # (typed in, or set via the chat agent's update_document tool) must
+    # survive the next re-enrichment pass too (see `Archivist.enrich`).
+    if "summary" in patch or "keywords" in patch:
+        patch["summary_source"] = "manual"
     # Same idea again for folder — a student moving a document (or clearing
     # its folder back to a class's top level) must survive the next
     # re-enrichment's auto-sort pass (see `Archivist.enrich`).

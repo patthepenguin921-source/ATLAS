@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
 
 /** Same layout as Stat, but the value is blurred until the user taps it —
@@ -172,19 +172,39 @@ export function RiskBadge({ level }: { level?: string | null }) {
   );
 }
 
-/** Lightweight centered modal with a backdrop. Closes on backdrop click / Esc. */
+const MODAL_MIN_W = 320;
+const MODAL_MIN_H = 200;
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
+/** Lightweight modal with a backdrop. Closes on backdrop click / Esc.
+ *
+ *  By default it's centered and fixed-size, with its body scrolling
+ *  internally once content grows past the viewport (so a long assignment
+ *  description never pushes the Close/Save buttons off-screen with no way
+ *  to reach them). Pass `draggable`/`resizable` to turn it into a floating
+ *  window instead -- positioned by its own state rather than centered by
+ *  the backdrop, movable by its title bar and resizable from its bottom-right
+ *  corner, so it can be moved anywhere on screen instead of blocking the
+ *  middle of it. */
 export function Modal({
   open,
   onClose,
   title,
   children,
   footer,
+  draggable = false,
+  resizable = false,
 }: {
   open: boolean;
   onClose: () => void;
   title?: React.ReactNode;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  draggable?: boolean;
+  resizable?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -193,14 +213,115 @@ export function Modal({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  const floating = draggable || resizable;
+  const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const dragState = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const resizeState = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null);
+
+  // Re-centers the floating window each time it opens, sized to fit the
+  // viewport (with a sane cap) rather than remembering wherever a previous
+  // assignment/document's window was left. useLayoutEffect (not useEffect)
+  // so `rect` is set before the first paint -- otherwise the very first
+  // open briefly renders the plain centered modal instead of the floating
+  // one, then jumps.
+  useLayoutEffect(() => {
+    if (!open || !floating) return;
+    const w = Math.min(560, window.innerWidth - 32);
+    const h = Math.min(640, window.innerHeight - 32);
+    setRect({ x: Math.round((window.innerWidth - w) / 2), y: Math.round((window.innerHeight - h) / 2), w, h });
+  }, [open, floating]);
+
+  useEffect(() => {
+    if (!floating) return;
+    function onMove(e: PointerEvent) {
+      setRect((r) => {
+        if (!r) return r;
+        if (dragState.current) {
+          const d = dragState.current;
+          return {
+            ...r,
+            x: clamp(d.origX + (e.clientX - d.startX), 0, window.innerWidth - 80),
+            y: clamp(d.origY + (e.clientY - d.startY), 0, window.innerHeight - 40),
+          };
+        }
+        if (resizeState.current) {
+          const d = resizeState.current;
+          return {
+            ...r,
+            w: clamp(d.origW + (e.clientX - d.startX), MODAL_MIN_W, window.innerWidth - r.x - 8),
+            h: clamp(d.origH + (e.clientY - d.startY), MODAL_MIN_H, window.innerHeight - r.y - 8),
+          };
+        }
+        return r;
+      });
+    }
+    function onUp() {
+      dragState.current = null;
+      resizeState.current = null;
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [floating]);
+
   if (!open) return null;
+
+  if (floating && rect) {
+    return (
+      <div className="fixed inset-0 z-50" onClick={onClose}>
+        <div
+          className="card absolute flex flex-col animate-fade-in shadow-soft"
+          style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {title && (
+            <div
+              className={`flex items-start justify-between gap-4 mb-3 shrink-0 ${draggable ? "cursor-move select-none" : ""}`}
+              onPointerDown={(e) => {
+                if (!draggable) return;
+                dragState.current = { startX: e.clientX, startY: e.clientY, origX: rect.x, origY: rect.y };
+              }}
+            >
+              <h3 className="text-lg font-semibold">{title}</h3>
+              <button
+                onClick={onClose}
+                className="text-atlas-muted hover:text-atlas-text"
+                aria-label="Close"
+              >
+                <Icon name="close" className="w-5 h-5" />
+              </button>
+            </div>
+          )}
+          <div className="flex-1 min-h-0 overflow-y-auto">{children}</div>
+          {footer && (
+            <div className="mt-5 flex items-center justify-end gap-2 shrink-0">{footer}</div>
+          )}
+          {resizable && (
+            <div
+              className="absolute bottom-0.5 right-0.5 w-4 h-4 cursor-nwse-resize text-atlas-muted"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                resizeState.current = { startX: e.clientX, startY: e.clientY, origW: rect.w, origH: rect.h };
+              }}
+            >
+              <Icon name="expand" className="w-full h-full" />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto"
       onClick={onClose}
     >
       <div
-        className="card w-full max-w-lg animate-fade-in shadow-soft"
+        className="card w-full max-w-lg max-h-[85vh] overflow-y-auto animate-fade-in shadow-soft"
         onClick={(e) => e.stopPropagation()}
       >
         {title && (

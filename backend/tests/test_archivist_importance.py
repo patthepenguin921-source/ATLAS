@@ -32,6 +32,7 @@ def _install_fakes(
     monkeypatch, *,
     existing_importance_source: str | None = None,
     existing_doc_type_source: str | None = None,
+    existing_summary_source: str | None = None,
 ):
     updates: list[dict[str, Any]] = []
 
@@ -40,11 +41,12 @@ def _install_fakes(
 
     async def _fake_select(table, *, columns="*", filters=None, order=None, limit=None, single=False):
         assert table == "documents"
-        assert columns == "importance_source,doc_type_source,folder_source,course_id"
+        assert columns == "importance_source,doc_type_source,folder_source,summary_source,course_id"
         return [{
             "importance_source": existing_importance_source,
             "doc_type_source": existing_doc_type_source,
             "folder_source": None,
+            "summary_source": existing_summary_source,
             "course_id": COURSE_ID,
         }]
 
@@ -121,3 +123,27 @@ def test_enrich_never_overwrites_a_system_set_glance_tag(monkeypatch):
 
     assert "doc_type" not in updates[0]
     assert "doc_type_source" not in updates[0]
+
+
+def test_enrich_sets_ai_summary_when_nothing_set_before(monkeypatch):
+    updates = _install_fakes(monkeypatch, existing_summary_source=None)
+
+    asyncio.run(Archivist().enrich(USER_ID, DOC_ID, "some document text"))
+
+    assert updates[0]["summary"] == "A summary."
+    assert updates[0]["keywords"] == ["a", "b"]
+    assert updates[0]["summary_source"] == "ai"
+
+
+def test_enrich_never_overwrites_a_manual_summary(monkeypatch):
+    """A description set via the documents page or the chat agent's
+    update_document tool (`summary_source = "manual"`) must survive a later
+    re-enrichment (a resync, a retried "Index now") the same way a manual
+    doc_type/importance re-tag already does."""
+    updates = _install_fakes(monkeypatch, existing_summary_source="manual")
+
+    asyncio.run(Archivist().enrich(USER_ID, DOC_ID, "some document text"))
+
+    assert "summary" not in updates[0]
+    assert "keywords" not in updates[0]
+    assert "summary_source" not in updates[0]

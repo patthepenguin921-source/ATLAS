@@ -101,15 +101,25 @@ function FolderNode({
 /** Per-class (or "General") folder tree + the documents filed in it —
  *  shared by the Documents page's class dividers and the course detail
  *  page's own "Files" section. `courseId` omitted/null means the
- *  "General" divider, for documents that don't belong to any class. */
+ *  "General" divider, for documents that don't belong to any class.
+ *
+ *  `courseId` accepts a comma-separated list of ids for a class split into
+ *  linked semester rows (see `lib/courseGroups`) — both halves' documents
+ *  still show up under one merged divider instead of looking "split"
+ *  across two. `uploadCourseId` is the single concrete row new
+ *  uploads/folders should actually be created under (defaults to
+ *  `courseId`, which only works when it's a single id) — e.g. whichever
+ *  semester is currently active. */
 export function FolderPane({
-  courseId, onDocClick,
+  courseId, uploadCourseId, onDocClick,
 }: {
   courseId?: string | null;
+  uploadCourseId?: string | null;
   onDocClick?: (id: string) => void;
 }) {
   const router = useRouter();
   const scopeQuery = courseId ? `course_id=${courseId}` : "general=true";
+  const targetCourseId = uploadCourseId ?? courseId;
 
   const [folders, setFolders] = useState<FolderRow[] | null>(null);
   const [docs, setDocs] = useState<DocRow[] | null>(null);
@@ -163,7 +173,7 @@ export function FolderPane({
   async function createTopFolder() {
     const name = newFolderName.trim();
     if (!name) return;
-    await apiPost("/folders", courseId ? { name, course_id: courseId } : { name });
+    await apiPost("/folders", targetCourseId ? { name, course_id: targetCourseId } : { name });
     setNewFolderName("");
     loadFolders();
   }
@@ -230,7 +240,7 @@ export function FolderPane({
     try {
       const form = new FormData();
       form.append("file", file);
-      if (courseId) form.append("course_id", courseId);
+      if (targetCourseId) form.append("course_id", targetCourseId);
       else form.append("general", "true");
       if (filter !== "all" && filter !== "unfiled") form.append("folder_id", filter);
       const result = await apiUpload<any>("/documents/upload", form);

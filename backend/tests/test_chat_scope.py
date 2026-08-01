@@ -117,7 +117,7 @@ def test_direct_mention_is_word_boundary_matched(fake_db, monkeypatch):
     monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
 
     asyncio.run(chat_scope.maybe_classify_scope(
-        USER_ID, CONV_ID, "Let's start the AP Bio review now.", "Sure thing.",
+        USER_ID, CONV_ID, "Let's start the review now.", "Sure thing.",
     ))
 
     # "start" contains "art" as a substring but not as a whole word -- must
@@ -225,5 +225,82 @@ def test_swallows_a_classifier_failure(fake_db, monkeypatch):
 
     # Must not raise -- chat() calls this after the reply already succeeded.
     asyncio.run(chat_scope.maybe_classify_scope(USER_ID, CONV_ID, "x", "y"))
+
+    assert fake_db.updates == []
+
+
+def test_subject_alias_calc_matches_ap_calculus_without_the_model(fake_db, monkeypatch):
+    """"calc" never appears literally in "AP Calculus" as a whole phrase, so
+    only the new subject-alias matching (not the plain direct-mention check)
+    can catch this."""
+    called = False
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        nonlocal called
+        called = True
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "can you help me with calc homework", "Sure, what's the topic?",
+    ))
+
+    assert fake_db.updates == [{"course_id": CALC_ID}]
+    assert not called
+
+
+def test_subject_alias_ap_calc_shorthand_matches(fake_db, monkeypatch):
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "when's the AP Calc homework due", "Friday.",
+    ))
+
+    assert fake_db.updates == [{"course_id": CALC_ID}]
+
+
+def test_subject_alias_math_matches_the_only_math_course(fake_db, monkeypatch):
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "I need help with math tonight", "Happy to help.",
+    ))
+
+    assert fake_db.updates == [{"course_id": CALC_ID}]
+
+
+def test_subject_alias_bio_matches(fake_db, monkeypatch):
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "ugh bio is so hard", "It gets easier.",
+    ))
+
+    assert fake_db.updates == [{"course_id": BIO_ID}]
+
+
+def test_subject_alias_stays_unscoped_when_two_courses_match(fake_db, monkeypatch):
+    """A student with two math-pattern classes saying just "math" is
+    genuinely ambiguous -- must not guess between them."""
+    fake_db.courses.append({"id": "stats-id", "name": "AP Statistics"})
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, fast=False):
+        return {"course_name": None}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    asyncio.run(chat_scope.maybe_classify_scope(
+        USER_ID, CONV_ID, "I have a math test tomorrow", "Good luck studying.",
+    ))
 
     assert fake_db.updates == []

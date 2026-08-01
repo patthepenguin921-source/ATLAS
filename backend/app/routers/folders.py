@@ -39,12 +39,20 @@ async def list_folders(
     """Every folder in one scope -- a class (`course_id`) or "General"
     (`general=true`) -- flat, ordered for a client-side tree. Pass
     `parent_folder_id` too to narrow to just one folder's direct children.
-    """
+
+    `course_id` accepts a comma-separated list of ids -- see
+    `documents.list_documents`'s docstring for why (a class split into
+    linked semester rows is still one real class)."""
     if not course_id and not general:
         raise HTTPException(422, "Pass course_id or general=true.")
+    ids = [c for c in course_id.split(",") if c] if course_id else []
     filters: dict[str, str] = {
         "user_id": eq(user.id),
-        "course_id": eq(course_id) if course_id else "is.null",
+        "course_id": (
+            "is.null" if not ids
+            else eq(ids[0]) if len(ids) == 1
+            else f"in.({','.join(ids)})"
+        ),
     }
     if parent_folder_id:
         filters["parent_folder_id"] = eq(parent_folder_id)

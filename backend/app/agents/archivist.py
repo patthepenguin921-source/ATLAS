@@ -48,19 +48,25 @@ DOCUMENT:
             system=self.persona, prompt=prompt, max_tokens=1500, fast=True
         )
 
-        update: dict[str, Any] = {
-            "summary": data.get("summary"),
-            "keywords": data.get("keywords", []),
-        }
+        update: dict[str, Any] = {}
         # Used below to avoid clobbering a student's own manual choices, or a
         # `glance` tag this pipeline already set with certainty (see
         # `schedule_extraction._tag_as_glance`) — fetched once upfront rather
         # than as two separate round trips.
         existing = await supabase.select(
-            "documents", columns="importance_source,doc_type_source,folder_source,course_id",
+            "documents",
+            columns="importance_source,doc_type_source,folder_source,summary_source,course_id",
             filters={"id": eq(document_id)}, limit=1,
         )
         existing_row = existing[0] if existing else {}
+
+        # Never override a summary/keywords the student (or the chat agent's
+        # `update_document` tool) set by hand -- same override-survives-
+        # re-enrichment idiom as doc_type/importance/folder below.
+        if existing_row.get("summary_source") != "manual":
+            update["summary"] = data.get("summary")
+            update["keywords"] = data.get("keywords", [])
+            update["summary_source"] = "ai"
 
         # Only ever guess `doc_type` here when it's still AI-sourced or has
         # never been set — never overrides a manual re-tag or a `system`-set

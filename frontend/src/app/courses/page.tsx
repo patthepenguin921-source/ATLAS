@@ -8,6 +8,7 @@ import { Icon } from "@/components/Icon";
 import { ColorPicker } from "@/components/ColorPicker";
 import { courseColor } from "@/lib/courseColor";
 import { apiGet, apiPatch, apiPost } from "@/lib/api";
+import { groupCourses as groupCoursesShared } from "@/lib/courseGroups";
 
 type CourseLevel = "regular" | "honors" | "ap" | "dual_enrollment" | "ib";
 
@@ -54,26 +55,11 @@ const SEMESTER_SHORT: Record<string, string> = { s1: "S1", s2: "S2" };
 
 // A class split into linked semester rows (e.g. an HN-weighted S1 feeding an
 // AP-weighted S2) is still one class — group those rows into a single card
-// instead of showing duplicates on the list. The detail page already shows
-// the S1/S2 breakdown for whichever row you open.
+// instead of showing duplicates on the list (see lib/courseGroups, shared
+// with the Documents page's own class dividers). The detail page already
+// shows the S1/S2 breakdown for whichever row you open.
 function groupCourses(list: Course[]): CourseGroup[] {
-  const groups: CourseGroup[] = [];
-  const indexByKey = new Map<string, number>();
-  for (const c of list) {
-    const key = c.linked_course_id ?? c.id;
-    const idx = indexByKey.get(key);
-    if (idx === undefined) {
-      indexByKey.set(key, groups.length);
-      groups.push({ key, primary: c, members: [c] });
-    } else {
-      groups[idx].members.push(c);
-      if (!c.linked_course_id) groups[idx].primary = c; // prefer the root row
-    }
-  }
-  for (const g of groups) {
-    g.members.sort((a, b) => (a.semester ?? "").localeCompare(b.semester ?? ""));
-  }
-  return groups;
+  return groupCoursesShared(list);
 }
 
 // A group counts as completed only once every semester half has ended —

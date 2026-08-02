@@ -48,6 +48,7 @@ export default function AskAtlasPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [courses, setCourses] = useState<any[]>([]);
   const [showFolders, setShowFolders] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);
   const [menuId, setMenuId] = useState<string | null>(null);
   const [filterTag, setFilterTag] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -101,6 +102,12 @@ export default function AskAtlasPage() {
   useEffect(() => {
     setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
   }, [chat.messages]);
+
+  // Collapse the mobile history drawer whenever the active conversation
+  // changes -- same pattern as AppShell's nav drawer closing on route change.
+  useEffect(() => {
+    setRailOpen(false);
+  }, [chat.conv]);
 
   function submit() {
     const t = input.trim();
@@ -350,7 +357,19 @@ export default function AskAtlasPage() {
     <AppShell
       title="Ask Atlas"
       subtitle="Chat with your specialists — grounded in your real academic life"
-      actions={<button className="btn-ghost" onClick={chat.reset}>New chat</button>}
+      actions={
+        <div className="flex items-center gap-2">
+          <button
+            className="btn-ghost lg:hidden !px-2.5"
+            onClick={() => setRailOpen(true)}
+            aria-label="Chat history"
+            title="Chat history"
+          >
+            <Icon name="panelLeft" className="w-4 h-4" />
+          </button>
+          <button className="btn-ghost" onClick={chat.reset}>New chat</button>
+        </div>
+      }
       fullWidth
     >
       {scope !== "all" && (
@@ -384,8 +403,27 @@ export default function AskAtlasPage() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-[16rem_1fr] gap-4">
-        {/* Projects / history rail */}
-        <aside className="hidden lg:flex flex-col gap-2 min-h-0">
+        {/* Projects / history rail -- an off-canvas drawer below `lg` (opened
+            via the header's history button), a static column at `lg` and up. */}
+        {railOpen && (
+          <div
+            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+            onClick={() => setRailOpen(false)}
+          />
+        )}
+        <aside
+          className={`fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] flex flex-col gap-2 min-h-0
+            border-r border-atlas-border bg-atlas-panel p-3 overflow-y-auto
+            transition-transform duration-200 ease-out
+            lg:static lg:z-auto lg:w-auto lg:max-w-none lg:translate-x-0 lg:border-0 lg:bg-transparent lg:p-0 lg:flex
+            ${railOpen ? "translate-x-0" : "-translate-x-full"}`}
+        >
+          <div className="flex items-center justify-between lg:hidden mb-1">
+            <div className="text-sm font-semibold">Chat history</div>
+            <button onClick={() => setRailOpen(false)} aria-label="Close" className="text-atlas-muted hover:text-atlas-text">
+              <Icon name="close" className="w-4 h-4" />
+            </button>
+          </div>
           <div className="flex gap-2">
             <button className="btn-primary flex-1 !py-1.5 text-sm" onClick={chat.reset}>+ New chat</button>
             <button className="btn-ghost !py-1.5 text-sm !px-2.5" onClick={openNewProject} title="New project" aria-label="New project">

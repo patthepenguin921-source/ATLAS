@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { DailyPlanCard } from "@/components/DailyPlanCard";
-import { Stat, RevealStat, Section, Empty, SkeletonStats, SkeletonList, gradeTone, Badge, RiskBadge } from "@/components/ui";
+import { Stat, Section, Empty, SkeletonStats, SkeletonList, gradeTone, Badge, RiskBadge } from "@/components/ui";
 import { Icon } from "@/components/Icon";
 import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import { formatCalendarDate } from "@/lib/date";
@@ -145,7 +145,7 @@ export default function DashboardPage() {
       )}
       {!data && !error && (
         <>
-          <SkeletonStats count={4} />
+          <SkeletonStats count={3} />
           <div className="mt-6">
             <SkeletonList rows={3} />
           </div>
@@ -154,13 +154,7 @@ export default function DashboardPage() {
 
       {data && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <RevealStat
-              label="GPA"
-              value={data.predicted_gpa_unweighted ?? "—"}
-              tone="good"
-              hint={`weighted ${data.predicted_gpa_weighted ?? "—"}`}
-            />
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8">
             <Stat label="Due soon" value={data.priorities_today?.length ?? 0} />
             <Stat
               label="Overdue / missing"

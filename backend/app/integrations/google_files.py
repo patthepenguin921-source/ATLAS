@@ -59,6 +59,34 @@ def parse_google_url(url: str) -> Optional[GoogleFileRef]:
     return None
 
 
+async def search_drive_files(
+    access_token: str, query: str, *, max_results: int = 5,
+) -> list[dict[str, str]]:
+    """Search the connected Google account's Drive by name (Drive's `name
+    contains` full-text match, case-insensitive) for the chat agent's
+    `pull_google_drive_document` tool -- returns each match's id/name/
+    mimeType, most-recently-modified first, so "pull the unit 3 study
+    guide" has something concrete to import. Excludes trashed files.
+    Raises on a non-2xx response (an expired/revoked token, most likely) so
+    the caller can surface a clear "reconnect Google Drive" message rather
+    than silently returning nothing."""
+    escaped = query.replace("\\", "\\\\").replace("'", "\\'")
+    q = f"name contains '{escaped}' and trashed = false"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(
+            "https://www.googleapis.com/drive/v3/files",
+            params={
+                "q": q, "pageSize": max_results,
+                "fields": "files(id,name,mimeType,modifiedTime)",
+                "orderBy": "modifiedTime desc",
+            },
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Google Drive search failed ({r.status_code}): {r.text[:200]}")
+    return r.json().get("files", [])
+
+
 async def download_google_file(
     ref: GoogleFileRef, access_token: str, *, name: str = "google-file"
 ) -> tuple[bytes, str, str]:

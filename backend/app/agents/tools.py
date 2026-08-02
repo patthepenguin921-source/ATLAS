@@ -232,6 +232,13 @@ TOOL_SPECS: list[dict[str, Any]] = [
                     "description": "How many questions, if the student says. Defaults to 5 for a "
                                    "quiz, 8 for a test.",
                 },
+                "source": {
+                    "type": "string", "enum": ["materials", "internet"],
+                    "description": "'materials' (default) grounds questions in the student's own "
+                                   "documents/notes. 'internet' instead pulls from a live web "
+                                   "search -- use this only if the student explicitly asks for "
+                                   "internet-sourced or general (not from their own notes) practice.",
+                },
             },
             "required": ["topic"],
         },
@@ -258,6 +265,32 @@ TOOL_SPECS: list[dict[str, Any]] = [
                 "max_cards": {"type": "integer", "description": "Max flashcards to generate. Defaults to 15."},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "pull_google_drive_document",
+        "description": (
+            "Search the student's connected Google Drive for a document by name/topic and "
+            "import it into Atlas, filing it under a class. Use this when the student asks "
+            "Atlas to pull, grab, fetch, or import a specific document from their Google "
+            "Drive (e.g. \"pull my unit 3 study guide from Drive\", \"grab the lab report I "
+            "have in Google Docs\"). If Drive isn't connected yet, tell the student to "
+            "connect it from Settings > Integrations."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for -- the document's name or a close description of it.",
+                },
+                "course_name": {
+                    "type": "string",
+                    "description": "The class to file it under, if the student named one -- otherwise "
+                                   "Atlas auto-detects the class from the document's content.",
+                },
+            },
+            "required": ["query"],
         },
     },
     {
@@ -535,6 +568,61 @@ async def _update_assignment(user_id: str, args: dict[str, Any]) -> dict[str, An
     return {"status": "done", "message": f'Updated "{row["title"]}".'}
 
 
+async def _pull_google_drive_document(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"status": "error", "message": "What should Atlas search for in your Google Drive?"}
+    course_id, err = await _resolve_course_id(user_id, args.get("course_name"))
+    if err:
+        return err
+
+    from app.integrations import google_oauth  # deferred: see the module docstring
+    access_token = await google_oauth.get_drive_access_token(user_id)
+    if not access_token:
+        return {
+            "status": "error",
+            "message": "Google Drive isn't connected yet -- connect it from Settings > Integrations first.",
+        }
+
+    from app.integrations import google_files  # deferred: see the module docstring
+    try:
+        matches = await google_files.search_drive_files(access_token, query, max_results=5)
+    except RuntimeError as e:
+        return {"status": "error", "message": f"Couldn't search Google Drive: {e}"}
+    if not matches:
+        return {"status": "error", "message": f'No Google Drive file matching "{query}" found.'}
+
+    best = matches[0]
+    from app.routers.documents import import_drive_file_core, process_document_core  # deferred: see the module docstring
+    try:
+        result = await import_drive_file_core(
+            user_id=user_id, file_id=best["id"], access_token=access_token,
+            course_id=course_id, name=best.get("name"), mime_type=best.get("mimeType"), enrich=True,
+        )
+    except RuntimeError as e:
+        return {"status": "error", "message": f"Couldn't download that file: {e}"}
+
+    doc_id = result["id"]
+    try:
+        # Indexed inline (synchronously, within this same live request) so
+        # the student hears back that it's actually ready -- not a detached
+        # background task; if this fails for some reason the document still
+        # exists and the safety-net cron (see app.routers.documents' module
+        # docstring) picks it up later.
+        await process_document_core(user_id, doc_id)
+    except Exception:
+        pass
+
+    others = len(matches) - 1
+    message = f'Pulled "{best.get("name") or query}" from your Google Drive.'
+    if others:
+        message += (
+            f" ({others} other match{'es' if others != 1 else ''} also found -- "
+            "ask again with a more specific name if this wasn't the right one.)"
+        )
+    return {"status": "done", "message": message, "document": {"id": doc_id, "title": best.get("name")}}
+
+
 async def _resync_document(user_id: str, args: dict[str, Any]) -> dict[str, Any]:
     title = (args.get("document_title") or "").strip()
     if not title:
@@ -610,6 +698,7 @@ async def _generate_practice_quiz(user_id: str, args: dict[str, Any]) -> dict[st
     if err:
         return err
     mode = args.get("mode") if args.get("mode") in ("quiz", "test") else "quiz"
+    source = args.get("source") if args.get("source") in ("materials", "internet") else "materials"
     num_questions = args.get("num_questions") or (8 if mode == "test" else 5)
     try:
         num_questions = max(1, min(int(num_questions), 15))
@@ -618,11 +707,16 @@ async def _generate_practice_quiz(user_id: str, args: dict[str, Any]) -> dict[st
 
     from app.agents.tutor import Tutor  # deferred: see the module docstring
     result = await Tutor().quiz(
-        user_id, topic, num_questions, mode=mode, course_id=course_id, folder_id=folder_id,
+        user_id, topic, num_questions, mode=mode, course_id=course_id, folder_id=folder_id, source=source,
     )
     questions = result.get("questions") or []
     if not questions:
         return {"status": "error", "message": "Couldn't generate questions for that -- try a more specific topic."}
+    from app.services import practice as practice_service  # deferred: see the module docstring
+    await practice_service.save_session(
+        user_id, topic=result.get("topic", topic), mode=mode, source=source,
+        questions=questions, course_id=course_id, folder_id=folder_id,
+    )
     return {"status": "done", "mode": mode, "topic": result.get("topic", topic), "questions": questions}
 
 
@@ -736,6 +830,7 @@ _NON_DESTRUCTIVE_HANDLERS = {
     "update_assignment": _update_assignment,
     "generate_practice_quiz": _generate_practice_quiz,
     "generate_flashcards": _generate_flashcards_tool,
+    "pull_google_drive_document": _pull_google_drive_document,
     "resync_document": _resync_document,
     "update_document": _update_document,
 }

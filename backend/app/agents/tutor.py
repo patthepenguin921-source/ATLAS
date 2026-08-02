@@ -5,7 +5,7 @@ from typing import Any
 
 from app.agents.base import Agent
 from app.llm import claude
-from app.services import memory
+from app.services import memory, web_search
 
 
 class Tutor(Agent):
@@ -44,16 +44,38 @@ class Tutor(Agent):
 
     async def quiz(
         self, user_id: str, topic: str, num_questions: int = 5, *, mode: str = "quiz",
-        course_id: str | None = None, folder_id: str | None = None,
+        course_id: str | None = None, folder_id: str | None = None, source: str = "materials",
     ) -> dict[str, Any]:
         """`mode="quiz"` is a quick active-recall check; `mode="test"` is a
         longer, exam-style practice test -- both share this one generator so
         "give me a quick quiz on X" and "give me a practice test on X" only
-        differ in length/difficulty, not in how they're grounded."""
-        ctx = await memory.build_context(
-            user_id, topic, include_semantic=True, course_id=course_id, folder_id=folder_id,
-        )
-        context_text = memory.render_context(ctx)
+        differ in length/difficulty, not in how they're grounded.
+
+        `source="materials"` (default) grounds questions in the student's own
+        documents/notes, same as before. `source="internet"` instead pulls
+        from a live web search on the topic -- for practicing something not
+        covered in their own materials yet -- and is kept clearly labeled as
+        such rather than blurred with "from your documents" (see
+        `app.services.web_search`'s module docstring)."""
+        if source == "internet":
+            results, err = await web_search.search(topic, max_results=6)
+            if results:
+                context_text = "Web search results (NOT the student's own materials):\n\n" + "\n\n".join(
+                    f"- {r.get('title') or 'Untitled'} ({r.get('url')})\n  {r.get('content') or ''}"
+                    for r in results
+                )
+            else:
+                context_text = (
+                    "No web search results were available "
+                    f"({err or 'unknown reason'}) -- generate from general knowledge of the "
+                    "topic instead, and note in the response that this isn't grounded in a "
+                    "live source."
+                )
+        else:
+            ctx = await memory.build_context(
+                user_id, topic, include_semantic=True, course_id=course_id, folder_id=folder_id,
+            )
+            context_text = memory.render_context(ctx)
         style = {
             "quiz": "a quick active-recall quiz -- mostly straightforward recall, one or two application questions",
             "test": (
@@ -62,10 +84,16 @@ class Tutor(Agent):
                 "unit test would, not just definition recall"
             ),
         }.get(mode, "a quiz")
+        grounding = (
+            "Ground questions in the web search results above -- this is explicitly practice "
+            "from the open internet, not the student's own materials."
+            if source == "internet" else
+            "Prefer material from my own documents/context when available -- ground "
+            "questions in what's actually in scope rather than the topic in the abstract."
+        )
         prompt = f"""\
 Create {style} with {num_questions} questions on: {topic}.
-Prefer material from my own documents/context when available -- ground
-questions in what's actually in scope rather than the topic in the abstract.
+{grounding}
 Return JSON:
 {{
   "topic": "{topic}",
@@ -78,4 +106,4 @@ Return JSON:
         data = await claude.complete_json(
             system=self.system_prompt(context_text), prompt=prompt, max_tokens=2400
         )
-        return {"agent": self.role, "mode": mode, **data}
+        return {"agent": self.role, "mode": mode, "source": source, **data}

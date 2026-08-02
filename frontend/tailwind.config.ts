@@ -6,14 +6,14 @@ const config: Config = {
     extend: {
       colors: {
         atlas: {
-          // "Cool slate" — neutral dark slate, soft indigo-blue accent.
+          // "Cool slate" — neutral dark slate, clean blue accent.
           bg: "#16181d",
           panel: "#1d2027",
           panel2: "#252932",
           border: "#333846",
           text: "#e7e9ee",
           muted: "#9096a3",
-          accent: "#6a8bff",   // soft indigo-blue
+          accent: "#3b82f6",   // clean blue (was a more indigo/purple-leaning #6a8bff)
           accent2: "#7dd3fc",  // sky
           good: "#4ade80",
           warn: "#fbbf24",
@@ -26,7 +26,7 @@ const config: Config = {
       },
       boxShadow: {
         soft: "0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5)",
-        glow: "0 0 0 1px rgba(106,139,255,0.30), 0 8px 30px -10px rgba(106,139,255,0.20)",
+        glow: "0 0 0 1px rgba(59,130,246,0.30), 0 8px 30px -10px rgba(59,130,246,0.20)",
       },
       keyframes: {
         shimmer: {

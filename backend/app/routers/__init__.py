@@ -5,7 +5,7 @@ from fastapi import APIRouter
 
 from app.core.crud import make_crud_router
 from app.routers import (agents, analytics, courses, dashboard, documents,
-                         flashcards, folders, knowledge, reviews, search, study)
+                         flashcards, folders, knowledge, practice, reviews, search, study)
 
 # ---- Generic CRUD resources (writable-field whitelists) ----
 _CRUD = [
@@ -24,7 +24,8 @@ _CRUD = [
                      writable={"course_id", "term_id", "title", "description", "notes",
                                "category", "status", "assigned_date", "due_date", "submitted_at",
                                "points_possible", "weight", "difficulty", "estimated_minutes",
-                               "actual_minutes", "learning_objectives", "tags", "metadata"},
+                               "actual_minutes", "learning_objectives", "tags", "metadata",
+                               "risk_override", "folder_id"},
                      default_order="due_date.asc.nullslast"),
     make_crud_router(table="grades", prefix="/grades", tag="grades",
                      writable={"course_id", "assignment_id", "score", "points_possible",
@@ -74,3 +75,4 @@ api_router.include_router(analytics.router)
 api_router.include_router(reviews.router)
 api_router.include_router(study.router)
 api_router.include_router(flashcards.router)
+api_router.include_router(practice.router)

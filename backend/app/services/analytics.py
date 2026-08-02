@@ -105,7 +105,7 @@ async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str
     rows = await supabase.select(
         "assignments",
         columns="id,title,course_id,category,status,due_date,difficulty,"
-                 "points_possible,weight,estimated_minutes",
+                 "points_possible,weight,estimated_minutes,risk_override",
         filters={
             "user_id": eq(user_id),
             "status": "in.(not_started,in_progress,missing,late)",
@@ -127,7 +127,7 @@ async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str
         scored.append({
             **a,
             "risk_score": round(risk, 2),
-            "risk_level": _risk_level(risk, a["category"], a.get("weight")),
+            "risk_level": _risk_level(risk, a["category"], a.get("weight"), a.get("risk_override")),
             "days_left": round(days_left, 1),
             "overdue": a["status"] in ("missing", "late"),
         })
@@ -135,11 +135,18 @@ async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str
     return scored[:limit]
 
 
-def _risk_level(score: float, category: str | None = None, weight: float | None = None) -> str:
+def _risk_level(
+    score: float, category: str | None = None, weight: float | None = None,
+    override: str | None = None,
+) -> str:
     """Bucket a raw risk score into a human label (low/medium/high/extreme),
     then apply this category's floor (see `_HIGH_RISK_FLOOR_CATEGORIES`/
     `_MEDIUM_RISK_FLOOR_CATEGORIES`) if it's stricter than what the score
-    alone produced."""
+    alone produced -- unless the student has manually set `risk_override`
+    (see assignments.risk_override, migration 0029), which always wins
+    outright over both the formula and the category floor."""
+    if override in _RISK_LEVEL_ORDER:
+        return override
     if score >= 120:
         level = "extreme"
     elif score >= 60:

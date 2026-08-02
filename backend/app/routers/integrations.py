@@ -150,21 +150,20 @@ def _google_redirect_uri() -> str:
 
 @router.get("/google/connect")
 async def connect_google(user: CurrentUser = Depends(get_current_user)):
-    """Kicks off the one-time Google consent flow that lets the Schoology
-    sync download a Google Doc/Slides/Sheet it finds in course materials in
-    the background, without the student re-authorizing on any cadence — see
-    `google_oauth.py`'s docstring for how this differs from the Drive
-    Picker's one-off token. Returns the consent URL (rather than redirecting
-    server-side) since this is called via `fetch` with the app's normal
-    Bearer auth header; the frontend does the actual full-page navigation,
-    which a fetch response can't trigger on its own."""
+    """Kicks off the one-time Google consent flow that grants Atlas
+    background Drive read access — used by the Schoology sync to download a
+    Google Doc/Slides/Sheet it finds in course materials, and by the chat
+    agent's `pull_google_drive_document` tool (see `app.agents.tools`) to
+    search and import a document on request. No longer requires Schoology to
+    be connected first (see `google_callback`'s standalone `google_drive`
+    integration row) — see `google_oauth.py`'s docstring for how this
+    long-lived grant differs from the Drive Picker's one-off token. Returns
+    the consent URL (rather than redirecting server-side) since this is
+    called via `fetch` with the app's normal Bearer auth header; the
+    frontend does the actual full-page navigation, which a fetch response
+    can't trigger on its own."""
     if not settings.has_google_oauth:
         raise HTTPException(503, "Google Drive connection isn't configured on this server yet.")
-    existing = await supabase.select(
-        "integrations", filters={"user_id": eq(user.id), "provider": eq("schoology")}, limit=1,
-    )
-    if not existing:
-        raise HTTPException(400, "Connect Schoology first — Google Drive access is used by its sync.")
     state = encrypt_json({"user_id": user.id, "ts": time.time()})
     return {"url": google_oauth.build_auth_url(state, _google_redirect_uri())}
 
@@ -200,50 +199,72 @@ async def google_callback(code: str | None = None, state: str | None = None, err
     except google_oauth.GoogleOAuthError as e:
         return _redirect("error", str(e))
 
+    # Prefer an existing row that already carries (or is meant to carry) the
+    # Google grant — a `schoology` row for anyone who connected before this
+    # was standalone (its own sync still reads the token from there), else a
+    # `google_drive` row. Neither existing means this is this student's
+    # first-ever Google connection, with no Schoology involved — create the
+    # standalone row fresh.
     rows = await supabase.select(
-        "integrations", filters={"user_id": eq(user_id), "provider": eq("schoology")}, limit=1,
-    )
-    if not rows:
-        return _redirect("error", "schoology_not_connected")
-    row = rows[0]
+        "integrations", filters={"user_id": eq(user_id), "provider": "in.(google_drive,schoology)"},
+    ) or []
+    by_provider = {r["provider"]: r for r in rows}
+    row = by_provider.get("schoology") or by_provider.get("google_drive")
+
     expires_in = tokens.get("expires_in") or 3600
-    config = {
-        **(row.get("config") or {}), "google_connected": True,
-        "google_access_token": tokens.get("access_token"),
-        "google_token_expires_at": time.time() + float(expires_in) - 60,
-    }
-    patch: dict[str, Any] = {"config": config}
+    expires_at = time.time() + float(expires_in) - 60
     refresh_token = tokens.get("refresh_token")
-    if refresh_token:  # Google omits this on a re-consent it treats as unchanged
-        patch["secret_ref"] = merge_google_refresh_token(row.get("secret_ref") or "", refresh_token)
-    await supabase.update("integrations", patch, filters={"id": eq(row["id"])})
+
+    if row:
+        config = {
+            **(row.get("config") or {}), "google_connected": True,
+            "google_access_token": tokens.get("access_token"),
+            "google_token_expires_at": expires_at,
+        }
+        patch: dict[str, Any] = {"config": config}
+        if refresh_token:  # Google omits this on a re-consent it treats as unchanged
+            patch["secret_ref"] = merge_google_refresh_token(row.get("secret_ref") or "", refresh_token)
+        await supabase.update("integrations", patch, filters={"id": eq(row["id"])})
+    else:
+        await supabase.insert("integrations", {
+            "user_id": user_id, "provider": "google_drive", "display_name": "Google Drive",
+            "config": {
+                "google_connected": True, "google_access_token": tokens.get("access_token"),
+                "google_token_expires_at": expires_at,
+            },
+            "secret_ref": merge_google_refresh_token("", refresh_token) if refresh_token else None,
+            "enabled": True,
+        }, upsert=True, on_conflict="user_id,provider")
     return _redirect("connected")
 
 
 @router.post("/google/disconnect", status_code=204)
 async def disconnect_google(user: CurrentUser = Depends(get_current_user)):
-    """Clears the stored Google grant from the Schoology integration row —
-    Google links found in materials afterward go back to being flagged for
-    auth instead of downloaded, same as before this was ever connected."""
+    """Clears the stored Google grant from wherever it lives — the
+    standalone `google_drive` row and/or a `schoology` row that still
+    carries one from before that existed. Google links found in materials,
+    and the chat agent's `pull_google_drive_document` tool, both go back to
+    being flagged for auth afterward, same as before this was ever
+    connected."""
     rows = await supabase.select(
-        "integrations", filters={"user_id": eq(user.id), "provider": eq("schoology")}, limit=1,
-    )
-    if not rows:
-        return None
-    row = rows[0]
-    config = dict(row.get("config") or {})
-    config.pop("google_connected", None)
-    config.pop("google_access_token", None)
-    config.pop("google_token_expires_at", None)
-    patch: dict[str, Any] = {"config": config}
-    if row.get("secret_ref"):
-        try:
-            secret = decrypt_json(row["secret_ref"])
-        except Exception:  # noqa: BLE001
-            secret = None
-        if secret is not None and secret.pop("google_refresh_token", None) is not None:
-            patch["secret_ref"] = encrypt_json(secret)
-    await supabase.update("integrations", patch, filters={"id": eq(row["id"])})
+        "integrations", filters={"user_id": eq(user.id), "provider": "in.(google_drive,schoology)"},
+    ) or []
+    for row in rows:
+        config = dict(row.get("config") or {})
+        if not config.get("google_connected") and "google_access_token" not in config:
+            continue
+        config.pop("google_connected", None)
+        config.pop("google_access_token", None)
+        config.pop("google_token_expires_at", None)
+        patch: dict[str, Any] = {"config": config}
+        if row.get("secret_ref"):
+            try:
+                secret = decrypt_json(row["secret_ref"])
+            except Exception:  # noqa: BLE001
+                secret = None
+            if secret is not None and secret.pop("google_refresh_token", None) is not None:
+                patch["secret_ref"] = encrypt_json(secret)
+        await supabase.update("integrations", patch, filters={"id": eq(row["id"])})
     return None
 
 

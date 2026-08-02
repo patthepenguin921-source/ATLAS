@@ -55,8 +55,14 @@ def _fake_select(rows: list[dict[str, Any]]):
         out = rows
         if filters:
             for k, v in filters.items():
-                want = v.split("eq.", 1)[1] if isinstance(v, str) and v.startswith("eq.") else v
-                out = [r for r in out if str(r.get(k)) == str(want)]
+                if isinstance(v, str) and v.startswith("eq."):
+                    want = v.split("eq.", 1)[1]
+                    out = [r for r in out if str(r.get(k)) == str(want)]
+                elif isinstance(v, str) and v.startswith("in.(") and v.endswith(")"):
+                    wants = set(v[len("in.("):-1].split(","))
+                    out = [r for r in out if str(r.get(k)) in wants]
+                else:
+                    out = [r for r in out if str(r.get(k)) == str(v)]
         return out[:limit] if limit else out
     return _select
 
@@ -66,13 +72,18 @@ def test_connect_503_when_not_configured(authed):
     assert r.status_code == 503
 
 
-def test_connect_400_when_schoology_not_connected(oauth_configured, authed, monkeypatch):
+def test_connect_returns_auth_url_without_schoology(oauth_configured, authed, monkeypatch, crypto_key):
+    """Google Drive connects standalone now -- no Schoology row required
+    (see the module docstring)."""
     monkeypatch.setattr(supabase, "select", _fake_select([]))
     r = client.get("/api/v1/integrations/google/connect")
-    assert r.status_code == 400
+    assert r.status_code == 200
+    url = r.json()["url"]
+    assert url.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+    assert "redirect_uri=https%3A%2F%2Fapi.example.com%2Fapi%2Fv1%2Fintegrations%2Fgoogle%2Fcallback" in url
 
 
-def test_connect_returns_auth_url(oauth_configured, authed, monkeypatch, crypto_key):
+def test_connect_returns_auth_url_with_schoology(oauth_configured, authed, monkeypatch, crypto_key):
     monkeypatch.setattr(supabase, "select", _fake_select([
         {"id": "int-1", "user_id": USER_ID, "provider": "schoology", "config": {}, "secret_ref": "x"},
     ]))
@@ -114,22 +125,38 @@ def test_callback_redirects_on_invalid_state(oauth_configured):
     assert "invalid_state" in location
 
 
-def test_callback_redirects_when_schoology_row_missing(oauth_configured, crypto_key, monkeypatch):
+def test_callback_creates_standalone_row_when_nothing_connected(oauth_configured, crypto_key, monkeypatch):
+    """No Schoology (or prior Google Drive) row at all -- this is the
+    student's first-ever Google connection, so a fresh standalone
+    `google_drive` integration row is created instead of erroring."""
     state = encrypt_json({"user_id": USER_ID, "ts": time.time()})
 
     async def _fake_exchange_code(code, redirect_uri):
         return {"access_token": "atok", "refresh_token": "rtok", "expires_in": 3600}
 
+    inserted: list[dict] = []
+
+    async def _fake_insert(table, row, *, upsert=False, on_conflict=None):
+        inserted.append(row)
+        return [{**row, "id": "new-row"}]
+
     monkeypatch.setattr(google_oauth_module, "exchange_code", _fake_exchange_code)
     monkeypatch.setattr(supabase, "select", _fake_select([]))
+    monkeypatch.setattr(supabase, "insert", _fake_insert)
 
     r = client.get(
         "/api/v1/integrations/google/callback",
         params={"code": "abc", "state": state}, follow_redirects=False,
     )
-    location = r.headers["location"]
-    assert "google=error" in location
-    assert "schoology_not_connected" in location
+    assert r.headers["location"] == "https://app.example.com/settings?tab=Integrations&google=connected"
+    assert len(inserted) == 1
+    row = inserted[0]
+    assert row["provider"] == "google_drive"
+    assert row["user_id"] == USER_ID
+    assert row["config"]["google_connected"] is True
+    assert row["config"]["google_access_token"] == "atok"
+    stored_secret = decrypt_json(row["secret_ref"])
+    assert stored_secret == {"google_refresh_token": "rtok"}
 
 
 def test_callback_stores_tokens_and_redirects_connected(oauth_configured, crypto_key, monkeypatch):

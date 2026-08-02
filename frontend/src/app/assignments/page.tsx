@@ -5,6 +5,7 @@ import { AppShell } from "@/components/AppShell";
 import { Empty, Loading, Badge, Modal, RiskBadge, SkeletonList } from "@/components/ui";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import { formatCalendarDate } from "@/lib/date";
+import { buildFolderOptions } from "@/lib/folderOptions";
 
 // Must match Postgres's `assignment_category` enum (0001_extensions_and_types.sql)
 // exactly -- this list previously omitted 6 of the 13 real values (classwork,
@@ -33,30 +34,57 @@ const statusTone = (s: string) =>
 // backend/app/services/analytics.py's at_risk_assignments), same as weight.
 const DIFFICULTY_OPTIONS = [1, 2, 3, 4, 5];
 
+// Manually pins the risk badge instead of only ever nudging it indirectly
+// via weight/difficulty/points -- see assignments.risk_override
+// (migration 0029) and analytics.py's _risk_level, which always lets this
+// win over the computed score when set.
+const RISK_OVERRIDE_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "Auto (computed)" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "extreme", label: "Extreme" },
+];
+
+// A "completed" assignment is one with a real result -- graded or turned
+// in -- not just past its due date (still-open overdue/missing work stays
+// in Upcoming, where it needs attention, not buried in a history tab).
+const isCompleted = (a: any) => a.status === "graded" || a.status === "submitted";
+
 export default function AssignmentsPage() {
   const [items, setItems] = useState<any[] | null>(null);
   const [courses, setCourses] = useState<any[]>([]);
   const [risk, setRisk] = useState<Record<string, { risk_level: string; risk_score: number }>>({});
+  const [grades, setGrades] = useState<Record<string, any>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<"upcoming" | "completed">("upcoming");
   const [selected, setSelected] = useState<any | null>(null);
   const [editing, setEditing] = useState(false);
+  const [formFolders, setFormFolders] = useState<any[]>([]);
+  const [detailFolders, setDetailFolders] = useState<any[]>([]);
+  const [gradeEditing, setGradeEditing] = useState(false);
+  const [gradeForm, setGradeForm] = useState({ score: "", points_possible: "", letter: "" });
+  const [savingGrade, setSavingGrade] = useState(false);
   const [detail, setDetail] = useState<{
     description: string; notes: string; weight: string; difficulty: string; points_possible: string;
-  }>({ description: "", notes: "", weight: "", difficulty: "", points_possible: "" });
+    risk_override: string; folder_id: string;
+  }>({ description: "", notes: "", weight: "", difficulty: "", points_possible: "", risk_override: "", folder_id: "" });
   const [form, setForm] = useState<any>({
     title: "", course_id: "", category: "homework", due_date: "", estimated_minutes: 30,
-    description: "", notes: "", weight: "",
+    description: "", notes: "", weight: "", folder_id: "",
   });
 
   async function load() {
     try {
-      const [a, c, r] = await Promise.all([
+      const [a, c, r, g] = await Promise.all([
         apiGet("/assignments"), apiGet("/courses"), apiGet("/analytics/at-risk?limit=100"),
+        apiGet("/grades?limit=500"),
       ]);
       setItems(a);
       setCourses(c);
       setRisk(Object.fromEntries((r ?? []).map((x: any) => [x.id, x])));
+      setGrades(Object.fromEntries((g ?? []).filter((x: any) => x.assignment_id).map((x: any) => [x.assignment_id, x])));
       setLoadError(null);
     } catch (e: any) {
       // Without this, a failed request left `items` at its initial `null`
@@ -68,6 +96,25 @@ export default function AssignmentsPage() {
     load();
   }, []);
 
+  // Units/subunits are per-class (see `folders`, migration 0024) -- refetch
+  // whenever the add form's course changes, same pattern as the Study
+  // page's Practice/Flashcards tabs.
+  useEffect(() => {
+    if (!form.course_id) {
+      setFormFolders([]);
+      return;
+    }
+    apiGet(`/folders?course_id=${form.course_id}`).then((f) => setFormFolders(f ?? []));
+  }, [form.course_id]);
+
+  useEffect(() => {
+    if (!selected?.course_id) {
+      setDetailFolders([]);
+      return;
+    }
+    apiGet(`/folders?course_id=${selected.course_id}`).then((f) => setDetailFolders(f ?? []));
+  }, [selected?.course_id]);
+
   async function add(e: React.FormEvent) {
     e.preventDefault();
     const body = { ...form };
@@ -75,9 +122,10 @@ export default function AssignmentsPage() {
     if (!body.course_id) delete body.course_id;
     if (body.weight) body.weight = Number(body.weight);
     else delete body.weight;
+    if (!body.folder_id) delete body.folder_id;
     await apiPost("/assignments", body);
     setForm({ title: "", course_id: "", category: "homework", due_date: "", estimated_minutes: 30,
-      description: "", notes: "", weight: "" });
+      description: "", notes: "", weight: "", folder_id: "" });
     setOpen(false);
     load();
   }
@@ -85,11 +133,21 @@ export default function AssignmentsPage() {
   function openDetail(a: any) {
     setSelected(a);
     setEditing(false);
+    setGradeEditing(false);
     setDetail({
       description: a.description ?? "", notes: a.notes ?? "",
       weight: a.weight != null ? String(a.weight) : "",
       difficulty: a.difficulty != null ? String(a.difficulty) : "",
       points_possible: a.points_possible != null ? String(a.points_possible) : "",
+      risk_override: a.risk_override ?? "",
+      folder_id: a.folder_id ?? "",
+    });
+    const g = grades[a.id];
+    setGradeForm({
+      score: g?.score != null ? String(g.score) : "",
+      points_possible: g?.points_possible != null ? String(g.points_possible)
+        : a.points_possible != null ? String(a.points_possible) : "",
+      letter: g?.letter ?? "",
     });
   }
 
@@ -101,11 +159,46 @@ export default function AssignmentsPage() {
       weight: detail.weight ? Number(detail.weight) : null,
       difficulty: detail.difficulty ? Number(detail.difficulty) : null,
       points_possible: detail.points_possible ? Number(detail.points_possible) : null,
+      risk_override: detail.risk_override || null,
+      folder_id: detail.folder_id || null,
     };
     await apiPatch(`/assignments/${selected.id}`, patch);
     setSelected((s: any) => (s ? { ...s, ...patch } : s));
     setEditing(false);
     load();
+  }
+
+  // Manual grade entry -- for when PowerSchool/Schoology never synced a
+  // grade for something (or it was never connected at all). Updates the
+  // existing `grades` row if one's already on file, otherwise creates one;
+  // either way the course's rolling grade recomputes automatically (see
+  // `recompute_course_grade`'s trigger on the `grades` table).
+  async function saveGrade() {
+    if (!selected) return;
+    setSavingGrade(true);
+    try {
+      const payload: any = {
+        course_id: selected.course_id,
+        assignment_id: selected.id,
+        score: gradeForm.score ? Number(gradeForm.score) : null,
+        points_possible: gradeForm.points_possible ? Number(gradeForm.points_possible) : null,
+        letter: gradeForm.letter || null,
+        graded_at: new Date().toISOString(),
+      };
+      const existing = grades[selected.id];
+      const saved = existing
+        ? await apiPatch(`/grades/${existing.id}`, payload)
+        : await apiPost("/grades", payload);
+      setGrades((prev) => ({ ...prev, [selected.id]: saved }));
+      if (selected.status !== "graded") {
+        await apiPatch(`/assignments/${selected.id}`, { status: "graded" });
+        setSelected((s: any) => (s ? { ...s, status: "graded" } : s));
+      }
+      setGradeEditing(false);
+      load();
+    } finally {
+      setSavingGrade(false);
+    }
   }
 
   async function setStatus(id: string, status: string) {
@@ -126,6 +219,9 @@ export default function AssignmentsPage() {
   const courseName = (id: string) => courses.find((c) => c.id === id)?.name ?? "—";
   const weightLabel = (w: number | null | undefined) =>
     w === 0.3 ? "Minor (30%)" : w === 0.7 ? "Major (70%)" : w != null ? `${Math.round(w * 100)}%` : null;
+  const formFolderOptions = buildFolderOptions(formFolders);
+  const detailFolderOptions = buildFolderOptions(detailFolders);
+  const visibleItems = (items ?? []).filter((a) => (tab === "completed" ? isCompleted(a) : !isCompleted(a)));
 
   return (
     <AppShell
@@ -167,6 +263,15 @@ export default function AssignmentsPage() {
               {WEIGHT_OPTIONS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
             </select>
           </div>
+          <div>
+            <label className="label">Unit</label>
+            <select className="input" value={form.folder_id}
+              disabled={!form.course_id || !formFolderOptions.length}
+              onChange={(e) => setForm({ ...form, folder_id: e.target.value })}>
+              <option value="">{form.course_id ? "Not categorized" : "Pick a course first"}</option>
+              {formFolderOptions.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </select>
+          </div>
           <div className="md:col-span-5">
             <label className="label">Details & instructions</label>
             <textarea className="input min-h-[70px]" value={form.description}
@@ -192,8 +297,32 @@ export default function AssignmentsPage() {
         </div>
       )}
       {items && !items.length && <Empty>No assignments yet.</Empty>}
+
+      {items && items.length > 0 && (
+        <div className="flex gap-1.5 mb-4 border-b border-atlas-border">
+          {([
+            ["upcoming", "Upcoming"],
+            ["completed", "Past & graded"],
+          ] as const).map(([id, label]) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={`px-3 py-2 -mb-px text-sm font-medium border-b-2 transition-colors ${
+                tab === id
+                  ? "border-atlas-accent text-atlas-text"
+                  : "border-transparent text-atlas-muted hover:text-atlas-text hover:border-atlas-border"
+              }`}
+            >
+              {label} ({(items ?? []).filter((a) => (id === "completed" ? isCompleted(a) : !isCompleted(a))).length})
+            </button>
+          ))}
+        </div>
+      )}
+      {items && items.length > 0 && !visibleItems.length && (
+        <Empty>{tab === "completed" ? "Nothing completed or graded yet." : "Nothing upcoming — everything's done."}</Empty>
+      )}
       <div className="space-y-2">
-        {items?.map((a) => (
+        {visibleItems.map((a) => (
           <div
             key={a.id}
             className="card card-hover flex items-center justify-between gap-4 cursor-pointer"
@@ -215,6 +344,13 @@ export default function AssignmentsPage() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+              {isCompleted(a) && (
+                grades[a.id]?.percentage != null ? (
+                  <Badge tone="good">{grades[a.id].percentage}%{grades[a.id].letter ? ` (${grades[a.id].letter})` : ""}</Badge>
+                ) : (
+                  <Badge tone="warn">no grade yet</Badge>
+                )
+              )}
               {risk[a.id] && <RiskBadge level={risk[a.id].risk_level} />}
               <Badge tone={statusTone(a.status) as any}>{a.status.replace("_", " ")}</Badge>
               <select
@@ -318,6 +454,25 @@ export default function AssignmentsPage() {
                     </div>
                   </div>
                 </div>
+                <div>
+                  <label className="text-xs text-atlas-muted">Risk level override</label>
+                  <select className="input text-sm" value={detail.risk_override}
+                    onChange={(e) => setDetail({ ...detail, risk_override: e.target.value })}>
+                    {RISK_OVERRIDE_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+                  </select>
+                  <p className="text-[11px] text-atlas-muted mt-1">
+                    Pin the risk badge directly instead of relying on weight/difficulty/points.
+                  </p>
+                </div>
+                <div>
+                  <label className="text-xs text-atlas-muted">Unit</label>
+                  <select className="input text-sm" value={detail.folder_id}
+                    disabled={!detailFolderOptions.length}
+                    onChange={(e) => setDetail({ ...detail, folder_id: e.target.value })}>
+                    <option value="">Not categorized</option>
+                    {detailFolderOptions.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                  </select>
+                </div>
               </>
             ) : (
               <>
@@ -339,6 +494,54 @@ export default function AssignmentsPage() {
                 </div>
               </>
             )}
+
+            <div className="border-t border-atlas-border pt-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-xs uppercase text-atlas-muted">Grade</div>
+                {!gradeEditing && (
+                  <button className="text-xs text-atlas-accent hover:underline" onClick={() => setGradeEditing(true)}>
+                    {grades[selected.id] ? "Edit grade" : "Enter grade"}
+                  </button>
+                )}
+              </div>
+              {gradeEditing ? (
+                <div className="grid grid-cols-3 gap-2 items-end">
+                  <div>
+                    <label className="text-xs text-atlas-muted">Score</label>
+                    <input type="number" step="0.01" className="input text-sm" value={gradeForm.score}
+                      onChange={(e) => setGradeForm({ ...gradeForm, score: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-atlas-muted">Out of</label>
+                    <input type="number" step="0.01" className="input text-sm" value={gradeForm.points_possible}
+                      onChange={(e) => setGradeForm({ ...gradeForm, points_possible: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-atlas-muted">Letter (optional)</label>
+                    <input className="input text-sm" value={gradeForm.letter}
+                      onChange={(e) => setGradeForm({ ...gradeForm, letter: e.target.value })} />
+                  </div>
+                  <div className="col-span-3 flex gap-2 mt-1">
+                    <button className="btn-primary text-xs py-1.5" onClick={saveGrade} disabled={savingGrade}>
+                      {savingGrade ? "Saving…" : "Save grade"}
+                    </button>
+                    <button className="btn-ghost text-xs py-1.5" onClick={() => setGradeEditing(false)}>Cancel</button>
+                  </div>
+                </div>
+              ) : grades[selected.id] ? (
+                <div className="text-sm">
+                  {grades[selected.id].percentage != null ? `${grades[selected.id].percentage}%` : "—"}
+                  {grades[selected.id].letter ? ` (${grades[selected.id].letter})` : ""}
+                  {grades[selected.id].score != null && grades[selected.id].points_possible != null && (
+                    <span className="text-atlas-muted"> · {grades[selected.id].score}/{grades[selected.id].points_possible}</span>
+                  )}
+                </div>
+              ) : (
+                <p className="text-atlas-muted italic text-sm">
+                  No grade on file yet{selected.status === "graded" ? " (synced as graded, but no score recorded)" : ""} — enter one if PowerSchool/Schoology hasn't pulled it in.
+                </p>
+              )}
+            </div>
 
             <div className="flex flex-wrap gap-4 text-xs text-atlas-muted pt-1">
               {selected.points_possible != null && <span>Points: {selected.points_possible}</span>}

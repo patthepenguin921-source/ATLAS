@@ -15,6 +15,7 @@ from app.core.supabase_client import eq, supabase
 from app.schemas import (ActionConfirmRequest, AnalyzeRequest, ChatRequest, ExplainRequest,
                          MessageFeedbackRequest, PlanRequest, QuizRequest, RegenerateRequest,
                          ReviewRequest)
+from app.services import practice as practice_service
 from app.services import schedule
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -254,10 +255,20 @@ async def explain(body: ExplainRequest, user: CurrentUser = Depends(get_current_
 
 @router.post("/tutor/quiz")
 async def quiz(body: QuizRequest, user: CurrentUser = Depends(get_current_user)):
-    return await Tutor().quiz(
+    result = await Tutor().quiz(
         user.id, body.topic, body.num_questions, mode=body.mode,
-        course_id=body.course_id, folder_id=body.folder_id,
+        course_id=body.course_id, folder_id=body.folder_id, source=body.source,
     )
+    # Persisted so past practice is browsable later (GET /practice) instead
+    # of vanishing the moment the page reloads -- see app.services.practice.
+    questions = result.get("questions") or []
+    if questions:
+        saved = await practice_service.save_session(
+            user.id, topic=result.get("topic", body.topic), mode=body.mode, source=body.source,
+            questions=questions, course_id=body.course_id, folder_id=body.folder_id,
+        )
+        result["practice_session_id"] = saved.get("id")
+    return result
 
 
 @router.post("/analyst/analyze")

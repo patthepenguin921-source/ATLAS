@@ -46,6 +46,10 @@ const PATHS = {
   warning: ["M12 3 2 21h20L12 3Z", "M12 10v4", "M12 17h.01"],
   pencil: ["M12 20h9", "M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z"],
   expand: ["M15 3h6v6", "M9 21H3v-6", "M21 3l-7 7", "M3 21l7-7"],
+  panelLeft: [
+    "M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5Z",
+    "M9 3v18",
+  ],
 } as const;
 
 export type IconName = keyof typeof PATHS | "moreVertical";

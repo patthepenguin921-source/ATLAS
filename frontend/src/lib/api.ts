@@ -4,6 +4,37 @@ import { getSupabase } from "./supabase";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend";
 
+/** Turns a failed response's body into something readable in a chat bubble.
+ *  The backend's `SupabaseError`/`R2Error`/`LLMError` handlers (see
+ *  `app.main`) all return `{"detail": {"source", "status", "error"}}` --
+ *  `error` for the "llm" source is the raw upstream provider payload (e.g.
+ *  Groq's rate-limit JSON), which is not something a student should see
+ *  verbatim. Falls back to the raw response text for anything that doesn't
+ *  match this shape (validation errors, proxy/gateway HTML, etc). */
+function friendlyErrorMessage(status: number, rawText: string): string {
+  let detail: any = null;
+  try {
+    detail = JSON.parse(rawText)?.detail;
+  } catch {
+    /* not JSON -- fall through to the raw text below */
+  }
+  if (detail?.source === "llm") {
+    if (status === 429) {
+      const wait = String(detail.error ?? "").match(/try again in ([\d.]+)\s*s/i);
+      return wait
+        ? `Atlas is getting a lot of requests right now -- try again in about ${Math.ceil(Number(wait[1]))}s.`
+        : "Atlas is getting a lot of requests right now. Please try again in a few seconds.";
+    }
+    return "Atlas's reasoning engine is temporarily unavailable. Please try again shortly.";
+  }
+  if (detail?.source === "supabase" || detail?.source === "r2") {
+    return status === 429
+      ? "Atlas is temporarily overloaded. Please try again in a moment."
+      : "Atlas hit a temporary error reaching your data. Please try again.";
+  }
+  return rawText || `Request failed (${status}).`;
+}
+
 async function authHeader(): Promise<Record<string, string>> {
   try {
     const { data } = await getSupabase().auth.getSession();
@@ -47,7 +78,7 @@ export async function api<T = any>(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status}: ${text}`);
+    throw new Error(friendlyErrorMessage(res.status, text));
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -88,7 +119,7 @@ export async function apiUpload<T = any>(
           resolve(undefined as T);
         }
       } else {
-        reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        reject(new Error(friendlyErrorMessage(xhr.status, xhr.responseText)));
       }
     };
     xhr.onerror = () => reject(new Error("Failed to fetch"));

@@ -26,6 +26,24 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 # sends verbatim.
 MAX_HISTORY_MESSAGES = 20
 
+# A single historical turn (e.g. a generated practice test or a long pasted
+# assignment description) can run to thousands of characters. Sent verbatim,
+# it re-burns that many tokens on every turn for up to MAX_HISTORY_MESSAGES
+# turns after it -- the actual trigger for at least one production 429
+# (Groq's free tier is capped at 12000 TPM/token-per-minute). The full text
+# stays intact in `messages` for the conversation view; only what gets
+# replayed to the LLM as raw history is capped.
+_MAX_HISTORY_CHARS = 1500
+
+
+def _cap_history(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    def cap(content: str) -> str:
+        if len(content) <= _MAX_HISTORY_CHARS:
+            return content
+        return content[:_MAX_HISTORY_CHARS] + " …[earlier reply truncated for length]"
+
+    return [{"role": m["role"], "content": cap(m["content"])} for m in rows]
+
 
 async def _persist_turn(user_id: str, conv_id: str | None, agent: str, user_msg: str,
                         reply: str, context_used: dict, *, course_id: str | None = None,
@@ -94,7 +112,7 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
                      "role": "in.(user,assistant)"},
             order="created_at.asc", limit=MAX_HISTORY_MESSAGES,
         ) or []
-        history = [{"role": m["role"], "content": m["content"]} for m in prior]
+        history = _cap_history([{"role": m["role"], "content": m["content"]} for m in prior])
         conversation_summary = await get_summary(user.id, body.conversation_id)
     project_instructions = await _get_project_instructions(user.id, body.conversation_id)
 
@@ -153,10 +171,10 @@ async def regenerate(body: RegenerateRequest, user: CurrentUser = Depends(get_cu
     if len(all_msgs) < 2 or all_msgs[-1]["role"] != "assistant" or all_msgs[-2]["role"] != "user":
         raise HTTPException(400, "Nothing to regenerate.")
     last_assistant, last_user = all_msgs[-1], all_msgs[-2]
-    history = [
+    history = _cap_history([
         {"role": m["role"], "content": m["content"]}
         for m in all_msgs[:-2]
-    ][-MAX_HISTORY_MESSAGES:]
+    ][-MAX_HISTORY_MESSAGES:])
     conversation_summary = await get_summary(user.id, body.conversation_id)
     project_instructions = await _get_project_instructions(user.id, body.conversation_id)
 

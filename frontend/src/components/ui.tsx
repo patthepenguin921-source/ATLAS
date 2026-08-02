@@ -73,24 +73,59 @@ export function Stat({
   );
 }
 
+/** `collapsible` adds a minimize/expand chevron next to the title, for
+ *  sections that take up real estate someone may not always want open
+ *  (e.g. a course page's "Class schedule"/"Upcoming events"). Uncontrolled
+ *  by default (`defaultOpen`); pass `open`/`onToggle` to control it from
+ *  the parent instead (e.g. to persist state). Non-collapsible sections
+ *  behave exactly as before. */
 export function Section({
   title,
   children,
   action,
+  collapsible = false,
+  defaultOpen = true,
+  open: openProp,
+  onToggle,
 }: {
   title: string;
   children: React.ReactNode;
   action?: React.ReactNode;
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+  open?: boolean;
+  onToggle?: (open: boolean) => void;
 }) {
+  const [openState, setOpenState] = useState(defaultOpen);
+  const open = openProp ?? openState;
+  const toggle = () => (onToggle ? onToggle(!open) : setOpenState((o) => !o));
+
   return (
     <section className="mb-8">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-atlas-muted uppercase tracking-wide">
-          {title}
-        </h2>
+        {collapsible ? (
+          <button
+            type="button"
+            onClick={toggle}
+            className="flex items-center gap-1.5 text-sm font-semibold text-atlas-muted uppercase tracking-wide hover:text-atlas-text"
+            aria-expanded={open}
+          >
+            <span
+              className="transition-transform inline-block shrink-0"
+              style={{ transform: open ? "rotate(90deg)" : "none" }}
+            >
+              <Icon name="chevronRight" className="w-3.5 h-3.5" />
+            </span>
+            {title}
+          </button>
+        ) : (
+          <h2 className="text-sm font-semibold text-atlas-muted uppercase tracking-wide">
+            {title}
+          </h2>
+        )}
         {action}
       </div>
-      {children}
+      {(!collapsible || open) && children}
     </section>
   );
 }

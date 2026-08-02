@@ -88,6 +88,7 @@ class QuizRequest(BaseModel):
     mode: str = "quiz"  # quiz | test
     course_id: Optional[str] = None
     folder_id: Optional[str] = None
+    source: str = "materials"  # materials (the student's own docs/notes) | internet
 
 
 class AnalyzeRequest(BaseModel):

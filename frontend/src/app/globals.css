@@ -24,7 +24,7 @@ body::before {
   pointer-events: none;
   z-index: 0;
   background:
-    radial-gradient(60rem 60rem at 85% -10%, rgba(106, 139, 255, 0.06), transparent 60%),
+    radial-gradient(60rem 60rem at 85% -10%, rgba(59, 130, 246, 0.06), transparent 60%),
     radial-gradient(50rem 50rem at -10% 110%, rgba(125, 211, 252, 0.04), transparent 60%);
 }
 

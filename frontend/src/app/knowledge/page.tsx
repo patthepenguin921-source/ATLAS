@@ -5,7 +5,8 @@ import { AppShell } from "@/components/AppShell";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 import { DailyPlanCard } from "@/components/DailyPlanCard";
 import { Empty, Badge, Section, SkeletonGrid, SkeletonList, gradeTone } from "@/components/ui";
-import { apiGet, apiPost, apiPut } from "@/lib/api";
+import { apiGet, apiPost, apiPut, apiDelete } from "@/lib/api";
+import { groupCourses, currentMember } from "@/lib/courseGroups";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -181,17 +182,53 @@ function TodayTab() {
   );
 }
 
-function PracticeTab({ courses }: { courses: any[] }) {
+function PracticeTab({ courses }: { courses: { id: string; name: string }[] }) {
   const [courseId, setCourseId] = useState("");
   const [folders, setFolders] = useState<any[]>([]);
   const [folderId, setFolderId] = useState("");
   const [topic, setTopic] = useState("");
   const [mode, setMode] = useState<"quiz" | "test">("quiz");
+  const [source, setSource] = useState<"materials" | "internet">("materials");
   const [count, setCount] = useState(5);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<Set<number>>(new Set());
+
+  const [history, setHistory] = useState<any[] | null>(null);
+  const [viewingPast, setViewingPast] = useState<any | null>(null);
+  const [pastRevealed, setPastRevealed] = useState<Set<number>>(new Set());
+  const [pastError, setPastError] = useState<string | null>(null);
+
+  async function loadHistory() {
+    try {
+      setHistory(await apiGet("/practice"));
+    } catch {
+      setHistory([]);
+    }
+  }
+  useEffect(() => {
+    loadHistory();
+  }, []);
+
+  async function openPast(id: string) {
+    setPastError(null);
+    setPastRevealed(new Set());
+    try {
+      setViewingPast(await apiGet(`/practice/${id}`));
+    } catch (e: any) {
+      setPastError(e.message);
+    }
+  }
+
+  async function deletePast(id: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    await apiDelete(`/practice/${id}`);
+    if (viewingPast?.id === id) setViewingPast(null);
+    loadHistory();
+  }
+
+  const courseName = (id: string | null) => courses.find((c) => c.id === id)?.name;
 
   const [explainTopic, setExplainTopic] = useState("");
   const [explainDepth, setExplainDepth] = useState<"quick" | "standard" | "deep">("standard");
@@ -219,10 +256,12 @@ function PracticeTab({ courses }: { courses: any[] }) {
         topic: topic.trim(),
         num_questions: count,
         mode,
+        source,
         course_id: courseId || undefined,
         folder_id: folderId || undefined,
       });
       setResult(r);
+      loadHistory();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -315,6 +354,22 @@ function PracticeTab({ courses }: { courses: any[] }) {
                 Practice test
               </button>
             </div>
+            <div className="flex gap-1.5">
+              <button
+                className={`pill ${source === "materials" ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+                onClick={() => setSource("materials")}
+                title="Grounded in your own documents/notes"
+              >
+                My materials
+              </button>
+              <button
+                className={`pill ${source === "internet" ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+                onClick={() => setSource("internet")}
+                title="Generated from a live web search instead of your own materials"
+              >
+                From the internet
+              </button>
+            </div>
             <label className="text-xs text-atlas-muted flex items-center gap-1.5">
               Questions
               <input
@@ -334,6 +389,11 @@ function PracticeTab({ courses }: { courses: any[] }) {
 
         {result?.questions?.length > 0 && (
           <div className="space-y-3 mt-4">
+            {result.source === "internet" && (
+              <div className="text-xs text-atlas-warn">
+                From the internet -- not grounded in your own materials.
+              </div>
+            )}
             {result.questions.map((q: any, i: number) => (
               <div key={i} className="card">
                 <div className="flex items-start justify-between gap-3">
@@ -355,6 +415,84 @@ function PracticeTab({ courses }: { courses: any[] }) {
                 )}
               </div>
             ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Past practice">
+        {!history && <div className="text-sm text-atlas-muted">Loading…</div>}
+        {history && !history.length && <Empty>No practice generated yet -- try the form above.</Empty>}
+        {history && history.length > 0 && (
+          <div className="space-y-2">
+            {history.map((h) => (
+              <div
+                key={h.id}
+                className="card card-hover cursor-pointer flex items-center justify-between gap-4"
+                onClick={() => openPast(h.id)}
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-medium truncate">{h.topic}</div>
+                  <div className="text-xs text-atlas-muted">
+                    {h.mode === "test" ? "Practice test" : "Quick quiz"}
+                    {h.source === "internet" ? " · from the internet" : ""}
+                    {courseName(h.course_id) ? ` · ${courseName(h.course_id)}` : ""}
+                    {" · "}{new Date(h.created_at).toLocaleDateString()}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {h.score != null && <Badge tone="good">{h.score}%</Badge>}
+                  <button
+                    className="text-xs text-atlas-muted hover:text-atlas-bad"
+                    onClick={(e) => deletePast(h.id, e)}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {viewingPast && (
+          <div className="card mt-3">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div className="text-sm font-medium">{viewingPast.topic}</div>
+              <button className="text-xs text-atlas-muted hover:text-atlas-text" onClick={() => setViewingPast(null)}>
+                Close
+              </button>
+            </div>
+            {viewingPast.source === "internet" && (
+              <div className="text-xs text-atlas-warn mb-2">From the internet -- not grounded in your own materials.</div>
+            )}
+            {pastError && <div className="text-sm text-atlas-bad">{pastError}</div>}
+            <div className="space-y-3">
+              {(viewingPast.questions ?? []).map((q: any, i: number) => (
+                <div key={i} className="border-t border-atlas-border pt-2 first:border-t-0 first:pt-0">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="text-sm font-medium">{i + 1}. {q.q}</div>
+                    {q.concept && <Badge tone="accent">{q.concept}</Badge>}
+                  </div>
+                  {q.choices?.length > 0 && (
+                    <ul className="text-sm text-atlas-muted mt-2 space-y-1 list-disc list-inside">
+                      {q.choices.map((c: string, ci: number) => <li key={ci}>{c}</li>)}
+                    </ul>
+                  )}
+                  {pastRevealed.has(i) ? (
+                    <div className="mt-2 text-sm">
+                      <div><span className="text-atlas-good font-medium">Answer:</span> {q.answer}</div>
+                      {q.explanation && <div className="text-atlas-muted mt-1">{q.explanation}</div>}
+                    </div>
+                  ) : (
+                    <button
+                      className="btn-ghost text-xs mt-2"
+                      onClick={() => setPastRevealed((prev) => new Set(prev).add(i))}
+                    >
+                      Reveal answer
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </Section>
@@ -398,7 +536,7 @@ function PracticeTab({ courses }: { courses: any[] }) {
   );
 }
 
-function FlashcardsTab({ courses }: { courses: any[] }) {
+function FlashcardsTab({ courses }: { courses: { id: string; name: string }[] }) {
   const [courseId, setCourseId] = useState("");
   const [folders, setFolders] = useState<any[]>([]);
   const [folderId, setFolderId] = useState("");
@@ -411,6 +549,33 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
   const [deckError, setDeckError] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
+
+  // All flashcards ever generated, not just what's currently due -- a
+  // separate browse/history view from the spaced-repetition queue below.
+  const [allCards, setAllCards] = useState<any[] | null>(null);
+  const [allCardsError, setAllCardsError] = useState<string | null>(null);
+  const [expandedCard, setExpandedCard] = useState<string | null>(null);
+
+  async function loadAllCards() {
+    try {
+      setAllCards(await apiGet("/flashcards"));
+      setAllCardsError(null);
+    } catch (e: any) {
+      setAllCardsError(e.message);
+    }
+  }
+  useEffect(() => {
+    loadAllCards();
+  }, []);
+
+  async function deleteCard(id: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    await apiDelete(`/flashcards/${id}`);
+    loadAllCards();
+    loadDeck();
+  }
+
+  const courseName = (id: string | null) => courses.find((c) => c.id === id)?.name;
 
   async function loadDeck() {
     try {
@@ -462,6 +627,7 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
       });
       setMessage({ ok: true, text: `Generated ${r.count} flashcards from "${r.source_label}".` });
       loadDeck();
+      loadAllCards();
     } catch (e: any) {
       setMessage({ ok: false, text: e.message });
     } finally {
@@ -584,6 +750,53 @@ function FlashcardsTab({ courses }: { courses: any[] }) {
           </div>
         )}
       </Section>
+
+      <Section title={`Past flashcards${allCards ? ` (${allCards.length})` : ""}`}>
+        {!allCards && !allCardsError && <SkeletonList rows={1} />}
+        {allCardsError && !allCards && (
+          <div className="card border-atlas-bad/40 text-sm">
+            <div className="font-medium text-atlas-bad">Couldn't load your flashcards</div>
+            <div className="text-atlas-muted mt-1">{allCardsError}</div>
+            <button className="btn-ghost text-xs mt-2" onClick={() => loadAllCards()}>Retry</button>
+          </div>
+        )}
+        {allCards && !allCards.length && <Empty>No flashcards generated yet.</Empty>}
+        {allCards && allCards.length > 0 && (
+          <div className="space-y-2">
+            {allCards.map((c) => (
+              <div
+                key={c.id}
+                className="card cursor-pointer"
+                onClick={() => setExpandedCard((id) => (id === c.id ? null : c.id))}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate">{c.front}</div>
+                    <div className="text-xs text-atlas-muted">
+                      {courseName(c.course_id) ?? "General"}
+                      {c.source_label ? ` · ${c.source_label}` : ""}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {c.next_review_at && new Date(c.next_review_at) <= new Date() && (
+                      <Badge tone="warn">due</Badge>
+                    )}
+                    <button
+                      className="text-xs text-atlas-muted hover:text-atlas-bad"
+                      onClick={(e) => deleteCard(c.id, e)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+                {expandedCard === c.id && (
+                  <div className="text-sm text-atlas-muted mt-2 pt-2 border-t border-atlas-border">{c.back}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
     </>
   );
 }
@@ -687,10 +900,19 @@ function ReviewMasteryTab() {
 
 export default function KnowledgePage() {
   const [tab, setTab] = useState<Tab>("today");
-  const [courses, setCourses] = useState<any[]>([]);
+  // A class split into linked semester rows (see lib/courseGroups) is still
+  // one real class -- without grouping, picking "Class" here showed it
+  // twice (e.g. "AP Biology" appearing for both S1 and S2 halves). Grouped
+  // down to one option per real class, using whichever half is currently
+  // active as the actual id sent to generation/scoping calls.
+  const [courses, setCourses] = useState<{ id: string; name: string }[]>([]);
 
   useEffect(() => {
-    apiGet("/courses").then((c) => setCourses((c ?? []).filter((x: any) => x.is_active !== false)));
+    apiGet("/courses").then((c) => {
+      const active = (c ?? []).filter((x: any) => x.is_active !== false);
+      const groups = groupCourses(active);
+      setCourses(groups.map((g) => ({ id: currentMember(g).id, name: g.primary.name })));
+    });
   }, []);
 
   return (

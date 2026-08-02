@@ -337,45 +337,15 @@ class SchoologyProvider(IntegrationProvider):
     ) -> str | None:
         """A Google access token is only good for about an hour, but a sync
         runs on its own schedule (twice a day) indefinitely — refresh from
-        the stored refresh token (see `merge_google_refresh_token`) whenever
-        the cached access token is missing or close to expiring, rather than
-        ever asking the student to re-authorize. Returns None when Google
-        Drive was never connected (or the refresh itself fails), in which
-        case Google links are just flagged for auth same as before."""
-        config = integration.get("config") or {}
-        access_token = config.get("google_access_token")
-        expires_at = config.get("google_token_expires_at")
-        if access_token and expires_at:
-            try:
-                if time.time() < float(expires_at):
-                    return access_token
-            except (TypeError, ValueError):
-                pass
-        secret_ref = integration.get("secret_ref") or ""
-        try:
-            refresh_token = decrypt_json(secret_ref).get("google_refresh_token") if secret_ref else None
-        except Exception:  # noqa: BLE001
-            refresh_token = None
-        if not refresh_token:
-            return None
-        try:
-            tokens = await google_oauth.refresh_access_token(refresh_token)
-        except Exception:  # noqa: BLE001
-            return None
-        new_access_token = tokens.get("access_token")
-        if not new_access_token:
-            return None
-        expires_at = time.time() + float(tokens.get("expires_in") or 3600) - 60
-        try:
-            await supabase.update(
-                "integrations",
-                {"config": {**config, "google_access_token": new_access_token,
-                             "google_token_expires_at": expires_at}},
-                filters={"id": eq(integration["id"])},
-            )
-        except Exception:  # noqa: BLE001
-            pass  # still usable for this run even if persisting the cache fails
-        return new_access_token
+        the stored refresh token whenever the cached access token is missing
+        or close to expiring, rather than ever asking the student to
+        re-authorize. Returns None when Google Drive was never connected (or
+        the refresh itself fails), in which case Google links are just
+        flagged for auth same as before. Delegates to the row-agnostic
+        `google_oauth.resolve_access_token` (shared with the standalone
+        Drive connection's `get_drive_access_token`, see `app.agents.tools`'
+        `pull_google_drive_document`)."""
+        return await google_oauth.resolve_access_token(integration)
 
     async def google_token_for_resync(self, user_id: str) -> str | None:
         """Public entry point for `app.routers.documents`' single-document

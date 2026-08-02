@@ -62,7 +62,7 @@ export function Sidebar({
           <div>
             <div className="text-xl font-display font-semibold tracking-tight flex items-center gap-2">
               <span className="grid place-items-center w-7 h-7 rounded-lg bg-atlas-accent text-white">
-                <LogoMark className="w-4 h-4" bg="#6a8bff" />
+                <LogoMark className="w-4 h-4" bg="#3b82f6" />
               </span>
               Atlas
             </div>

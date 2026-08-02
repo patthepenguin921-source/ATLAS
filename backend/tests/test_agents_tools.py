@@ -298,9 +298,9 @@ def test_generate_practice_quiz_delegates_to_tutor_with_resolved_scope(fake_db, 
     fake_db.tables["folders"] = [{"id": "f1", "user_id": USER_ID, "course_id": COURSE_ID, "name": "Unit 3"}]
     seen = {}
 
-    async def _fake_quiz(self, user_id, topic, num_questions, *, mode, course_id, folder_id):
+    async def _fake_quiz(self, user_id, topic, num_questions, *, mode, course_id, folder_id, source):
         seen.update(user_id=user_id, topic=topic, num_questions=num_questions,
-                    mode=mode, course_id=course_id, folder_id=folder_id)
+                    mode=mode, course_id=course_id, folder_id=folder_id, source=source)
         return {"topic": topic, "questions": [{"q": "What is mitosis?", "answer": "Cell division."}]}
 
     from app.agents.tutor import Tutor
@@ -315,8 +315,12 @@ def test_generate_practice_quiz_delegates_to_tutor_with_resolved_scope(fake_db, 
     assert len(result["questions"]) == 1
     assert seen == {
         "user_id": USER_ID, "topic": "cell division", "num_questions": 8,
-        "mode": "test", "course_id": COURSE_ID, "folder_id": "f1",
+        "mode": "test", "course_id": COURSE_ID, "folder_id": "f1", "source": "materials",
     }
+    # Generating a quiz persists it to practice history (migration 0029) --
+    # see app.services.practice.
+    assert len(fake_db.tables["practice_sessions"]) == 1
+    assert fake_db.tables["practice_sessions"][0]["topic"] == "cell division"
 
 
 def test_generate_practice_quiz_requires_a_topic(fake_db):

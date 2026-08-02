@@ -15,12 +15,15 @@ Schoology sync needs (a token good for background use, indefinitely).
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 
 from app.config import settings
+from app.core.crypto import decrypt_json
+from app.core.supabase_client import eq, supabase
 
 _AUTH_BASE = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -87,3 +90,68 @@ async def refresh_access_token(
     if r.status_code >= 300:
         raise GoogleOAuthError(f"Google token refresh failed ({r.status_code}): {r.text[:300]}")
     return r.json()
+
+
+async def resolve_access_token(integration: dict[str, Any]) -> str | None:
+    """A currently-valid Drive access token for the given `integrations`
+    row, refreshing from its stored refresh token (see
+    `merge_google_refresh_token`) whenever the cached access token is
+    missing or close to expiring, rather than ever asking the student to
+    re-authorize. Returns None when Google Drive was never connected for
+    this row (or the refresh itself fails). Row-agnostic on purpose --
+    shared by `SchoologyProvider._resolve_google_token` (its own
+    `schoology` row, where the token has lived since before a standalone
+    connection existed) and `get_drive_access_token` below (the standalone
+    `google_drive` row)."""
+    config = integration.get("config") or {}
+    access_token = config.get("google_access_token")
+    expires_at = config.get("google_token_expires_at")
+    if access_token and expires_at:
+        try:
+            if time.time() < float(expires_at):
+                return access_token
+        except (TypeError, ValueError):
+            pass
+    secret_ref = integration.get("secret_ref") or ""
+    try:
+        refresh_token = decrypt_json(secret_ref).get("google_refresh_token") if secret_ref else None
+    except Exception:  # noqa: BLE001
+        refresh_token = None
+    if not refresh_token:
+        return None
+    try:
+        tokens = await refresh_access_token(refresh_token)
+    except GoogleOAuthError:
+        return None
+    new_access_token = tokens.get("access_token")
+    if not new_access_token:
+        return None
+    new_expires_at = time.time() + float(tokens.get("expires_in") or 3600) - 60
+    try:
+        await supabase.update(
+            "integrations",
+            {"config": {**config, "google_access_token": new_access_token,
+                         "google_token_expires_at": new_expires_at}},
+            filters={"id": eq(integration["id"])},
+        )
+    except Exception:  # noqa: BLE001
+        pass  # still usable for this call even if persisting the cache fails
+    return new_access_token
+
+
+async def get_drive_access_token(user_id: str) -> str | None:
+    """Resolves a usable Drive access token for a student regardless of
+    which flow connected it: the standalone `google_drive` integration row
+    (see `POST /integrations/google/connect`, no longer gated on Schoology
+    being connected first) or, for anyone who connected before that row
+    existed, the token still merged onto their `schoology` row. Used by the
+    chat agent's `pull_google_drive_document` tool (see `app.agents.tools`).
+    Returns None if Google Drive was never connected at all."""
+    rows = await supabase.select(
+        "integrations", filters={"user_id": eq(user_id), "provider": "in.(google_drive,schoology)"},
+    ) or []
+    by_provider = {r["provider"]: r for r in rows}
+    integration = by_provider.get("google_drive") or by_provider.get("schoology")
+    if not integration or not (integration.get("config") or {}).get("google_connected"):
+        return None
+    return await resolve_access_token(integration)

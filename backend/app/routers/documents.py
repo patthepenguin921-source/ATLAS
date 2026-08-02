@@ -323,20 +323,21 @@ async def list_documents(
     )
 
 
-@router.post("/{document_id}/process")
-async def process_document_now(document_id: str, user: CurrentUser = Depends(get_current_user)):
-    """Index (chunk/embed) + AI-enrich one document synchronously, in this
-    request. Called by the frontend right after an upload finishes, and by
-    the documents page's "Index now" button for anything still pending or
-    that previously failed — see the module docstring for why this replaced
-    the cron as the primary path. A prior failure is cleared before
-    re-claiming so a retry can actually run instead of being skipped as
-    already-errored (the cron intentionally never auto-retries a failure;
-    this endpoint, triggered by a person, is the deliberate retry path)."""
+async def process_document_core(user_id: str, document_id: str) -> dict:
+    """Index (chunk/embed) + AI-enrich one document synchronously, in
+    whatever request calls this. Shared by `process_document_now` (the
+    frontend's post-upload call and the documents page's "Index now"
+    button) and the chat agent's `pull_google_drive_document` tool, which
+    wants a pulled document fully indexed before it tells the student it's
+    ready rather than leaving it to whichever of those two paths gets to it
+    first. A prior failure is cleared before re-claiming so a retry can
+    actually run instead of being skipped as already-errored (the cron
+    intentionally never auto-retries a failure; a live caller here is
+    always the deliberate retry path)."""
     rows = await supabase.select(
         "documents",
         columns="id,course_id,title,storage_path,mime_type,enrich,auto_title,ingested,ingest_error",
-        filters={"user_id": eq(user.id), "id": eq(document_id)}, limit=1,
+        filters={"user_id": eq(user_id), "id": eq(document_id)}, limit=1,
     )
     if not rows:
         raise HTTPException(404, "Not found")
@@ -354,7 +355,7 @@ async def process_document_now(document_id: str, user: CurrentUser = Depends(get
         raise HTTPException(409, "Already being processed")
 
     await _process_document(
-        document_id, user.id, doc.get("storage_path"), doc.get("mime_type") or "",
+        document_id, user_id, doc.get("storage_path"), doc.get("mime_type") or "",
         enrich=doc.get("enrich", True), auto_title=doc.get("auto_title", False),
         course_id=doc.get("course_id"), title=doc.get("title"),
     )
@@ -364,6 +365,16 @@ async def process_document_now(document_id: str, user: CurrentUser = Depends(get
         filters={"id": eq(document_id)}, limit=1,
     )
     return rows[0] if rows else {"id": document_id}
+
+
+@router.post("/{document_id}/process")
+async def process_document_now(document_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Index (chunk/embed) + AI-enrich one document synchronously, in this
+    request. Called by the frontend right after an upload finishes, and by
+    the documents page's "Index now" button for anything still pending or
+    that previously failed — see the module docstring for why this replaced
+    the cron as the primary path."""
+    return await process_document_core(user.id, document_id)
 
 
 async def resync_document_core(user_id: str, document_id: str) -> dict:
@@ -627,19 +638,20 @@ async def update_document(
     return rows[0]
 
 
-@router.post("/import-drive", status_code=201)
-async def import_from_drive(body: DriveImportRequest, user: CurrentUser = Depends(get_current_user)):
-    """Import a file the user selected in the Google Drive picker.
-
-    The frontend obtains a short-lived OAuth access token via the Google
-    Picker; we download the bytes server-side and run the same pipeline as a
-    direct upload. Native Google Docs/Sheets/Slides are exported to a portable
-    format first.
-    """
-    if not (body.course_id and body.course_id.strip()):
-        raise HTTPException(422, "A course is required for every document.")
-
-    mime = (body.mime_type or "").lower()
+async def import_drive_file_core(
+    *, user_id: str, file_id: str, access_token: str, course_id: str | None,
+    name: str | None, mime_type: str | None, enrich: bool = True,
+) -> dict:
+    """Downloads one Drive file by id and runs it through the same
+    store-and-record pipeline as a direct upload (`_prepare_and_store`).
+    Shared by `import_from_drive` (a short-lived Picker-granted token) and
+    the chat agent's `pull_google_drive_document` tool (a long-lived token
+    from the standalone Google Drive connection, see
+    `google_oauth.get_drive_access_token`) -- both just need to get from
+    "a Drive file id + some access token" to "a document row", regardless
+    of where either came from. Native Google Docs/Sheets/Slides are
+    exported to a portable format first, same as before."""
+    mime = (mime_type or "").lower()
     export_map = {
         "application/vnd.google-apps.document": (
             "application/pdf", ".pdf"),
@@ -651,26 +663,46 @@ async def import_from_drive(body: DriveImportRequest, user: CurrentUser = Depend
     async with httpx.AsyncClient(timeout=60.0) as client:
         if mime in export_map:
             export_mime, ext = export_map[mime]
-            url = f"https://www.googleapis.com/drive/v3/files/{body.file_id}/export"
+            url = f"https://www.googleapis.com/drive/v3/files/{file_id}/export"
             params = {"mimeType": export_mime}
-            filename = (body.name or "drive-file") + ext
+            filename = (name or "drive-file") + ext
             content_type = export_mime
         else:
-            url = f"https://www.googleapis.com/drive/v3/files/{body.file_id}"
+            url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
             params = {"alt": "media"}
-            filename = body.name or "drive-file"
-            content_type = body.mime_type or "application/octet-stream"
+            filename = name or "drive-file"
+            content_type = mime_type or "application/octet-stream"
         r = await client.get(
             url, params=params,
-            headers={"Authorization": f"Bearer {body.access_token}"},
+            headers={"Authorization": f"Bearer {access_token}"},
         )
     if r.status_code >= 300:
-        raise HTTPException(502, f"Google Drive download failed ({r.status_code}): {r.text[:200]}")
+        raise RuntimeError(f"Google Drive download failed ({r.status_code}): {r.text[:200]}")
 
-    result = await _prepare_and_store(
-        user_id=user.id, course_id=body.course_id, content=r.content,
-        filename=filename, content_type=content_type, title=body.name, enrich=body.enrich,
+    return await _prepare_and_store(
+        user_id=user_id, course_id=course_id, content=r.content,
+        filename=filename, content_type=content_type, title=name, enrich=enrich,
     )
+
+
+@router.post("/import-drive", status_code=201)
+async def import_from_drive(body: DriveImportRequest, user: CurrentUser = Depends(get_current_user)):
+    """Import a file the user selected in the Google Drive picker.
+
+    The frontend obtains a short-lived OAuth access token via the Google
+    Picker; we download the bytes server-side and run the same pipeline as a
+    direct upload. Native Google Docs/Sheets/Slides are exported to a portable
+    format first.
+    """
+    if not (body.course_id and body.course_id.strip()):
+        raise HTTPException(422, "A course is required for every document.")
+    try:
+        result = await import_drive_file_core(
+            user_id=user.id, file_id=body.file_id, access_token=body.access_token,
+            course_id=body.course_id, name=body.name, mime_type=body.mime_type, enrich=body.enrich,
+        )
+    except RuntimeError as e:
+        raise HTTPException(502, str(e)) from e
     return {**result, "processing": True}
 
 

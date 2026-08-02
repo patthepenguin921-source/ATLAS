@@ -525,6 +525,12 @@ function IntegrationsTab() {
 
   const powerschool = integrations?.find((i) => i.provider === "powerschool");
   const schoology = integrations?.find((i) => i.provider === "schoology");
+  const googleDrive = integrations?.find((i) => i.provider === "google_drive");
+  // Google Drive connects on its own now (no longer gated on Schoology) --
+  // still check the schoology row's config too so an account that connected
+  // it the old way (before the standalone `google_drive` row existed) still
+  // reads as connected instead of silently losing that state.
+  const googleConnected = !!(googleDrive?.config?.google_connected || schoology?.config?.google_connected);
   const powerschoolHealth = syncHealth(powerschool);
   const schoologyHealth = syncHealth(schoology);
   const overdue = [
@@ -1012,32 +1018,6 @@ function IntegrationsTab() {
             </div>
           </div>
           {schoology && (
-            <div className="mt-3 pt-3 border-t border-atlas-border flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-sm font-medium">Google Drive</div>
-                <div className="text-xs text-atlas-muted mt-0.5">
-                  {schoology.config?.google_connected
-                    ? "Connected — Google Docs/Slides/Sheets found in course materials download automatically."
-                    : "Not connected — Google Docs found in your materials get flagged instead of downloaded."}
-                </div>
-              </div>
-              <button
-                className="btn-ghost shrink-0"
-                disabled={googleConnecting || googleDisconnecting}
-                onClick={schoology.config?.google_connected ? disconnectGoogle : connectGoogle}
-              >
-                {schoology.config?.google_connected
-                  ? googleDisconnecting ? "Disconnecting…" : "Disconnect"
-                  : googleConnecting ? "Connecting…" : "Connect Google Drive"}
-              </button>
-            </div>
-          )}
-          {googleStatus && (
-            <div className={`text-xs mt-2 ${googleStatus.ok ? "text-atlas-good" : "text-atlas-bad"}`}>
-              {googleStatus.text}
-            </div>
-          )}
-          {schoology && (
             <div className="mt-3 pt-3 border-t border-atlas-border flex items-center gap-2">
               <input
                 className="input text-xs"
@@ -1046,6 +1026,33 @@ function IntegrationsTab() {
                 onChange={(e) => setSchoologyDebugQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && debugFetchSchoology()}
               />
+            </div>
+          )}
+        </div>
+
+        <div className="card mt-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="font-medium">Google Drive</div>
+              <div className="text-sm text-atlas-muted mt-1">
+                {googleConnected
+                  ? "Connected — ask Atlas to pull a document from your Drive in chat, and Google Docs/Slides/Sheets found in Schoology materials download automatically."
+                  : "Let Atlas search and import a document from your Google Drive when you ask it to, and (if Schoology is connected) auto-download Google files found in course materials."}
+              </div>
+            </div>
+            <button
+              className="btn-ghost shrink-0"
+              disabled={googleConnecting || googleDisconnecting}
+              onClick={googleConnected ? disconnectGoogle : connectGoogle}
+            >
+              {googleConnected
+                ? googleDisconnecting ? "Disconnecting…" : "Disconnect"
+                : googleConnecting ? "Connecting…" : "Connect Google Drive"}
+            </button>
+          </div>
+          {googleStatus && (
+            <div className={`text-xs mt-2 ${googleStatus.ok ? "text-atlas-good" : "text-atlas-bad"}`}>
+              {googleStatus.text}
             </div>
           )}
         </div>

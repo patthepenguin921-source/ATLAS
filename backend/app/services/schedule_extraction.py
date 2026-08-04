@@ -205,6 +205,17 @@ activity, video, or practice-question set a day's agenda lists (e.g. "Watch \
 video 3.2", "Practice questions 1-19", "Delta Math practice") -- these \
 describe what happens in class, not a discrete thing to track; fold them \
 into that day's topic summary instead of listing each as an assignment.
+- A reference to a specific, numbered set of items on a named classroom \
+platform (e.g. "CK 2 - 4", "Classkick 5-7", "IXL A.2") IS a discrete thing \
+to track, unlike a vague "practice" bullet -- a number or range attached to \
+a platform name means specific items the student must go complete, not just \
+in-class activity. Capture one assignment per such listing (don't split a \
+range like "CK 2 - 4" into three separate assignments).
+- Teachers often abbreviate a platform/tool name instead of writing it out \
+(e.g. "CK" for Classkick). When you're confident what a short code stands \
+for, spell out the full name in the assignment title so it's clear what it \
+refers to (e.g. "CK 2 - 4" -> "Classkick 2 - 4") -- but if you don't \
+recognize a code, leave it exactly as written rather than guessing.
 - Skip anything the document itself marks as optional, not graded, \
 practice-only, or "as needed" (e.g. "(practice -- not graded)", "Optional: \
 ..."). These aren't real due work even if they're worth mentioning in the \

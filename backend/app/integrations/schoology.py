@@ -2112,8 +2112,16 @@ class SchoologyProvider(IntegrationProvider):
             an empty document.
         `material_name` is always set in metadata for anything actually
         ingested — `_sync_scraped_materials` reads it back to build the
-        already-known set for the next scan's dedupe."""
-        title = f"{item.folder_path + ' · ' if item.folder_path else ''}{item.name}"
+        already-known set for the next scan's dedupe.
+
+        `title` used to be prefixed with `item.folder_path` (Schoology's own
+        folder/unit breadcrumb, e.g. "Unit 1 · Syllabus.pdf") but that
+        breadcrumb is teacher-maintained and frequently stale or noisy
+        relative to the file's own name, which is the more reliable, stable
+        identifier — so the document is just titled `item.name` now. The raw
+        folder path is still preserved in `metadata["folder"]` below for
+        anyone who wants it."""
+        title = item.name
         external_id = f"scrape:{section.id}:{_normalize_name(item.name)}"
         base_meta = {
             "material_name": item.name, "folder": item.folder_path or None,

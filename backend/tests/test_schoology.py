@@ -1042,6 +1042,10 @@ def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypa
     docs = fake_db.tables["documents"]
     by_name = {d["metadata"]["material_name"]: d for d in docs}
     assert set(by_name) == {"Syllabus.pdf", "Notes"}
+    # Title is just the item's own name -- no "Unit 1 · " folder-path prefix,
+    # even though the folder path is still recorded in metadata below.
+    assert by_name["Syllabus.pdf"]["title"] == "Syllabus.pdf"
+    assert by_name["Notes"]["title"] == "Notes"
     assert by_name["Syllabus.pdf"]["metadata"]["folder"] == "Unit 1"
     assert by_name["Syllabus.pdf"]["metadata"]["material_type"] == "File"
     assert by_name["Syllabus.pdf"]["metadata"]["source_url"] == "/attachment/download/1"

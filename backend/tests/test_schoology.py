@@ -654,6 +654,128 @@ def test_sync_survives_is_active_write_failure(fake_db, monkeypatch):
     assert "is_active" not in fake_db.tables["courses"][0]
 
 
+def test_sync_with_api_key_resumes_across_deadline_without_reprocessing_sections(fake_db, monkeypatch):
+    """The API-key sync path used to run every section in one unbroken pass
+    with no deadline check at all: an account with enough sections/materials
+    (an "influx" of new links) could blow past the platform's request
+    timeout with the whole chunk's work discarded, and the next scheduled
+    sync started over from section one every time — see `sync()`'s comment.
+    It must now check `deadline` between sections and, on the next chunk,
+    resume without reprocessing a section already finished this cycle —
+    mirroring `_sync_materials_only`'s `"pending"`-keyed resume, just keyed
+    by `"done_ids"` instead."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
+
+    two_sections = {"section": [
+        {"id": "s1", "course_id": "c1", "course_title": "Course One", "section_title": "",
+         "course_code": "", "section_code": "", "grading_periods": [1],
+         "meeting_days": [], "start_time": "", "end_time": "", "location": "", "active": 1},
+        {"id": "s2", "course_id": "c2", "course_title": "Course Two", "section_title": "",
+         "course_code": "", "section_code": "", "grading_periods": [1],
+         "meeting_days": [], "start_time": "", "end_time": "", "location": "", "active": 1},
+    ]}
+
+    def _two_section_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/app-user-info":
+            return httpx.Response(200, json={"api_uid": 12345678})
+        if path.endswith("/sections") and "/users/" in path:
+            return httpx.Response(200, json=two_sections)
+        if path.endswith("/assignments"):
+            return httpx.Response(200, json={"assignment": []})
+        if path.endswith("/events"):
+            return httpx.Response(200, json={"event": []})
+        return httpx.Response(404, json={"error": f"no fixture for {path}"})
+
+    # A fresh client per chunk, same as production (`self._client(integration)`
+    # is called anew for each request) — only the scraper's login session
+    # persists across chunks (via exported/restored cookies), not the OAuth
+    # client itself, which chunk 1's `finally: await client.aclose()` closes.
+    def _new_client():
+        return SchoologyClient("ckey", "csecret", transport=httpx.MockTransport(_two_section_handler))
+
+    async def _fake_client(self, integration):
+        return _new_client()
+
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
+
+    fake_db.tables["integrations"] = [{
+        "id": "int-1", "user_id": USER_ID, "provider": "schoology",
+        "secret_ref": "x", "config": {},
+    }]
+
+    class _SessionScraper(_FakeScraperClient):
+        """Sleeps while "walking" s1's materials so the deadline (set to
+        expire shortly after the sync starts) is still open when s1 begins
+        but has passed by the time the loop checks again before s2 — without
+        this, both sections would finish before any wall-clock deadline
+        could plausibly separate them."""
+        async def walk_materials(self, section_id, *, known_names=None, student_uid=None, trace=None):
+            if section_id == "s1":
+                await asyncio.sleep(0.2)
+            return await super().walk_materials(
+                section_id, known_names=known_names, student_uid=student_uid, trace=trace
+            )
+
+        def export_cookies(self):
+            return [{"name": "session", "value": "tok-abc", "domain": "d.schoology.com", "path": "/"}]
+
+        def restore_cookies(self, cookies):
+            self.restored_with = cookies
+
+    login_calls = {"count": 0}
+
+    async def _fake_scraper_client(self, user_id):
+        login_calls["count"] += 1
+        return _SessionScraper([])
+
+    unauth_calls = {"count": 0}
+
+    async def _fake_unauthenticated(self, user_id):
+        unauth_calls["count"] += 1
+        return _SessionScraper([])
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+    monkeypatch.setattr(SchoologyProvider, "_unauthenticated_scraper_client", _fake_unauthenticated)
+
+    # First chunk: the deadline is open when s1 starts but has passed by the
+    # time the loop checks again before s2 (see _SessionScraper), so it must
+    # stop right after s1 instead of walking s2 too, and save progress.
+    async def _run_first_chunk():
+        deadline = time.monotonic() + 0.1
+        return await provider.sync(USER_ID, deadline=deadline)
+
+    report1 = asyncio.run(_run_first_chunk())
+
+    assert report1.get("continue") is True
+    assert report1["courses"] == 1
+    assert login_calls["count"] == 1
+    assert [c["metadata"].get("schoology_section_id") for c in fake_db.tables["courses"] if c["id"] not in (BIO_COURSE,)] == ["s1"]
+
+    saved_config = fake_db.tables["integrations"][0]["config"]
+    progress = saved_config["_sync_progress"]
+    assert progress["done_ids"] == ["s1"]
+
+    # Second chunk: resumes with the saved cookies (no fresh login) and must
+    # not reprocess s1 — only s2 gets synced this time, and the final report
+    # reflects both sections' combined counts, not just this chunk's.
+    report2 = asyncio.run(provider.sync(USER_ID, deadline=None))
+
+    assert not report2.get("continue")
+    assert report2["courses"] == 2  # s1's count (1) carried over + s2's (1)
+    assert login_calls["count"] == 1  # no second real login
+    assert unauth_calls["count"] == 1  # restored the saved session instead
+
+    section_ids = sorted(
+        (c["metadata"] or {}).get("schoology_section_id")
+        for c in fake_db.tables["courses"] if c["id"] not in (BIO_COURSE,)
+    )
+    assert section_ids == ["s1", "s2"]  # s1 not duplicated, s2 now present
+    assert "_sync_progress" not in fake_db.tables["integrations"][0]["config"]
+
+
 def test_normalize_name_basic():
     assert _normalize_name("AP  Calculus-AB!") == "ap calculus ab"
 

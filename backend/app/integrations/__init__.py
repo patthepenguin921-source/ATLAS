@@ -129,7 +129,8 @@ async def _claim(provider: str, user_id: str) -> dict[str, Any] | None:
     """Atomically claim this provider+user's row for a new sync (`status !=
     'running' -> 'running'`) — the only way to start a *new* sync attempt,
     so two overlapping attempts racing the same authenticated Schoology
-    session never happen (see _SECTION_SYNC_CONCURRENCY's history). Returns
+    session never happen (see the section-sync-concurrency history in
+    app.integrations.schoology). Returns
     an error result if someone else's sync already holds it, else None."""
     claimed = await supabase.update(
         "integrations", {"status": "running"},

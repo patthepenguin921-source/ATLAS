@@ -191,31 +191,17 @@ Return JSON with this exact shape:
     }
 
 
-# How many courses' assignments/events/materials walks run at once. Was 4
-# (motivated by the original 45-60s request timeout — see git history), but
-# concurrent requests against the *same* authenticated Schoology session
-# turned out to be unreliable in production: a real account's real files
-# reliably showed up via the debug tool (which walks courses one at a time)
-# but came back nearly empty through the real sync (concurrency=4) — almost
-# certainly Schoology's own session/anti-bot handling reacting to bursts of
-# simultaneous requests on one login, not a code bug on either side. Now
-# that the request timeout is 300s (SYNC_TIMEOUT_SECONDS in
-# app.integrations), there's no time-budget reason left to risk that
-# unreliability — sequential is both correct and still comfortably fast
-# enough. Kept as a constant (not just removing _gather_bounded) so it's a
-# one-line, easy-to-revisit knob if a future timeout tightens again.
-_SECTION_SYNC_CONCURRENCY = 1
-
-
-async def _gather_bounded(coros: list[Any], limit: int) -> None:
-    """Run coroutines concurrently, at most `limit` in flight at a time."""
-    semaphore = asyncio.Semaphore(limit)
-
-    async def _run(coro: Any) -> None:
-        async with semaphore:
-            await coro
-
-    await asyncio.gather(*(_run(c) for c in coros))
+# Sections' assignments/events/materials walks run one at a time, not
+# concurrently. Concurrency here was tried once (4 at a time, motivated by
+# the original 45-60s request timeout — see git history) but concurrent
+# requests against the *same* authenticated Schoology session turned out to
+# be unreliable in production: a real account's real files reliably showed
+# up via the debug tool (which walks courses one at a time) but came back
+# nearly empty through the real sync (concurrency=4) — almost certainly
+# Schoology's own session/anti-bot handling reacting to bursts of
+# simultaneous requests on one login, not a code bug on either side.
+# Sequential is also what makes `sync()`'s per-section deadline check
+# (resumable chunking) meaningful.
 
 
 def _is_schoology_url(href: str) -> bool:
@@ -1496,35 +1482,67 @@ class SchoologyProvider(IntegrationProvider):
         # for whatever courses a *previous* API-connected sync already
         # linked, instead of syncing nothing at all.
         if not self._has_api_key(integration):
-            # This is the only path that honors `deadline` — each course's
-            # login-scraped materials walk is a multi-request crawl, and a
-            # real account's course count reliably pushes the *whole* sync
-            # (all courses, one at a time — see _SECTION_SYNC_CONCURRENCY)
-            # past a single request's time budget even when each individual
-            # course is fast. `_sync_materials_only` stops at `deadline` and
-            # saves its place (`config._sync_progress`) so the next chunked
-            # call picks up where this one left off instead of restarting.
+            # Each course's login-scraped materials walk is a multi-request
+            # crawl, and a real account's course count reliably pushes the
+            # *whole* sync (all courses, one at a time) past a single
+            # request's time budget even when each individual course is
+            # fast. `_sync_materials_only` stops at `deadline` and saves its
+            # place (`config._sync_progress`, keyed by `"pending"`) so the
+            # next chunked call picks up where this one left off instead of
+            # restarting — same idea as the API-key path below (keyed by
+            # `"done_ids"` instead, via `_save_api_sync_progress`).
             await self._sync_materials_only(user_id, integration, report, deadline=deadline)
             return report
 
         google_token = await self._resolve_google_token(user_id, integration)
         client = await self._client(integration)
+
+        # This path used to run to completion or not at all: a large account
+        # (many sections, each with an assignments/events/materials walk)
+        # could blow past `deadline`/the platform's own request timeout with
+        # nothing saved, so an "influx" of new material meant the sync never
+        # actually finished — same section by section from scratch next
+        # time, forever. Now it resumes exactly like `_sync_materials_only`
+        # does: `config._sync_progress["done_ids"]` (distinct from that
+        # method's `"pending"` key, so the two resume formats never collide)
+        # tracks which sections this cycle already handled, and hitting
+        # `deadline` saves that plus the report-so-far and the scraper's
+        # session instead of discarding the whole run.
+        config = integration.get("config") or {}
+        progress = config.get("_sync_progress")
+        resuming = bool(progress and progress.get("done_ids") is not None)
+        if resuming:
+            report.clear()
+            report.update(progress["report"])
+            done_ids: set[str] = set(progress["done_ids"])
+        else:
+            done_ids = set()
+
         # Materials still only ever come from the login-scraper session (see
-        # module docstring), but logged in *once* here and reused for every
-        # course below — logging in separately per course (the previous
-        # behavior) made a many-course account's sync time scale with course
-        # count just from repeated logins, which is what pushed some syncs
-        # past the platform's request timeout. A login failure here doesn't
-        # abort the sync: assignments/events (API-backed) still run per
-        # section, just without materials for this run.
+        # module docstring). Logged in *once* here (or, when resuming,
+        # restored from the cookies the last chunk saved) and reused for
+        # every section below — logging in separately per section made a
+        # many-section account's sync time scale with section count just
+        # from repeated logins, and a real login on every chunk risks
+        # tripping Schoology's own bot detection (see `export_cookies`'s
+        # docstring). A login failure here doesn't abort the sync:
+        # assignments/events (API-backed) still run per section, just
+        # without materials for this run.
         scraper: SchoologyScraperClient | None = None
-        try:
-            scraper = await self._scraper_client(user_id)
-        except SchoologyScraperAuthError as e:
-            report["errors"].append(f"Schoology materials (scrape login): {e}")
-        except RuntimeError as e:
-            if "isn't connected yet" not in str(e):
+        if resuming and progress.get("cookies"):
+            try:
+                scraper = await self._unauthenticated_scraper_client(user_id)
+                scraper.restore_cookies(progress["cookies"])
+            except Exception as e:  # noqa: BLE001
                 report["errors"].append(f"Schoology materials (scrape login): {e}")
+        else:
+            try:
+                scraper = await self._scraper_client(user_id)
+            except SchoologyScraperAuthError as e:
+                report["errors"].append(f"Schoology materials (scrape login): {e}")
+            except RuntimeError as e:
+                if "isn't connected yet" not in str(e):
+                    report["errors"].append(f"Schoology materials (scrape login): {e}")
         try:
             uid = await client.current_user_id()
             sections = await client.get_sections(uid)
@@ -1534,12 +1552,22 @@ class SchoologyProvider(IntegrationProvider):
                 s.display_name for s in sections
             )
 
-            # Resolving each section to a course_id is a single cheap DB
-            # upsert, done up front and in order; the actual slow part —
-            # assignments/events/materials — is collected into a task list
-            # and run concurrently below instead of one course at a time.
-            section_tasks: list[Any] = []
+            # One section at a time, not concurrently: concurrent requests
+            # against the same authenticated Schoology session were
+            # unreliable in production (a real account's real files came
+            # back nearly empty under concurrency, vs. complete when walked
+            # one at a time — almost certainly Schoology's own session/
+            # anti-bot handling reacting to bursts of simultaneous requests
+            # on one login, not a code bug on either side). Sequential is
+            # also what makes per-section deadline checks meaningful.
             for section in sections:
+                if section.id in done_ids:
+                    continue
+                if deadline is not None and time.monotonic() >= deadline:
+                    await self._save_api_sync_progress(user_id, done_ids, report, scraper)
+                    report["continue"] = True
+                    return report
+
                 # Non-academic blocks (lunch, advisory) — never imported, and
                 # any stale row from before this filter existed is removed.
                 if course_mapping.is_excluded(section.display_name):
@@ -1552,6 +1580,7 @@ class SchoologyProvider(IntegrationProvider):
                     except Exception:  # noqa: BLE001
                         pass
                     report["excluded"] += 1
+                    done_ids.add(section.id)
                     continue
 
                 # Clubs/activities — tracked separately, never as a course.
@@ -1561,6 +1590,7 @@ class SchoologyProvider(IntegrationProvider):
                         report["clubs"] += 1
                     except Exception as e:  # noqa: BLE001
                         report["errors"].append(f"{section.display_name} (club): {e}")
+                    done_ids.add(section.id)
                     continue
 
                 try:
@@ -1568,22 +1598,50 @@ class SchoologyProvider(IntegrationProvider):
                     report["courses"] += 1
                 except Exception as e:  # noqa: BLE001
                     report["errors"].append(f"{section.display_name}: {e}")
+                    done_ids.add(section.id)
                     continue
 
-                section_tasks.append(self._sync_section(
+                await self._sync_section(
                     client=client, user_id=user_id, course_id=course_id, section=section,
                     monday=monday, sunday=sunday, google_token=google_token,
                     student_uid=uid, report=report, scraper=scraper,
-                ))
+                )
+                done_ids.add(section.id)
 
-            if section_tasks:
-                await _gather_bounded(section_tasks, limit=_SECTION_SYNC_CONCURRENCY)
-
+            # Every section finished this cycle. A resumed chunk's `report`
+            # started as a *copy* of the last saved chunk's report (which,
+            # having itself hit the deadline, has `continue: True` baked
+            # in) — clear it now that the cycle has actually completed, or
+            # the caller (`app.integrations._run_chunk`) would read this as
+            # "still more to do" forever.
+            report.pop("continue", None)
+            await self._clear_sync_progress(user_id)
             return report
         finally:
             await client.aclose()
             if scraper is not None:
                 await scraper.aclose()
+
+    async def _save_api_sync_progress(
+        self, user_id: str, done_ids: set[str], report: dict[str, Any],
+        scraper: SchoologyScraperClient | None,
+    ) -> None:
+        """Persist where a chunked, API-key `sync()` run stopped — the
+        `done_ids`-keyed counterpart to `_save_sync_progress`'s `pending`-
+        keyed format (materials-only path). Re-reads `config` first for the
+        same reason `_save_sync_progress` does: a "Sync now" retry and a
+        resumed chunk shouldn't be able to stomp each other's unrelated
+        config edits."""
+        integration = await self._load_integration(user_id)
+        config = dict(integration.get("config") or {})
+        config["_sync_progress"] = {
+            "done_ids": list(done_ids), "report": report,
+            "cookies": scraper.export_cookies() if scraper is not None else None,
+        }
+        await supabase.update(
+            "integrations", {"config": config},
+            filters={"user_id": eq(user_id), "provider": eq(self.name)},
+        )
 
     async def _sync_materials_only(
         self, user_id: str, integration: dict[str, Any], report: dict[str, Any],
@@ -1601,8 +1659,8 @@ class SchoologyProvider(IntegrationProvider):
         session is shared by discovery and every course's materials walk
         below, rather than re-logging-in per course.
 
-        Chunked/resumable: courses are walked one at a time (matching
-        `_SECTION_SYNC_CONCURRENCY`'s single-session reasoning), and if
+        Chunked/resumable: courses are walked one at a time (single Schoology
+        session, same reasoning as `sync()`'s section loop), and if
         `deadline` is hit before they're all done, the remaining courses and
         the counts collected so far are saved to
         `integrations.config._sync_progress` and `report["continue"]` is set

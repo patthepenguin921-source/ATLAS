@@ -20,6 +20,16 @@ set -euo pipefail
 : "${CRON_SECRET:?Set CRON_SECRET to the same value as the backend's ATLAS_CRON_SECRET}"
 LOCATION="${LOCATION:-us-east1}"
 
+# --attempt-deadline: Cloud Scheduler's default is 180s (3 min) if
+# unspecified, which is already shorter than the backend's own per-user sync
+# budget (SYNC_TIMEOUT_SECONDS = 270s in app.integrations) — and
+# run_sync_for_all syncs every connected user for the provider sequentially
+# in one request, so the real time needed only grows with more users and
+# more content per user (more courses/materials to walk). Set to 1800s, the
+# maximum Cloud Scheduler allows for an HTTP target, so the scheduler's own
+# deadline is never what cuts a sync short — the backend's own timeouts
+# (which *do* still apply, and which chunk/resume a long Schoology sync
+# rather than losing all its progress — see SchoologyProvider.sync) are.
 gcloud scheduler jobs create http atlas-schoology-sync-morning \
   --project="$PROJECT_ID" \
   --location="$LOCATION" \
@@ -28,6 +38,7 @@ gcloud scheduler jobs create http atlas-schoology-sync-morning \
   --uri="${CLOUD_RUN_URL}/api/v1/integrations/cron/schoology/sync" \
   --http-method=GET \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --attempt-deadline=1800s \
   --description="Atlas: morning Schoology sync (all connected users)"
 
 gcloud scheduler jobs create http atlas-schoology-sync-afternoon \
@@ -38,6 +49,7 @@ gcloud scheduler jobs create http atlas-schoology-sync-afternoon \
   --uri="${CLOUD_RUN_URL}/api/v1/integrations/cron/schoology/sync" \
   --http-method=GET \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --attempt-deadline=1800s \
   --description="Atlas: afternoon Schoology sync (all connected users)"
 
 gcloud scheduler jobs create http atlas-powerschool-sync-morning \
@@ -48,6 +60,7 @@ gcloud scheduler jobs create http atlas-powerschool-sync-morning \
   --uri="${CLOUD_RUN_URL}/api/v1/integrations/cron/powerschool/sync" \
   --http-method=GET \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --attempt-deadline=1800s \
   --description="Atlas: morning PowerSchool sync (all connected users)"
 
 gcloud scheduler jobs create http atlas-powerschool-sync-afternoon \
@@ -58,6 +71,7 @@ gcloud scheduler jobs create http atlas-powerschool-sync-afternoon \
   --uri="${CLOUD_RUN_URL}/api/v1/integrations/cron/powerschool/sync" \
   --http-method=GET \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --attempt-deadline=1800s \
   --description="Atlas: afternoon PowerSchool sync (all connected users)"
 
 # Deleting a document in the app queues its R2 file for removal after a

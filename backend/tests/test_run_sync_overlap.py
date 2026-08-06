@@ -1,7 +1,7 @@
 """run_sync() must not let two syncs for the same user+provider run at
 once — concurrent requests racing the same authenticated Schoology session
-turned out to be unreliable in production (see _SECTION_SYNC_CONCURRENCY's
-history). The "running" transition is claimed with an atomic
+turned out to be unreliable in production (see the section-sync-concurrency
+history in app.integrations.schoology). The "running" transition is claimed with an atomic
 UPDATE ... WHERE status != 'running', so a second "Sync now" click while
 the first is still genuinely in flight is rejected immediately instead of
 silently interfering with it.

@@ -68,6 +68,22 @@ If the backend runs on Cloud Run instead:
 4. Already ran this script before the storage-cleanup job existed? Re-run
    it (or just create that one job by hand) — it's additive, existing jobs
    are untouched.
+5. **Also check the Cloud Run service's own request timeout** (`gcloud run
+   services describe <name> --format='value(spec.template.spec.timeoutSeconds)'`,
+   or set it with `gcloud run services update <name> --timeout=1800`) — it
+   defaults to 300s if never set, and that caps how long a sync request can
+   run regardless of anything Cloud Scheduler is configured to wait for.
+   The Schoology/PowerSchool sync jobs this script creates now set
+   `--attempt-deadline=1800s` (Cloud Scheduler's own default, 180s, was
+   already shorter than the backend's own per-user sync budget —
+   `SYNC_TIMEOUT_SECONDS` in `app.integrations`, 270s — so a real sync could
+   look like it "failed" to the scheduler well before the backend was
+   actually done or had given up). Raising the scheduler's deadline alone
+   doesn't help if the Cloud Run service itself still kills the request at
+   300s — both need enough room for `run_sync_for_all` to get through every
+   connected user's sync (each bounded by `SYNC_TIMEOUT_SECONDS`, chunked
+   and resumable per user rather than losing all progress on a timeout —
+   see `SchoologyProvider.sync`'s docstring) in one invocation.
 
 ## Document processing (triggered on upload, not cron-primary anymore)
 

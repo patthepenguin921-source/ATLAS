@@ -3,7 +3,10 @@
 Pluggable provider so the reasoning engine does not depend on any single
 vendor:
 
-    groq       — free tier (Llama 3.3 70B / 3.1 8B), the default. $0 forever.
+    groq       — free tier (GPT-OSS 120B / 20B — see app.config's
+                 atlas_groq_model comment on why these are pinned model IDs,
+                 not a floating alias, and what to do when Groq retires
+                 them), the default. $0 forever.
     gemini     — also free (Google AI Studio), materially higher free-tier
                  rate limits than Groq's and generally stronger reasoning
                  than Llama 3.3 70B. Set ATLAS_LLM_PROVIDER=gemini and
@@ -65,14 +68,39 @@ def _get_anthropic_client() -> AsyncAnthropic:
 
 
 def _fallback_provider(primary: str) -> str | None:
-    """The provider to retry a rate-limited call against, or None if
-    fallback is disabled, would just retry the same provider, or has no
-    credentials configured (in which case failing fast with the original
-    error is more useful than a second, guaranteed-to-fail call)."""
+    """The provider to retry a call against, or None if fallback is
+    disabled, would just retry the same provider, or has no credentials
+    configured (in which case failing fast with the original error is more
+    useful than a second, guaranteed-to-fail call)."""
     fallback = settings.atlas_llm_fallback_provider
     if not fallback or fallback == primary:
         return None
     return fallback if settings._llm_credential(fallback) else None
+
+
+def _should_fallback(exc: LLMError) -> bool:
+    """Worth retrying the whole call against the fallback provider: a rate
+    limit (429, the original case this existed for), or the primary's own
+    configured model has been retired server-side. The latter matters just
+    as much in practice -- Groq pins specific model IDs (see
+    app.config.Settings.atlas_groq_model's comment) and does retire them on
+    a schedule, and that comes back as a plain HTTP 400
+    ("model_decommissioned"/"model_not_found"), not a 429, so without this
+    every single chat turn would keep failing outright with no way to
+    recover until someone notices and re-pins the model by hand. Matched by
+    the error code/message Groq's OpenAI-compatible API actually uses
+    (see https://console.groq.com/docs/errors) rather than any bare 400, so
+    an ordinary bad-request from a real caller bug isn't silently masked by
+    a second, unrelated call to a different provider."""
+    if exc.status == 429:
+        return True
+    if exc.status in (400, 404):
+        detail = exc.detail.lower()
+        return any(
+            marker in detail
+            for marker in ("model_decommissioned", "model_not_found", "has been decommissioned")
+        )
+    return False
 
 
 async def complete(
@@ -93,7 +121,7 @@ async def complete(
             max_tokens=max_tokens, temperature=temperature, fast=fast,
         )
     except LLMError as exc:
-        fallback = _fallback_provider(primary) if exc.status == 429 else None
+        fallback = _fallback_provider(primary) if _should_fallback(exc) else None
         if not fallback:
             raise
         # `model` isn't retried across providers -- a model name from one
@@ -290,15 +318,17 @@ async def agentic_complete(
     caller to surface as a real confirm step, not just take the model's own
     word that something was done).
 
-    On a 429 from the primary provider, retries the whole call once against
-    the configured fallback provider (see `_fallback_provider`) starting
-    from the original `messages` -- any tool call the primary provider
-    already executed before hitting the limit stays executed (side effects
-    aren't undone), so the fallback attempt can in rare cases repeat one.
-    That's an accepted tradeoff for keeping this a plain retry rather than
-    resumable cross-provider tool-call state; a 429 on the very first model
-    call of the turn -- before any tool has run -- is the overwhelmingly
-    common case in practice."""
+    On a 429 (or the primary's configured model having been retired
+    server-side -- see `_should_fallback`) from the primary provider,
+    retries the whole call once against the configured fallback provider
+    (see `_fallback_provider`) starting from the original `messages` -- any
+    tool call the primary provider already executed before hitting the
+    limit stays executed (side effects aren't undone), so the fallback
+    attempt can in rare cases repeat one. That's an accepted tradeoff for
+    keeping this a plain retry rather than resumable cross-provider
+    tool-call state; a 429 on the very first model call of the turn --
+    before any tool has run -- is the overwhelmingly common case in
+    practice."""
     primary = settings.atlas_llm_provider
     fn = _AGENTIC_PROVIDERS.get(primary, _agentic_groq)
     try:
@@ -307,7 +337,7 @@ async def agentic_complete(
             model=model, max_tokens=max_tokens, temperature=temperature,
         )
     except LLMError as exc:
-        fallback = _fallback_provider(primary) if exc.status == 429 else None
+        fallback = _fallback_provider(primary) if _should_fallback(exc) else None
         if not fallback:
             raise
         return await _AGENTIC_PROVIDERS[fallback](

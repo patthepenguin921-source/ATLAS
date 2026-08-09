@@ -211,6 +211,56 @@ def test_complete_does_not_fall_back_on_a_non_429_error(monkeypatch):
     assert len(_FakeAsyncClient.calls) == 1
 
 
+def test_complete_falls_back_to_gemini_when_groq_model_is_decommissioned(monkeypatch):
+    # Groq retiring a pinned model (see app.config's atlas_groq_model
+    # comment) comes back as a 400 with error.code
+    # "model_decommissioned" -- not a 429 -- and must still trigger the
+    # fallback, or a retirement like the one that actually happened
+    # (06/17/26) silently breaks every chat turn until someone notices.
+    _install(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=400, payload={
+                "error": {
+                    "message": "The model llama-3.3-70b-versatile has been "
+                    "decommissioned and is no longer supported.",
+                    "type": "invalid_request_error", "code": "model_decommissioned",
+                },
+            }),
+            _gemini_text_response("Handled via Gemini."),
+        ],
+        gemini_api_key="fake-gemini-key",
+    )
+
+    result = asyncio.run(claude_module.complete(
+        system="sys", messages=[{"role": "user", "content": "hi"}],
+    ))
+
+    assert result == "Handled via Gemini."
+    assert len(_FakeAsyncClient.calls) == 2
+
+
+def test_complete_does_not_fall_back_on_an_unrelated_400(monkeypatch):
+    # An ordinary bad-request (malformed prompt, bad params, ...) isn't a
+    # provider-side outage -- retrying it against a different provider would
+    # just mask a real caller bug behind a slower, equally-doomed call.
+    _install(
+        monkeypatch,
+        [_FakeResponse(status_code=400, payload={
+            "error": {"message": "'temperature' must be <= 2", "type": "invalid_request_error"},
+        })],
+        gemini_api_key="fake-gemini-key",
+    )
+
+    with pytest.raises(claude_module.LLMError) as exc_info:
+        asyncio.run(claude_module.complete(
+            system="sys", messages=[{"role": "user", "content": "hi"}],
+        ))
+
+    assert exc_info.value.status == 400
+    assert len(_FakeAsyncClient.calls) == 1
+
+
 def test_complete_does_not_fall_back_when_fallback_provider_is_disabled(monkeypatch):
     _install(
         monkeypatch,

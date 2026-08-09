@@ -1141,6 +1141,150 @@ def test_chunked_resume_restores_the_session_instead_of_logging_in_again(fake_db
     assert not report2.get("continue")
 
 
+class _SlowFirstItemScraper(_FakeScraperClient):
+    """Sleeps while downloading the first item so a deadline set to expire
+    shortly after the walk starts is still open for item 1's check but has
+    passed by item 2's -- lets a test reliably land the deadline *inside* a
+    single course's item loop instead of only ever between whole
+    courses/sections (mirrors `test_chunked_resume_restores_the_session_
+    instead_of_logging_in_again`'s section-level sleep trick, one level
+    deeper)."""
+
+    async def download_file(self, url):
+        if url == "/attachment/download/1":
+            await asyncio.sleep(0.15)
+        return await super().download_file(url)
+
+    def export_cookies(self):
+        return [{"name": "session", "value": "tok-abc", "domain": "d.schoology.com", "path": "/"}]
+
+    def restore_cookies(self, cookies):
+        self.restored_with = cookies
+
+
+def test_sync_scraped_materials_stops_at_deadline_mid_course_without_reingesting(fake_db, monkeypatch):
+    """Regression for the reported "This step of the sync timed out after
+    150s and was aborted" error: a course with enough materials -- each item
+    is its own download + text-extract + LLM classification round trip --
+    can on its own take longer than a whole chunk's budget, and the deadline
+    used to only ever be checked *between* whole courses, never within one
+    already in progress. `_sync_scraped_materials` must now stop between
+    items too, and a resumed call must pick up only what's still new rather
+    than re-ingesting (and re-running through the LLM) what the interrupted
+    pass already saved."""
+    provider = SchoologyProvider()
+    scraper = _SlowFirstItemScraper(
+        [
+            MaterialLink(name="One.pdf", href="/attachment/download/1", kind="item", material_type="File"),
+            MaterialLink(name="Two.pdf", href="/attachment/download/2", kind="item", material_type="File"),
+        ],
+        files={
+            "/attachment/download/1": (b"%PDF-1.4 one", "application/pdf"),
+            "/attachment/download/2": (b"%PDF-1.4 two", "application/pdf"),
+        },
+    )
+
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
+    deadline = time.monotonic() + 0.1
+    finished = asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report, deadline=deadline,
+    ))
+
+    assert finished is False
+    assert report["documents"] == 1
+    docs = fake_db.tables["documents"]
+    assert {d["metadata"]["material_name"] for d in docs} == {"One.pdf"}
+
+    # Resume with no deadline -- `known_names`, recomputed fresh from what's
+    # already in `documents`, excludes "one.pdf" so only the still-new item
+    # gets walked and ingested.
+    finished2 = asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert finished2 is True
+    assert report["documents"] == 2
+    docs = fake_db.tables["documents"]
+    assert {d["metadata"]["material_name"] for d in docs} == {"One.pdf", "Two.pdf"}
+
+
+def test_sync_materials_only_stops_mid_course_and_resumes_the_same_course(fake_db, monkeypatch):
+    """End-to-end version of the test above, through `_sync_materials_only`
+    itself -- the no-API-key path that actually produced the reported "150s"
+    error. The interrupted course must be left at the front of `remaining`/
+    `_sync_progress["pending"]`, not skipped past as if it were done, so the
+    next chunk resumes and finishes it instead of restarting from the
+    following course with this one silently incomplete."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
+
+    integration_config: dict[str, Any] = {}
+    fake_db.tables["integrations"] = [{
+        "id": "int-1", "user_id": USER_ID, "provider": "schoology",
+        "secret_ref": "x", "config": integration_config,
+    }]
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: False)
+
+    scraper = _SlowFirstItemScraper(
+        [
+            MaterialLink(name="One.pdf", href="/attachment/download/1", kind="item", material_type="File"),
+            MaterialLink(name="Two.pdf", href="/attachment/download/2", kind="item", material_type="File"),
+        ],
+        files={
+            "/attachment/download/1": (b"%PDF-1.4 one", "application/pdf"),
+            "/attachment/download/2": (b"%PDF-1.4 two", "application/pdf"),
+        },
+        courses=[{"id": "sec-hist", "name": "AP US History"}],
+    )
+
+    async def _fake_scraper_client(self, user_id):
+        return scraper
+
+    async def _fake_unauthenticated(self, user_id):
+        return scraper
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _fake_scraper_client)
+    monkeypatch.setattr(SchoologyProvider, "_unauthenticated_scraper_client", _fake_unauthenticated)
+
+    report1: dict[str, Any] = {
+        "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
+        "documents": 0, "links": 0, "announcements": 0, "skipped": 0, "errors": [],
+    }
+    deadline = time.monotonic() + 0.1
+    asyncio.run(provider._sync_materials_only(
+        USER_ID, {"secret_ref": "x", "config": {}}, report1, deadline=deadline,
+    ))
+
+    assert report1.get("continue") is True
+    assert report1["courses"] == 0  # the one course wasn't finished this cycle
+    assert report1["documents"] == 1
+    docs = fake_db.tables["documents"]
+    assert {d["metadata"]["material_name"] for d in docs} == {"One.pdf"}
+
+    saved_config = fake_db.tables["integrations"][0]["config"]
+    progress = saved_config["_sync_progress"]
+    # The course is still pending -- not popped past as if finished.
+    assert len(progress["pending"]) == 1
+    assert progress["pending"][0][1] == "AP US History"
+    integration_config.clear()
+    integration_config.update(saved_config)
+
+    report2: dict[str, Any] = {
+        "courses": 0, "clubs": 0, "excluded": 0, "assignments": 0, "events": 0,
+        "documents": 0, "links": 0, "announcements": 0, "skipped": 0, "errors": [],
+    }
+    asyncio.run(provider._sync_materials_only(
+        USER_ID, {"secret_ref": "x", "config": integration_config}, report2, deadline=None,
+    ))
+
+    assert not report2.get("continue")
+    assert report2["courses"] == 1
+    docs = fake_db.tables["documents"]
+    assert {d["metadata"]["material_name"] for d in docs} == {"One.pdf", "Two.pdf"}
+
+
 def test_sync_scraped_materials_ingests_new_items_as_documents(fake_db, monkeypatch):
     provider = SchoologyProvider()
     scraper = _FakeScraperClient(

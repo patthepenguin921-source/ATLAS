@@ -333,13 +333,24 @@ async def connect_schoology(
     body: SchoologyConnectRequest, user: CurrentUser = Depends(get_current_user)
 ):
     """Save the Schoology login (username + password — the same credentials
-    used in a browser) and run a first sync immediately, so problems surface
-    right away instead of on the next scheduled run. This is the only
-    connect step now — it used to require a personal API key first and a
-    separate materials-access login after; the login here reads courses and
-    materials on its own. An API key is optional (an "Advanced" field): when
-    supplied and valid, it additionally unlocks assignments/events sync,
-    which the login session alone can't read yet."""
+    used in a browser) and kick off the first sync's first chunk immediately,
+    so problems surface right away instead of on the next scheduled run. This
+    is the only connect step now — it used to require a personal API key
+    first and a separate materials-access login after; the login here reads
+    courses and materials on its own. An API key is optional (an "Advanced"
+    field): when supplied and valid, it additionally unlocks assignments/
+    events sync, which the login session alone can't read yet.
+
+    Only runs one chunk (`run_sync_step`), not the whole first sync
+    (`run_sync`) — a real account's full materials walk (every course
+    folder, sequentially — see `SchoologyProvider`'s module docstring on why
+    concurrency isn't safe here) routinely needs several `SYNC_CHUNK_SECONDS`
+    chunks to finish, more than fits in `SYNC_TIMEOUT_SECONDS`'s single-
+    request budget. Blocking this request for the whole thing meant a normal
+    first sync for a real account could time out and get reported as a
+    failed connection even though the login itself was fine — the frontend
+    now continues chunking the same way "Sync now" already does whenever
+    this returns `status: "running"`."""
     domain = body.domain.strip().rstrip("/")
     if not domain:
         raise HTTPException(400, "Missing Schoology web address (e.g. https://yourdistrict.schoology.com).")
@@ -385,7 +396,7 @@ async def connect_schoology(
     except SchoologyScraperAuthError as e:
         raise HTTPException(401, str(e)) from e
 
-    return await run_sync("schoology", user.id)
+    return await run_sync_step("schoology", user.id)
 
 
 @router.get("/schoology/debug-scrape-materials")

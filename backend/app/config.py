@@ -40,10 +40,21 @@ class Settings(BaseSettings):
     # ---- Reasoning engine (pluggable provider) ----
     atlas_llm_provider: str = "groq"          # groq | gemini (both free) | anthropic (paid, higher quality)
 
-    # Groq — free tier, default
+    # Groq — free tier, default. Pinned to specific model IDs (Groq has no
+    # floating "-latest" alias the way Gemini does below), which is exactly
+    # why the previous defaults broke: Groq deprecated both
+    # `llama-3.3-70b-versatile` and `llama-3.1-8b-instant` (announced
+    # 06/17/26, shut down 08/16/26 for free/developer-tier usage — see
+    # https://console.groq.com/docs/deprecations), and every chat turn
+    # failed since neither `complete`'s nor `agentic_complete`'s fallback
+    # (Groq -> Gemini) fires here: that only triggers on an HTTP 429, and a
+    # decommissioned model returns 400, not 429. Now pointed at Groq's own
+    # recommended replacements. Re-check console.groq.com/docs/deprecations
+    # if chat breaks again -- there's no way to avoid re-pinning by hand
+    # when Groq retires whatever's current now.
     groq_api_key: str = ""
-    atlas_groq_model: str = "llama-3.3-70b-versatile"
-    atlas_groq_fast_model: str = "llama-3.1-8b-instant"
+    atlas_groq_model: str = "openai/gpt-oss-120b"
+    atlas_groq_fast_model: str = "openai/gpt-oss-20b"
 
     # Google Gemini — also free (Google AI Studio, https://aistudio.google.com/apikey),
     # with materially higher free-tier rate limits than Groq's and generally

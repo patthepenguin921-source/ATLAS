@@ -590,8 +590,16 @@ function IntegrationsTab() {
     setSchoologyConnecting(true);
     setSchoologyError(null);
     setLastResult(null);
+    let first: SyncResult;
     try {
-      const result = await apiPost<SyncResult>("/integrations/schoology/connect", {
+      // Only the connect call itself (saving credentials + login/API-key
+      // verification, plus the first sync chunk) needs to block the modal —
+      // the backend now returns after one chunk instead of the whole first
+      // sync (see connect_schoology's docstring), so a real account's full
+      // materials walk no longer has to fit in a single request's timeout
+      // budget. Any remaining chunks continue below the same way "Sync now"
+      // continues them, after the modal's already closed.
+      first = await apiPost<SyncResult>("/integrations/schoology/connect", {
         domain: schoologyForm.domain,
         username: schoologyForm.username,
         password: schoologyForm.password,
@@ -599,13 +607,25 @@ function IntegrationsTab() {
           ? { consumer_key: schoologyForm.consumer_key, consumer_secret: schoologyForm.consumer_secret }
           : {}),
       });
-      setLastResult(result);
-      closeSchoologyModal();
-      await load();
     } catch (err: any) {
       setSchoologyError(err.message ?? "Connection failed.");
-    } finally {
       setSchoologyConnecting(false);
+      return;
+    }
+    setLastResult(first);
+    closeSchoologyModal();
+    setSchoologyConnecting(false);
+    await load();
+    if (first.status === "running") {
+      setSyncingProvider("schoology");
+      try {
+        await pollSyncChunks("schoology", first);
+      } catch (err: any) {
+        setError(err.message ?? "Sync failed.");
+      } finally {
+        setSyncingProvider(null);
+      }
+      await load();
     }
   }
 
@@ -662,30 +682,40 @@ function IntegrationsTab() {
     }
   }
 
+  // A real account's sync can take several chunks to finish (see
+  // run_sync_step's docstring on the backend) — each call only ever runs
+  // one bounded chunk and comes back in well under a couple minutes, so
+  // this loops, calling again whenever the response says there's more to
+  // do, instead of holding one request open for the sync's entire duration
+  // (the fragile pattern — a dropped WiFi, a laptop going to sleep, a
+  // proxy's idle timeout — that made "Sync now" unreliable in the first
+  // place). `first` is a chunk result already in hand (e.g. from "Sync
+  // now"'s own first call, or from `/schoology/connect`'s first-chunk
+  // response) so callers never have to burn an extra request re-fetching
+  // what they already got back. The per-call timeout here is a backstop for
+  // a connection that stalls without ever coming back; it's comfortably
+  // above the backend's own per-chunk timeout so that one wins first in the
+  // normal case.
+  async function pollSyncChunks(provider: string, first: SyncResult) {
+    let result = first;
+    let chunks = 1;
+    const MAX_CHUNKS = 60; // generous ceiling against a runaway loop, not a real-world limit
+    while (result.status === "running" && chunks < MAX_CHUNKS) {
+      result = await apiPost<SyncResult>(`/integrations/${provider}/sync`, undefined, 170_000);
+      setLastResult(result);
+      chunks += 1;
+    }
+    return result;
+  }
+
   async function sync(provider: string) {
     setSyncingProvider(provider);
     setError(null);
     setLastResult(null);
     try {
-      // A real account's sync can take several chunks to finish (see
-      // run_sync_step's docstring on the backend) — each call only ever
-      // runs one bounded chunk and comes back in well under a couple
-      // minutes, so this loops, calling again whenever the response says
-      // there's more to do, instead of holding one request open for the
-      // sync's entire duration (the fragile pattern — a dropped WiFi, a
-      // laptop going to sleep, a proxy's idle timeout — that made "Sync
-      // now" unreliable in the first place). The per-call timeout here is
-      // a backstop for a connection that stalls without ever coming back;
-      // it's comfortably above the backend's own per-chunk timeout so that
-      // one wins first in the normal case.
-      let result: SyncResult;
-      let chunks = 0;
-      const MAX_CHUNKS = 60; // generous ceiling against a runaway loop, not a real-world limit
-      do {
-        result = await apiPost<SyncResult>(`/integrations/${provider}/sync`, undefined, 170_000);
-        setLastResult(result);
-        chunks += 1;
-      } while (result.status === "running" && chunks < MAX_CHUNKS);
+      const first = await apiPost<SyncResult>(`/integrations/${provider}/sync`, undefined, 170_000);
+      setLastResult(first);
+      await pollSyncChunks(provider, first);
       await load();
     } catch (err: any) {
       setError(err.message ?? "Sync failed.");

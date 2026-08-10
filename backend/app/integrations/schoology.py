@@ -1595,17 +1595,26 @@ class SchoologyProvider(IntegrationProvider):
 
                 try:
                     course_id = await self._resolve_course(user_id, section, present_group_semesters)
-                    report["courses"] += 1
                 except Exception as e:  # noqa: BLE001
                     report["errors"].append(f"{section.display_name}: {e}")
                     done_ids.add(section.id)
                     continue
 
-                await self._sync_section(
+                # `report["courses"]` is only bumped once this section is
+                # actually finished (see below) -- if `_sync_section` returns
+                # False (deadline hit mid materials-walk), the section stays
+                # out of `done_ids` and gets fully re-run next chunk, which
+                # would otherwise double-count it here.
+                finished = await self._sync_section(
                     client=client, user_id=user_id, course_id=course_id, section=section,
                     monday=monday, sunday=sunday, google_token=google_token,
-                    student_uid=uid, report=report, scraper=scraper,
+                    student_uid=uid, report=report, scraper=scraper, deadline=deadline,
                 )
+                if not finished:
+                    await self._save_api_sync_progress(user_id, done_ids, report, scraper)
+                    report["continue"] = True
+                    return report
+                report["courses"] += 1
                 done_ids.add(section.id)
 
             # Every section finished this cycle. A resumed chunk's `report`
@@ -1741,17 +1750,28 @@ class SchoologyProvider(IntegrationProvider):
                     await self._save_sync_progress(user_id, remaining, report, scraper)
                     report["continue"] = True
                     return
-                course_id, name, section_id, student_uid = remaining.pop(0)
+                course_id, name, section_id, student_uid = remaining[0]
                 section = SchoologySection(
                     id=section_id, course_id=section_id, course_title=name, section_title="",
                     course_code="", section_code="", grading_periods=[], meeting_days=[],
                     start_time="", end_time="", location="", active=True,
                 )
-                await self._sync_scraped_materials(
+                finished = await self._sync_scraped_materials(
                     user_id=user_id, course_id=course_id, section=section,
                     report=report, scraper=scraper, google_token=google_token,
-                    student_uid=student_uid,
+                    student_uid=student_uid, deadline=deadline,
                 )
+                if not finished:
+                    # Ran out of time partway through this course's own
+                    # materials walk -- leave it at the front of `remaining`
+                    # (not popped) so the next chunk resumes it instead of
+                    # skipping straight to the next course; re-walking it is
+                    # cheap since `_sync_scraped_materials`'s own dedup skips
+                    # everything this partial pass already ingested.
+                    await self._save_sync_progress(user_id, remaining, report, scraper)
+                    report["continue"] = True
+                    return
+                remaining.pop(0)
                 report["courses"] += 1
 
             # Every course in this cycle finished. A resumed chunk's `report`
@@ -1878,7 +1898,15 @@ class SchoologyProvider(IntegrationProvider):
         section: SchoologySection, monday: date, sunday: date,
         google_token: str | None, scraper: SchoologyScraperClient | None,
         student_uid: str | None = None, report: dict[str, Any],
-    ) -> None:
+        deadline: float | None = None,
+    ) -> bool:
+        """Returns True once this section's assignments/events/materials are
+        all synced, or False if `deadline` was hit partway through its
+        materials walk (see `_sync_scraped_materials`'s docstring) — the
+        caller (`sync()`) then leaves this section out of `done_ids` so the
+        next chunk re-runs it rather than treating it as finished. Assignments/
+        events (idempotent upserts) simply re-run in that case; materials
+        resumes efficiently via `_sync_scraped_materials`'s own dedup."""
         sid = section.id
 
         # 1) Assignments — imported as work items (NO grades) + week-at-a-glance
@@ -1940,10 +1968,12 @@ class SchoologyProvider(IntegrationProvider):
         #    every section rather than trying (and failing) to log in again
         #    per course.
         if scraper is not None:
-            await self._sync_scraped_materials(
+            return await self._sync_scraped_materials(
                 user_id=user_id, course_id=course_id, section=section, report=report,
                 scraper=scraper, google_token=google_token, student_uid=student_uid,
+                deadline=deadline,
             )
+        return True
 
     async def _import_assignment(
         self, *, client: SchoologyClient, user_id: str, course_id: str,
@@ -2008,7 +2038,8 @@ class SchoologyProvider(IntegrationProvider):
         self, *, user_id: str, course_id: str, section: SchoologySection,
         scraper: SchoologyScraperClient, report: dict[str, Any],
         google_token: str | None = None, student_uid: str | None = None,
-    ) -> None:
+        deadline: float | None = None,
+    ) -> bool:
         """Materials via the login-scraper session (`schoology_scraper.py`) —
         the only materials path now (see the call site in `_sync_section`;
         the API's Courses-realm folder walk was retired because it's
@@ -2032,7 +2063,25 @@ class SchoologyProvider(IntegrationProvider):
 
         `scraper` is the caller's already-logged-in session, shared across
         every course in this sync run (see `sync()`/`_sync_materials_only()`)
-        — this method neither logs in nor closes it."""
+        — this method neither logs in nor closes it.
+
+        Returns True once every item this walk found has been ingested (or
+        the walk/login itself failed outright -- nothing left to usefully
+        retry this cycle), or False if `deadline` was hit partway through a
+        course with items still left to process. A course with enough
+        materials -- each item is its own download + text-extract + LLM
+        classification/enrichment round trip -- can on its own take longer
+        than a whole chunk's budget, and the caller's own per-course
+        deadline check (between whole courses) can't interrupt a single
+        course already in progress; checking here too is what actually
+        bounds a chunk's wall time instead of relying on `_run_chunk`'s
+        outer `asyncio.wait_for` to hard-abort mid-course with nothing
+        saved. On False, the caller leaves this same course in its pending
+        list for the next chunk rather than advancing past it -- re-walking
+        it there is cheap: `known_names` (recomputed from what's already in
+        `documents`) means every item already ingested during this partial
+        pass is skipped, so the resumed walk only touches what's actually
+        still new."""
         try:
             existing = await supabase.select(
                 "documents", columns="metadata,mime_type,storage_path",
@@ -2099,15 +2148,20 @@ class SchoologyProvider(IntegrationProvider):
                     section.id, known_names=known_names, student_uid=student_uid,
                 )
             for item in items:
+                if deadline is not None and time.monotonic() >= deadline:
+                    return False
                 await self._ingest_scraped_material(
                     user_id=user_id, course_id=course_id, section=section,
                     item=item, scraper=scraper, google_token=google_token,
                     known_assignment_titles=known_assignment_titles, report=report,
                 )
+            return True
         except SchoologyScraperAuthError as e:
             report["errors"].append(f"{section.display_name} materials (scrape login): {e}")
+            return True
         except Exception as e:  # noqa: BLE001
             report["errors"].append(f"{section.display_name} materials (scrape): {e}")
+            return True
 
     # Schoology's own accessibility-text type prefixes that mean "this
     # item's href is (probably) a direct file download" — see

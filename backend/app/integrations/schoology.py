@@ -68,6 +68,7 @@ from app.services.schedule_extraction import glance_still_relevant as _glance_st
 from app.services.schedule_extraction import is_glance as _is_glance
 from app.services.schedule_extraction import is_recurring_glance as _is_recurring_glance
 from app.services.schedule_extraction import is_recurring_glance_title
+from app.services.schedule_extraction import valid_iso_date
 
 # Assignment/material title keywords → Atlas assignment_category enum values.
 _CATEGORY_KEYWORDS = (
@@ -186,7 +187,13 @@ Return JSON with this exact shape:
         category = fallback["category"]
     return {
         "description": result.get("description") or fallback["description"],
-        "due_date": result.get("due_date"),
+        # Not always a real "YYYY-MM-DD" despite the prompt asking for one —
+        # a real page once yielded a bare "Monday" lifted from its own "to
+        # be finished Monday" text, which Postgres rejects outright as a
+        # due_date and takes the whole assignment insert down with it (see
+        # `valid_iso_date`'s docstring) — same validate-or-drop treatment
+        # `category` just got above.
+        "due_date": valid_iso_date(result.get("due_date")),
         "category": category,
     }
 
@@ -1275,7 +1282,10 @@ class SchoologyProvider(IntegrationProvider):
                 "title": classification.get("assignment_title") or title,
                 "description": text[:8000],
                 "category": category,
-                "due_date": classification.get("due_date") or None,
+                # Not always a real "YYYY-MM-DD" despite the prompt asking
+                # for one — see `valid_iso_date`'s docstring for why a raw,
+                # unvalidated value here can take the whole insert down.
+                "due_date": valid_iso_date(classification.get("due_date")),
                 "status": "not_started",
                 "metadata": {
                     "source_document_id": doc_id, "source_url": source_url,

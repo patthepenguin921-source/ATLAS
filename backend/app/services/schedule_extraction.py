@@ -143,6 +143,26 @@ def _normalize_name(name: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", (name or "").lower()))
 
 
+def valid_iso_date(value: Any) -> str | None:
+    """An LLM asked for a due date as "YYYY-MM-DD or null" doesn't always
+    comply -- a real response once returned a bare weekday name ("Monday"),
+    lifted straight from the document's own "to be finished Monday" phrasing,
+    instead of a resolved calendar date. Passed straight through as
+    `due_date`, that isn't just a wrong date -- Postgres rejects the whole
+    assignment insert outright (`invalid input syntax for type timestamp
+    with time zone`), losing the assignment entirely rather than just its
+    due date. Shared by every LLM-derived due_date in this module and
+    `app.integrations.schoology` so each has one place to fall back to a
+    real date (or null) instead of a garbage string reaching the database."""
+    if not isinstance(value, str):
+        return None
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
+
+
 async def extract_schedule_from_text(
     title: str, text: str, *, report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -252,7 +272,16 @@ Omit assignments with no clear title."""
     try:
         result = await claude.complete_json(
             system="You are Atlas's Archivist, precisely extracting a class schedule from a teacher's document.",
-            prompt=prompt, max_tokens=4000, temperature=0.0,
+            # A real "Unit ... Assignments List" document (see this module's
+            # docstring) genuinely produced enough days/assignments that
+            # 4000 tokens cut the JSON off mid-array -- an invalid, truncated
+            # response `complete_json`'s own fence-stripping/brace-matching
+            # fallback can't repair (`json.JSONDecodeError: Expecting value`),
+            # losing the *entire* extraction rather than just the tail end of
+            # a long document. 8000 comfortably fits a full unit/semester's
+            # worth of days without materially increasing single-document
+            # cost for the common (much shorter) case.
+            prompt=prompt, max_tokens=8000, temperature=0.0,
         )
     except Exception as e:  # noqa: BLE001
         if report is not None:
@@ -522,7 +551,7 @@ async def apply_schedule_from_doc(
             category = a.get("category")
             if category not in _ASSIGNMENT_CATEGORY_VALUES:
                 category = _map_category(a_title)
-            due = a.get("due_date") or iso_date
+            due = valid_iso_date(a.get("due_date")) or iso_date
             # Keyed by the day it's *listed* under (`iso_date`), not its
             # due_date -- so the same title mentioned on two different days
             # in the same document (a recurring "Study for Test" reminder,

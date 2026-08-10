@@ -100,6 +100,16 @@ def test_is_glance_with_no_text_falls_back_to_title_only():
     assert schedule_extraction.is_glance(title="Notes", text=None) is False
 
 
+@pytest.mark.parametrize("value", ["2025-10-09", "2026-01-01"])
+def test_valid_iso_date_passes_through_a_real_date(value):
+    assert schedule_extraction.valid_iso_date(value) == value
+
+
+@pytest.mark.parametrize("value", ["Monday", "next Friday", "TBD", "", "10/09/2025", None, 42, ["2025-10-09"]])
+def test_valid_iso_date_rejects_anything_not_a_real_iso_date(value):
+    assert schedule_extraction.valid_iso_date(value) is None
+
+
 class FakeSupabase:
     def __init__(self) -> None:
         self.tables: dict[str, list[dict[str, Any]]] = {
@@ -202,6 +212,49 @@ def test_apply_schedule_from_doc_creates_class_events_and_assignments(fake_db, m
     assert assignments[0]["title"] == "Lab Report"
     assert assignments[0]["due_date"] == "2025-10-09"
     assert assignments[0]["external_source"] == "manual"
+
+
+@pytest.mark.parametrize("bad_due_date", ["Monday", "next Friday", "TBD", "", 42])
+def test_apply_schedule_from_doc_falls_back_to_the_listed_day_when_llm_due_date_is_not_a_real_date(
+    fake_db, monkeypatch, bad_due_date,
+):
+    """The LLM is asked for "YYYY-MM-DD or null" but doesn't always comply --
+    a real response once returned a bare weekday name ("Monday") lifted
+    straight from the document's own "to be finished Monday" phrasing.
+    Passed straight through, Postgres used to reject the whole assignment
+    insert outright (`invalid input syntax for type timestamp with time
+    zone`), losing the assignment entirely instead of falling back to the
+    day it's listed under -- exactly what the docstring already says should
+    happen when the document doesn't give an explicit due date."""
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {
+            "days": [
+                {
+                    "date": "2025-10-06", "topic": "Kinematics",
+                    "assignments": [
+                        {"title": "8.6 Kinematic Practice", "due_date": bad_due_date, "category": "homework"},
+                    ],
+                },
+            ],
+        }
+
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+    fake_db.tables["documents"].append({"id": "doc-1", "metadata": {}})
+
+    asyncio.run(schedule_extraction.apply_schedule_from_doc(
+        user_id=USER_ID, course_id=COURSE_ID, title="Unit 1 Assignments List",
+        text="Kinematics -- 8.6 Kinematic Practice, to be finished Monday.",
+        source="manual", source_document_id="doc-1",
+    ))
+
+    assignments = fake_db.tables["assignments"]
+    assert len(assignments) == 1
+    assert assignments[0]["title"] == "8.6 Kinematic Practice"
+    assert assignments[0]["due_date"] == "2025-10-06"  # falls back to the day it's listed under
 
 
 def test_apply_schedule_from_doc_skips_an_assignment_already_on_file(fake_db, monkeypatch):

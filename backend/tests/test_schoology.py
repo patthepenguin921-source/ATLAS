@@ -2495,6 +2495,44 @@ def test_sync_scraped_materials_creates_assignment_from_assignment_link(fake_db,
     assert a["description"] == "Write up your findings from Friday's lab."
 
 
+def test_sync_scraped_materials_creates_assignment_when_llm_due_date_is_not_a_real_date(fake_db, monkeypatch):
+    """The LLM is asked for "YYYY-MM-DD if a due date is explicitly stated,
+    else null" but doesn't always comply -- a real page once yielded a bare
+    weekday name ("Monday") lifted straight from its own "to be finished
+    Monday" text. Passed straight through as `due_date`, Postgres used to
+    reject the whole assignment insert outright (`invalid input syntax for
+    type timestamp with time zone`), losing the assignment entirely rather
+    than just falling back to no due date -- the reported failure."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    scraper = _FakeScraperClient(
+        [MaterialLink(name="8.6 Kinematic Practice", href="/course/123/assignment/789",
+                      kind="item", material_type="Assignment", folder_path="Unit 8")],
+        page_texts={"/course/123/assignment/789":
+                    "8.6 Kinematic Practice - to be finished Monday"},
+    )
+
+    from app.llm import claude
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {"description": None, "due_date": "Monday", "category": "homework"}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["errors"] == []
+    assert report["assignments"] == 1
+    a = fake_db.tables["assignments"][0]
+    assert a["title"] == "8.6 Kinematic Practice"
+    assert a["due_date"] is None
+
+
 def test_sync_scraped_materials_skips_assignment_link_matching_existing_title(fake_db, monkeypatch):
     """A scraped "assignment"-type item is never recorded as a `documents`
     row, so it has no entry in `known_names` for dedupe. Without a separate
@@ -2561,6 +2599,42 @@ def test_sync_scraped_materials_downloads_google_doc_embedded_in_viewer(fake_db,
     doc = fake_db.tables["documents"][0]
     assert doc["metadata"]["google_file_id"] == "XYZ789"
     assert doc["metadata"]["source_url"] == "https://docs.google.com/document/d/XYZ789/edit"
+
+
+def test_link_assignment_from_google_doc_falls_back_to_no_due_date_when_llm_response_is_not_a_real_date(
+    fake_db, monkeypatch,
+):
+    """Same `valid_iso_date` guard as the scraped-assignment path (see
+    `test_sync_scraped_materials_creates_assignment_when_llm_due_date_is_not_a_real_date`),
+    exercised through the Google-Doc-classified-as-assignment path instead,
+    which validates `due_date` at its own call site rather than inside
+    `_classify_google_doc` -- both must be covered since they don't share
+    the same validation point."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    from app.llm import claude
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        return {
+            "is_assignment": True, "assignment_title": "Research Paper",
+            "assignment_type": "essay", "due_date": "next Friday",
+        }
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report = _full_report()
+    asyncio.run(provider._link_assignment_from_google_doc(
+        user_id=USER_ID, course_id=BIO_COURSE, doc_id="doc-1", doc_external_id="ext-1",
+        title="Research Paper Prompt", text="Write a research paper on...",
+        source_url="https://docs.google.com/document/d/abc/edit", report=report,
+    ))
+
+    assert report["errors"] == []
+    assert report["assignments"] == 1
+    a = fake_db.tables["assignments"][0]
+    assert a["title"] == "Research Paper"
+    assert a["due_date"] is None
 
 
 def test_sync_scraped_materials_flags_needs_google_auth_for_embedded_viewer_without_token(fake_db):

@@ -75,15 +75,21 @@ If the backend runs on Cloud Run instead:
    run regardless of anything Cloud Scheduler is configured to wait for.
    The Schoology/PowerSchool sync jobs this script creates now set
    `--attempt-deadline=1800s` (Cloud Scheduler's own default, 180s, was
-   already shorter than the backend's own per-user sync budget —
-   `SYNC_TIMEOUT_SECONDS` in `app.integrations`, 270s — so a real sync could
-   look like it "failed" to the scheduler well before the backend was
-   actually done or had given up). Raising the scheduler's deadline alone
-   doesn't help if the Cloud Run service itself still kills the request at
-   300s — both need enough room for `run_sync_for_all` to get through every
-   connected user's sync (each bounded by `SYNC_TIMEOUT_SECONDS`, chunked
-   and resumable per user rather than losing all progress on a timeout —
-   see `SchoologyProvider.sync`'s docstring) in one invocation.
+   already shorter than the backend's own sync budget — `SYNC_TIMEOUT_SECONDS`
+   in `app.integrations`, 270s — so a real sync could look like it "failed"
+   to the scheduler well before the backend was actually done or had given
+   up). Raising the scheduler's deadline alone doesn't help if the Cloud Run
+   service itself still kills the request at 300s — `run_sync_for_all` now
+   holds every connected user in one sweep to a single shared
+   `SYNC_TIMEOUT_SECONDS` budget (not a fresh one per user — with N
+   connected users that would add up to N x 270s well past 300s regardless
+   of the service timeout), so one sweep should comfortably fit under the
+   default 300s even unraised; raising it is still worth doing for headroom
+   as the connected-user count grows. Any user not reached before the
+   shared budget runs out is simply left alone that sweep (never claimed,
+   so never stuck on "running") and picked up by the next scheduled fire —
+   each user's own turn is itself chunked and resumable rather than losing
+   all progress on a timeout (see `SchoologyProvider.sync`'s docstring).
 
 ## Document processing (triggered on upload, not cron-primary anymore)
 

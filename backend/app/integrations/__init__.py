@@ -87,16 +87,32 @@ async def run_sync_for_all(provider: str) -> dict[str, Any]:
     """Sync every user who has this provider connected & enabled — the entry
     point automated schedulers (Vercel Cron, n8n, …) call, since a scheduler
     has no logged-in user to scope a request to the way the normal
-    `POST /integrations/{provider}/sync` endpoint does."""
+    `POST /integrations/{provider}/sync` endpoint does.
+
+    Every user's `run_sync` shares *one* SYNC_TIMEOUT_SECONDS-wide deadline
+    for the whole sweep, not a fresh one each — `run_sync` alone already
+    bounds a single user's own worst case to just under that budget (see
+    its docstring), but with N users run sequentially in one request, N
+    fresh budgets would still add up to N x SYNC_TIMEOUT_SECONDS, blowing
+    well past whatever the platform's own request timeout actually is
+    (Cloud Run defaults to 300s if never raised — see automation/README.md)
+    long before a second or third user's turn even finishes. Any user not
+    reached before the shared deadline is simply left untouched this sweep
+    (never claimed, so never left stuck on "running") — the next scheduled
+    fire picks them up."""
     await reconcile_stale_syncs(provider)
     rows = await supabase.select(
         "integrations", columns="user_id",
         filters={"provider": eq(provider), "enabled": eq("true")},
     ) or []
-    results = [
-        {"user_id": row["user_id"], **await run_sync(provider, row["user_id"])}
-        for row in rows
-    ]
+    sweep_deadline = time.monotonic() + SYNC_TIMEOUT_SECONDS
+    results = []
+    for row in rows:
+        if time.monotonic() >= sweep_deadline:
+            break
+        results.append(
+            {"user_id": row["user_id"], **await run_sync(provider, row["user_id"], deadline=sweep_deadline)}
+        )
     return {
         "provider": provider,
         "synced": len(results),
@@ -152,12 +168,29 @@ async def _claim(provider: str, user_id: str) -> dict[str, Any] | None:
     return None
 
 
-async def _run_chunk(provider: str, user_id: str, impl: IntegrationProvider) -> dict[str, Any]:
+async def _run_chunk(
+    provider: str, user_id: str, impl: IntegrationProvider, *, budget_seconds: float | None = None,
+) -> dict[str, Any]:
     """Run one deadline-bounded chunk of `impl.sync` and record whatever it
-    implies. Shared by `run_sync_step` (returns after exactly one chunk) and
-    `run_sync` (loops this until the sync is genuinely done)."""
-    chunk_timeout = SYNC_CHUNK_SECONDS + 60  # margin for one slow item within the chunk
-    deadline = time.monotonic() + SYNC_CHUNK_SECONDS
+    implies. Shared by `run_sync_step` (returns after exactly one chunk,
+    `budget_seconds=None` so it always gets the full standalone
+    SYNC_CHUNK_SECONDS window) and `run_sync` (loops this until the sync is
+    genuinely done, passing however much of *its own* overall budget is
+    actually left).
+
+    `budget_seconds`, when given, caps this call's own wall-clock at
+    whatever's left of the caller's overall deadline instead of always
+    handing out a fresh SYNC_CHUNK_SECONDS+60 window regardless — without
+    this cap, `run_sync`'s loop could let two worst-case chunks (each up to
+    SYNC_CHUNK_SECONDS+60 = 150s) stack past its own SYNC_TIMEOUT_SECONDS
+    (270s) checked only *between* chunks, right up to (or past) the 300s
+    default request timeout Cloud Run/Vercel both hard-kill at — at which
+    point the platform kills the process mid-`await` with none of this
+    function's own exception handling ever getting to run, leaving the row
+    stuck on "running" until `reconcile_stale_syncs` eventually notices."""
+    chunk_seconds = SYNC_CHUNK_SECONDS if budget_seconds is None else max(1.0, min(SYNC_CHUNK_SECONDS, budget_seconds))
+    chunk_timeout = (SYNC_CHUNK_SECONDS + 60) if budget_seconds is None else max(chunk_seconds, min(chunk_seconds + 60, budget_seconds))
+    deadline = time.monotonic() + chunk_seconds
     try:
         result = await asyncio.wait_for(impl.sync(user_id, deadline=deadline), timeout=chunk_timeout)
         if result.get("continue"):
@@ -219,29 +252,47 @@ async def run_sync_step(provider: str, user_id: str) -> dict[str, Any]:
     return await _run_chunk(provider, user_id, impl)
 
 
-async def run_sync(provider: str, user_id: str) -> dict[str, Any]:
+async def run_sync(provider: str, user_id: str, *, deadline: float | None = None) -> dict[str, Any]:
     """Sync `provider` for `user_id`, blocking until it's genuinely done
     (success/error/not_implemented) instead of returning after one chunk —
     used by the cron sweep and the connect flow, both of which want one
     definitive answer rather than the chunk-by-chunk protocol
     `run_sync_step` uses for the browser. Loops `_run_chunk` internally for
     a provider that chunks (see SchoologyProvider.sync); a provider that
-    doesn't just finishes on the first one, same as before."""
+    doesn't just finishes on the first one, same as before.
+
+    `deadline` (a `time.monotonic()` timestamp) lets a caller hand this a
+    budget shared across *multiple* calls instead of always getting a fresh
+    SYNC_TIMEOUT_SECONDS of its own — see `run_sync_for_all`, which needs
+    every connected user's sync to fit inside one shared request. Defaults
+    to a fresh SYNC_TIMEOUT_SECONDS-out deadline for a standalone call (the
+    connect flow, a single-user retry).
+
+    Each chunk gets *however much of the remaining budget is actually
+    left*, not always a fresh SYNC_CHUNK_SECONDS+60 window regardless (see
+    `_run_chunk`'s docstring) — without that cap, two worst-case chunks
+    could together run past this function's own overall_deadline check
+    (which only fires *between* chunks) and right up to the 300s default
+    request timeout Cloud Run/Vercel both hard-kill at, with none of this
+    function's own status-writing exception handling ever getting a chance
+    to run — the exact "stuck on running" symptom `reconcile_stale_syncs`
+    exists to clean up after the fact, not prevent."""
     await reconcile_stale_syncs(provider)
     impl = PROVIDERS[provider]
     error = await _claim(provider, user_id)
     if error:
         return error
 
-    overall_deadline = time.monotonic() + SYNC_TIMEOUT_SECONDS
+    overall_deadline = deadline if deadline is not None else time.monotonic() + SYNC_TIMEOUT_SECONDS
     while True:
-        result = await _run_chunk(provider, user_id, impl)
-        if result["status"] != "running":
-            return result
-        if time.monotonic() >= overall_deadline:
+        remaining = overall_deadline - time.monotonic()
+        if remaining <= 0:
             msg = f"Sync timed out after {SYNC_TIMEOUT_SECONDS}s and was aborted."
             await _set_status(user_id, provider, "error", msg)
             return {"provider": provider, "status": "error", "detail": msg}
+        result = await _run_chunk(provider, user_id, impl, budget_seconds=remaining)
+        if result["status"] != "running":
+            return result
 
 
 async def cancel_sync(provider: str, user_id: str) -> dict[str, Any]:

@@ -1902,11 +1902,19 @@ class SchoologyProvider(IntegrationProvider):
     ) -> bool:
         """Returns True once this section's assignments/events/materials are
         all synced, or False if `deadline` was hit partway through its
-        materials walk (see `_sync_scraped_materials`'s docstring) — the
+        assignments (each one's attachments are a full download + text-
+        extract + LLM-enrichment round trip via `_ingest_attachments` ->
+        `_ingest_file`/`_ingest_link` — a section with enough of them can on
+        its own take longer than a whole chunk's budget, the same failure
+        mode `_sync_scraped_materials`'s own deadline check exists for) or
+        its materials walk (see `_sync_scraped_materials`'s docstring) — the
         caller (`sync()`) then leaves this section out of `done_ids` so the
-        next chunk re-runs it rather than treating it as finished. Assignments/
-        events (idempotent upserts) simply re-run in that case; materials
-        resumes efficiently via `_sync_scraped_materials`'s own dedup."""
+        next chunk re-runs it rather than treating it as finished.
+        Assignments/events (idempotent upserts) simply re-run in that case
+        — cheap, since `_ingest_file`/`_ingest_link`'s own dedup on
+        external_id skips the expensive download/LLM work for anything
+        already ingested before the deadline hit; materials resumes
+        efficiently via `_sync_scraped_materials`'s own dedup."""
         sid = section.id
 
         # 1) Assignments — imported as work items (NO grades) + week-at-a-glance
@@ -1917,6 +1925,8 @@ class SchoologyProvider(IntegrationProvider):
             assignments = []
             report["errors"].append(f"{section.display_name} assignments: {e}")
         for a in assignments:
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
             await self._import_assignment(
                 client=client, user_id=user_id, course_id=course_id, section=section,
                 a=a, monday=monday, sunday=sunday, google_token=google_token, report=report,

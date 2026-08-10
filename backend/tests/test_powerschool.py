@@ -11,6 +11,7 @@ import asyncio
 import httpx
 import pytest
 
+import app.integrations.powerschool_client as powerschool_client_module
 from app.core.crypto import CryptoError, decrypt_json, encrypt_json
 from app.integrations.powerschool_client import (
     PowerSchoolAuthError,
@@ -408,6 +409,156 @@ def test_fetch_classes_attendance_grid_layout():
             assert cls.room == "L F207"
             assert cls.grade_letter is None and cls.grade_percent is None
             assert cls.detail_href == "scores.html?frn=00437309537&fg=Q1&schoolid=3"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+# The exact row a real account's Lexington1 PowerSchool page returned for
+# "AP Calculus AB" -- reported as "grades not being entered into the course
+# page". Each reporting-term cell (Q1/E1/Q2/S1/M1) links to
+# `scores.html?...&begdate=...&enddate=...&fg=<term>` (some, like S1, carry
+# no begdate/enddate at all); Q1 and the annual M1 total both show a *bare*
+# percent number with no "%" sign at all ("100") -- neither `_GRADE_RE` (a
+# letter) nor `_PERCENT_RE` (requires a literal "%") match that on their
+# own. The trailing two plain, unlinked "0" cells are absence/tardy counts,
+# not grades -- they must never be misread as a 0% grade.
+def _lexington_calc_row(*, q2_cell: str) -> str:
+    return f"""
+<tr class="center" id="ccid_8817372">
+  <td>1-3(A-E)</td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td>
+  <td align="left">AP Calculus AB <br/>
+    <a class="button mini dialogM" href="teacherinfo.html?frn=00576431&amp;nolink=true" title="Details about Daichendt, Ana Nicoleta"><em class="ui-icon ui-icon-white ui-icon-contact"></em></a>
+    <a href="mailto:adaichendt@lexington1.net">Email Daichendt, Ana Nicoleta</a>
+    <span class="display-flex"><span>- Rm:</span><span> L F207</span></span>
+  </td>
+  <td><a class="bold" href="scores.html?frn=00437309537&amp;begdate=08/04/2026&amp;enddate=10/05/2026&amp;fg=Q1&amp;schoolid=3">100</a></td>
+  <td><a href="scores.html?frn=00437309537&amp;begdate=01/03/2027&amp;enddate=01/04/2027&amp;fg=E1&amp;schoolid=3">[ i ]</a></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  {q2_cell}
+  <td><a href="scores.html?frn=00437309537&amp;fg=S1&amp;schoolid=3">[ i ]</a></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td><a class="bold" href="scores.html?frn=00437309537&amp;begdate=08/04/2026&amp;enddate=01/04/2027&amp;fg=M1&amp;schoolid=3">100</a></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td class="notInSession"><span class="screen_readers_only">Not available</span></td>
+  <td>0</td>
+  <td>0</td>
+</tr>
+"""
+
+
+def _freeze_today(monkeypatch, year: int, month: int, day: int) -> None:
+    from datetime import date as _date
+
+    class _FrozenDate(_date):
+        @classmethod
+        def today(cls):
+            return _date(year, month, day)
+
+    monkeypatch.setattr(powerschool_client_module, "date", _FrozenDate)
+
+
+def test_fetch_classes_reads_bare_number_grade_for_the_current_term(monkeypatch):
+    """Some districts render a percent-only grade with no "%" sign at all --
+    Q1's cell here is literally just "100". It must be read as a 100%
+    grade for the currently-active reporting period (Q1, today), not
+    skipped, and not confused with the wider annual "M1" column (which also
+    covers today but is less specific) or the trailing absence/tardy "0"
+    cells (unlinked, so never eligible at all)."""
+    q2_still_pending = '<td><a href="scores.html?frn=00437309537&amp;begdate=10/06/2026&amp;enddate=01/02/2027&amp;fg=Q2&amp;schoolid=3">[ i ]</a></td>'
+    row_html = f"<html><body><table>{_lexington_calc_row(q2_cell=q2_still_pending)}</table></body></html>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/guardian/home.html" and request.method == "GET":
+            return httpx.Response(200, text=row_html)
+        return httpx.Response(404)
+
+    _freeze_today(monkeypatch, 2026, 8, 10)  # within Q1's 08/04-10/05 window
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            classes = await client.fetch_classes()
+            assert len(classes) == 1
+            cls = classes[0]
+            assert cls.grade_letter is None
+            assert cls.grade_percent == 100.0
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_fetch_classes_switches_to_the_next_term_once_the_current_one_concludes(monkeypatch):
+    """Once Q1's window (ending 10/05/2026) is in the past and Q2 has real
+    data posted, the class's grade must switch to Q2's -- not stay stuck on
+    Q1 forever, and not fall back to the wider annual "M1" total when a
+    more specific, currently-active term has real data of its own."""
+    q2_now_graded = '<td><a href="scores.html?frn=00437309537&amp;begdate=10/06/2026&amp;enddate=01/02/2027&amp;fg=Q2&amp;schoolid=3">95</a></td>'
+    row_html = f"<html><body><table>{_lexington_calc_row(q2_cell=q2_now_graded)}</table></body></html>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/guardian/home.html" and request.method == "GET":
+            return httpx.Response(200, text=row_html)
+        return httpx.Response(404)
+
+    _freeze_today(monkeypatch, 2026, 11, 1)  # within Q2's 10/06-01/02 window, after Q1 ended
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            classes = await client.fetch_classes()
+            assert len(classes) == 1
+            assert classes[0].grade_percent == 95.0
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_fetch_classes_never_misreads_absence_count_as_a_grade(monkeypatch):
+    """The row's trailing "0"/"0" cells are plain, unlinked absence/tardy
+    counts, not a grade -- a perfect-attendance "0" must never be read as a
+    0% grade. Frozen well outside every dated term's window so only the
+    bare-number regression this guards against could produce a (wrong) 0%
+    result."""
+    q2_still_pending = '<td><a href="scores.html?frn=00437309537&amp;begdate=10/06/2026&amp;enddate=01/02/2027&amp;fg=Q2&amp;schoolid=3">[ i ]</a></td>'
+    row_html = f"<html><body><table>{_lexington_calc_row(q2_cell=q2_still_pending)}</table></body></html>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/guardian/home.html" and request.method == "GET":
+            return httpx.Response(200, text=row_html)
+        return httpx.Response(404)
+
+    _freeze_today(monkeypatch, 2027, 6, 1)  # past every dated term's window, including M1's
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            classes = await client.fetch_classes()
+            assert len(classes) == 1
+            cls = classes[0]
+            # Falls back to Q1's 100 (the first grade-shaped cell) rather
+            # than the trailing "0" attendance counts or nothing at all.
+            assert cls.grade_percent == 100.0
         finally:
             await client.aclose()
 

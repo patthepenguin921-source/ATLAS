@@ -21,8 +21,8 @@ import hashlib
 import hmac
 import re
 from dataclasses import dataclass
-from datetime import datetime
-from urllib.parse import urljoin
+from datetime import date, datetime, timedelta
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -158,6 +158,82 @@ def _grade_from_cell(text: str) -> tuple[str | None, float | None]:
     if not t or len(t) > 12:
         return None, None
     return _parse_grade(t)
+
+
+_BARE_NUMBER_RE = re.compile(r"\d{1,3}(?:\.\d+)?")
+
+
+def _term_date_range(href: str) -> tuple[date, date] | None:
+    """The (begdate, enddate) reporting-term window a grade cell's own link
+    encodes, e.g. `scores.html?...&begdate=08/04/2026&enddate=10/05/2026&
+    fg=Q1&...` -- confirmed against a real account's PowerSchool page. `None`
+    when the link carries no (or an unparseable) begdate/enddate -- some
+    reporting terms (e.g. a semester total, `fg=S1` with no date params at
+    all) don't carry one."""
+    query = parse_qs(urlsplit(href).query)
+    beg, end = query.get("begdate", [None])[0], query.get("enddate", [None])[0]
+    if not beg or not end:
+        return None
+    try:
+        return (
+            datetime.strptime(beg, "%m/%d/%Y").date(),
+            datetime.strptime(end, "%m/%d/%Y").date(),
+        )
+    except ValueError:
+        return None
+
+
+def _dated_term_cell(cell: Tag) -> tuple[str | None, float | None, tuple[date, date] | None]:
+    """A single reporting-term grade cell -- almost always a link to
+    `scores.html?...` wrapping either a letter grade, a percent-with-"%", or
+    (confirmed against a real account) a bare percent number with no "%"
+    sign at all ("100"). The bare-number reading is only ever trusted for a
+    cell that's actually such a dated link, never a plain unlinked `<td>`
+    (e.g. an absence/tardy count elsewhere in the same row) -- otherwise a
+    perfect-attendance "0" would get misread as a 0% grade. Returns
+    `(letter, percent, term_window)`; `term_window` is `_term_date_range`'s
+    result, `None` when the cell isn't a dated link at all."""
+    text = cell.get_text(strip=True)
+    letter, percent = _grade_from_cell(text)
+    link = cell.find("a", href=True)
+    window = _term_date_range(link["href"]) if link is not None else None
+    if letter is None and percent is None and window is not None:
+        if m := _BARE_NUMBER_RE.fullmatch(text):
+            percent = float(m.group())
+    return letter, percent, window
+
+
+def _current_term_grade(cells: list[Tag]) -> tuple[str | None, float | None]:
+    """Pick the grade for whichever reporting term (quarter, semester, ...)
+    is actually current *today* -- not just the first grade-shaped cell in
+    the row, which stops being the right one to show once that term ends
+    (a real account: this quarter's grade must switch to next quarter's
+    once this one concludes, not stay stuck on the first column forever).
+    When more than one term's window currently contains today (e.g. a
+    quarter nested inside a semester/annual column), the narrowest one wins
+    -- the most specific, most-recently-updated number a student actually
+    wants. Falls back to the first grade-shaped cell regardless of date
+    when nothing here is dated (or nothing's currently in-window) -- e.g.
+    between school years, or every dated term still showing "[ i ]"."""
+    today = date.today()
+    fallback: tuple[str | None, float | None] = (None, None)
+    best: tuple[str | None, float | None] = (None, None)
+    best_span: timedelta | None = None
+    for c in cells:
+        letter, percent, window = _dated_term_cell(c)
+        if not (letter or percent):
+            continue
+        if fallback == (None, None):
+            fallback = (letter, percent)
+        if window is None:
+            continue
+        beg, end = window
+        if not (beg <= today <= end):
+            continue
+        span = end - beg
+        if best_span is None or span < best_span:
+            best, best_span = (letter, percent), span
+    return best if best_span is not None else fallback
 
 
 def _parse_score(text: str) -> tuple[float | None, float | None]:
@@ -437,17 +513,13 @@ class PowerSchoolClient:
                 # taking yet, so don't import it as one.
                 continue
 
-            # Grades sit in the term columns after the course cell; scan those
-            # (guarded so course titles/room numbers can't be misread as a
-            # letter grade). Early in a term they're all "[ i ]" placeholders,
-            # which correctly yields no grade.
+            # Grades sit in the term columns after the course cell -- pick
+            # whichever one is actually the current reporting period today
+            # (see `_current_term_grade`), not just the first one with real
+            # data. Early in a term they're all "[ i ]" placeholders, which
+            # correctly yields no grade.
             name_idx = cells.index(name_cell)
-            grade_letter = grade_percent = None
-            for c in cells[name_idx + 1:]:
-                letter, percent = _grade_from_cell(c.get_text(strip=True))
-                if letter or percent:
-                    grade_letter, grade_percent = letter, percent
-                    break
+            grade_letter, grade_percent = _current_term_grade(cells[name_idx + 1:])
 
             links = row.find_all("a", href=True)
             detail_href = next(

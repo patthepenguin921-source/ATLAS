@@ -776,6 +776,117 @@ def test_sync_with_api_key_resumes_across_deadline_without_reprocessing_sections
     assert "_sync_progress" not in fake_db.tables["integrations"][0]["config"]
 
 
+def test_sync_with_api_key_resumes_across_deadline_mid_section_assignments(fake_db, monkeypatch):
+    """The between-sections deadline check alone isn't enough: a single
+    section's own assignments loop can blow the deadline by itself, since
+    each assignment's attachments are a full download + text-extract + LLM
+    round trip (`_ingest_attachments` -> `_ingest_file`). `_sync_section`
+    must check `deadline` between assignments too, bail out (leaving the
+    section unfinished, so the next chunk re-runs it) instead of letting
+    `_run_chunk`'s outer `asyncio.wait_for` hard-abort with nothing saved,
+    and the resumed chunk must not create a duplicate document or
+    assignment for whatever the interrupted pass already ingested."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(course_mapping, "KNOWN_SECTIONS", ())
+
+    one_section = {"section": [{
+        "id": "s1", "course_id": "c1", "course_title": "Course One", "section_title": "",
+        "course_code": "", "section_code": "", "grading_periods": [1],
+        "meeting_days": [], "start_time": "", "end_time": "", "location": "", "active": 1,
+    }]}
+    two_assignments = {"assignment": [
+        {"id": "a1", "title": "Assignment One", "description": "", "due": _this_week_iso(),
+         "max_points": "10", "assignment_type": "assignment", "type": "assignment",
+         "web_url": "", "folder_id": None, "published": 1,
+         "attachments": {"files": {"file": [{
+             "id": "f1", "title": "File One", "filename": "one.pdf",
+             "download_path": "https://api.schoology.com/v1/download/f1", "extension": "pdf",
+         }]}}},
+        {"id": "a2", "title": "Assignment Two", "description": "", "due": _this_week_iso(),
+         "max_points": "10", "assignment_type": "assignment", "type": "assignment",
+         "web_url": "", "folder_id": None, "published": 1,
+         "attachments": {"files": {"file": [{
+             "id": "f2", "title": "File Two", "filename": "two.pdf",
+             "download_path": "https://api.schoology.com/v1/download/f2", "extension": "pdf",
+         }]}}},
+    ]}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/app-user-info":
+            return httpx.Response(200, json={"api_uid": 12345678})
+        if path.endswith("/sections") and "/users/" in path:
+            return httpx.Response(200, json=one_section)
+        if path.endswith("/sections/s1/assignments"):
+            return httpx.Response(200, json=two_assignments)
+        if path.endswith("/sections/s1/events"):
+            return httpx.Response(200, json={"event": []})
+        if "/download/" in path:
+            return httpx.Response(200, content=b"%PDF-1.4 fake pdf bytes")
+        return httpx.Response(404, json={"error": f"no fixture for {path}"})
+
+    class _SlowClient(SchoologyClient):
+        """Sleeps while downloading a1's attachment so the deadline (set to
+        expire shortly after the sync starts) is still open when a1 begins
+        but has passed by the time the assignments loop checks again before
+        a2 — without this, both assignments would finish before any
+        wall-clock deadline could plausibly separate them."""
+        async def download_file(self, download_path):
+            if download_path.endswith("/f1"):
+                await asyncio.sleep(0.2)
+            return await super().download_file(download_path)
+
+    def _new_client():
+        return _SlowClient("ckey", "csecret", transport=httpx.MockTransport(_handler))
+
+    async def _fake_client(self, integration):
+        return _new_client()
+
+    monkeypatch.setattr(SchoologyProvider, "_client", _fake_client)
+    monkeypatch.setattr(SchoologyProvider, "_has_api_key", lambda self, integration: True)
+
+    # No materials-scraper login on file — keeps this test scoped to the
+    # assignments loop instead of also exercising the materials walk.
+    async def _no_scraper(self, user_id):
+        raise RuntimeError("Materials access isn't connected yet — add your login first.")
+
+    monkeypatch.setattr(SchoologyProvider, "_scraper_client", _no_scraper)
+    monkeypatch.setattr(SchoologyProvider, "_unauthenticated_scraper_client", _no_scraper)
+
+    fake_db.tables["integrations"] = [{
+        "id": "int-1", "user_id": USER_ID, "provider": "schoology",
+        "secret_ref": "x", "config": {},
+    }]
+
+    # First chunk: the deadline is open when a1 starts but has passed by the
+    # time the loop checks again before a2, so it must stop right after a1
+    # instead of processing a2 too, and save progress without finishing s1.
+    async def _run_first_chunk():
+        deadline = time.monotonic() + 0.1
+        return await provider.sync(USER_ID, deadline=deadline)
+
+    report1 = asyncio.run(_run_first_chunk())
+
+    assert report1.get("continue") is True
+    assert report1["courses"] == 0  # s1 itself never finished this chunk
+    assert len(fake_db.tables["assignments"]) == 1  # only a1 written so far
+    assert len(fake_db.tables["documents"]) == 1  # only a1's attachment
+
+    saved_config = fake_db.tables["integrations"][0]["config"]
+    assert saved_config["_sync_progress"]["done_ids"] == []
+
+    # Second chunk: resumes with no deadline. a1 gets re-processed (cheap —
+    # its attachment is already ingested, see `_ingest_file`'s dedup) and a2
+    # finishes it out; the section is now complete with no duplicates.
+    report2 = asyncio.run(provider.sync(USER_ID, deadline=None))
+
+    assert not report2.get("continue")
+    assert report2["courses"] == 1
+    assert len(fake_db.tables["assignments"]) == 2  # a1 not duplicated, a2 added
+    assert len(fake_db.tables["documents"]) == 2  # one per assignment's attachment
+    assert "_sync_progress" not in fake_db.tables["integrations"][0]["config"]
+
+
 def test_normalize_name_basic():
     assert _normalize_name("AP  Calculus-AB!") == "ap calculus ab"
 

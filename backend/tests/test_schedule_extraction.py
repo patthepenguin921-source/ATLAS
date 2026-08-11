@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import date, timedelta
 from typing import Any
 
 import pytest
@@ -554,9 +553,8 @@ def test_apply_schedule_from_doc_keeps_same_title_listed_on_different_days(fake_
 
 
 def test_apply_schedule_from_doc_records_date_range_onto_the_document_row(fake_db, monkeypatch):
-    """`glance_still_relevant` reads `documents.metadata.glance_date_range` --
-    this is where it gets written, merged into whatever metadata the row
-    already carries rather than overwriting it."""
+    """`documents.metadata.glance_date_range` is written here, merged into
+    whatever metadata the row already carries rather than overwriting it."""
     from app.config import settings
     from app.llm import claude
 
@@ -658,22 +656,3 @@ def test_apply_schedule_from_doc_does_not_purge_rows_whose_document_still_exists
 
     event_ids = {e["id"] for e in fake_db.tables["calendar_events"]}
     assert "unit1-event" in event_ids  # its document still exists -- must survive
-
-
-def test_glance_still_relevant_true_with_no_recorded_range():
-    assert schedule_extraction.glance_still_relevant(None) is True
-    assert schedule_extraction.glance_still_relevant({}) is True
-
-
-def test_glance_still_relevant_true_within_range_and_grace_window():
-    today = date.today().isoformat()
-    assert schedule_extraction.glance_still_relevant(
-        {"glance_date_range": {"start": today, "end": today}}
-    ) is True
-
-
-def test_glance_still_relevant_false_once_past_the_grace_window():
-    long_ago = (date.today() - timedelta(days=30)).isoformat()
-    assert schedule_extraction.glance_still_relevant(
-        {"glance_date_range": {"start": long_ago, "end": long_ago}}
-    ) is False

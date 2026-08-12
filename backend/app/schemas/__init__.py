@@ -208,6 +208,19 @@ class SplitSemestersRequest(BaseModel):
     s2_has_ap_prep_lab: bool = False
 
 
+# ---- Assignments ----
+class MergeAssignmentsRequest(BaseModel):
+    """Merge one assignment into another -- see app.services.assignment_dedupe."""
+
+    keep_id: str
+    discard_id: str
+
+
+class DismissDuplicateAssignmentsRequest(BaseModel):
+    assignment_id_a: str
+    assignment_id_b: str
+
+
 # ---- Drive import ----
 class DriveImportRequest(BaseModel):
     file_id: str

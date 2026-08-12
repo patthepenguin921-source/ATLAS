@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.core.crud import make_crud_router
-from app.routers import (agents, analytics, courses, dashboard, documents,
+from app.routers import (agents, analytics, assignments, courses, dashboard, documents,
                          flashcards, folders, knowledge, practice, reviews, search, study)
 
 # ---- Generic CRUD resources (writable-field whitelists) ----
@@ -61,6 +61,11 @@ _CRUD = [
 ]
 
 api_router = APIRouter()
+# `assignments.router`'s static paths (e.g. `/assignments/possible-duplicates`)
+# must be registered before the generic CRUD router's `/assignments/{row_id}`
+# below -- FastAPI matches routes in registration order, and the CRUD
+# catch-all would otherwise swallow them as a literal row id.
+api_router.include_router(assignments.router)
 for r in _CRUD:
     api_router.include_router(r)
 

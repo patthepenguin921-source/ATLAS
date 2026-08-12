@@ -21,12 +21,24 @@ retried once against the fallback provider instead of failing the chat
 turn -- so with the defaults, a request only fails if *both* Groq's and
 Gemini's free tiers are exhausted at the same moment.
 
+When no fallback provider is usable (`ATLAS_LLM_FALLBACK_PROVIDER` unset,
+or set to a provider with no API key configured -- the common case for a
+deployment only running Groq's free tier), a 429 has nothing to fall back
+to. Groq's own free-tier limits are a short per-minute token bucket, not a
+real outage, and its error message tells us exactly how long the bucket
+needs to refill (e.g. "...please try again in 2.86s"); for a short enough
+wait, retrying the same provider once after sleeping that long beats
+failing the whole chat turn outright with "Atlas is busy, try again in Ns"
+every time the free tier's low limit gets grazed. See
+`_should_retry_same_provider`.
+
 The engine is NOT the memory. It receives relevant facts + semantic context
 retrieved from Atlas's databases and reasons over them. Every agent grounds
 its prompts in the student's actual academic history.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any, Awaitable, Callable
@@ -52,10 +64,31 @@ class LLMError(RuntimeError):
     browser reports it to the caller as a generic "Failed to fetch" network
     error instead of a readable rate-limit message."""
 
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, retry_after: float | None = None):
         super().__init__(f"LLM provider error {status}: {detail}")
         self.status = status
         self.detail = detail
+        # Seconds the provider itself said to wait before retrying (parsed
+        # from the `Retry-After` header or the error body), when known.
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """The provider's own wait hint for a 429, so a short one can be waited
+    out and retried automatically (see `_should_retry_same_provider`)
+    instead of always failing the chat turn. Prefers the standard
+    `Retry-After` header; Groq's OpenAI-compatible API doesn't always set
+    it, so falls back to the "...please try again in 2.86s" phrasing its
+    error body actually uses (the same text the frontend's
+    `friendlyErrorMessage` parses to show a wait estimate)."""
+    header = response.headers.get("retry-after")
+    if header:
+        try:
+            return float(header)
+        except ValueError:
+            pass
+    match = re.search(r"try again in ([\d.]+)\s*s", response.text, re.IGNORECASE)
+    return float(match.group(1)) if match else None
 
 
 def _get_anthropic_client() -> AsyncAnthropic:
@@ -103,6 +136,27 @@ def _should_fallback(exc: LLMError) -> bool:
     return False
 
 
+# Only worth waiting out a 429 on the same provider, not a permanent error
+# like a decommissioned model -- that will never resolve just by retrying.
+# Capped short: this delays the HTTP response the caller is waiting on, so
+# it only ever covers a token-bucket blip, never a real outage.
+_MAX_SAME_PROVIDER_RETRY_WAIT = 8.0
+
+
+def _should_retry_same_provider(exc: LLMError) -> bool:
+    """Worth sleeping out and retrying the exact same call once more,
+    rather than failing the chat turn: a rate limit (429) where the
+    provider told us a short, known wait. Only reached when there's no
+    usable fallback provider to try instead -- an instant fallback call is
+    strictly faster than waiting, so `complete`/`agentic_complete` always
+    prefer that first."""
+    return (
+        exc.status == 429
+        and exc.retry_after is not None
+        and 0 < exc.retry_after <= _MAX_SAME_PROVIDER_RETRY_WAIT
+    )
+
+
 async def complete(
     *,
     system: str,
@@ -122,15 +176,21 @@ async def complete(
         )
     except LLMError as exc:
         fallback = _fallback_provider(primary) if _should_fallback(exc) else None
-        if not fallback:
-            raise
-        # `model` isn't retried across providers -- a model name from one
-        # vendor means nothing to another -- so the fallback call always
-        # uses its own configured default instead.
-        return await _COMPLETE_PROVIDERS[fallback](
-            system=system, messages=messages, model=None,
-            max_tokens=max_tokens, temperature=temperature, fast=fast,
-        )
+        if fallback:
+            # `model` isn't retried across providers -- a model name from
+            # one vendor means nothing to another -- so the fallback call
+            # always uses its own configured default instead.
+            return await _COMPLETE_PROVIDERS[fallback](
+                system=system, messages=messages, model=None,
+                max_tokens=max_tokens, temperature=temperature, fast=fast,
+            )
+        if _should_retry_same_provider(exc):
+            await asyncio.sleep(exc.retry_after)
+            return await fn(
+                system=system, messages=messages, model=model,
+                max_tokens=max_tokens, temperature=temperature, fast=fast,
+            )
+        raise
 
 
 async def _complete_anthropic(
@@ -148,7 +208,7 @@ async def _complete_anthropic(
             temperature=temperature,
         )
     except anthropic.APIStatusError as exc:
-        raise LLMError(exc.status_code, str(exc)) from exc
+        raise LLMError(exc.status_code, str(exc), retry_after=_retry_after_seconds(exc.response)) from exc
     except anthropic.APIConnectionError as exc:
         raise LLMError(503, str(exc)) from exc
     return "".join(block.text for block in resp.content if block.type == "text").strip()
@@ -175,7 +235,7 @@ async def _complete_groq(
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise LLMError(r.status_code, r.text) from exc
+            raise LLMError(r.status_code, r.text, retry_after=_retry_after_seconds(r)) from exc
         return r.json()["choices"][0]["message"]["content"].strip()
 
 
@@ -217,7 +277,7 @@ async def _complete_gemini(
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise LLMError(r.status_code, r.text) from exc
+            raise LLMError(r.status_code, r.text, retry_after=_retry_after_seconds(r)) from exc
         return _gemini_text(r.json())
 
 
@@ -338,12 +398,18 @@ async def agentic_complete(
         )
     except LLMError as exc:
         fallback = _fallback_provider(primary) if _should_fallback(exc) else None
-        if not fallback:
-            raise
-        return await _AGENTIC_PROVIDERS[fallback](
-            system=system, messages=messages, tools=tools, execute_tool=execute_tool,
-            model=None, max_tokens=max_tokens, temperature=temperature,
-        )
+        if fallback:
+            return await _AGENTIC_PROVIDERS[fallback](
+                system=system, messages=messages, tools=tools, execute_tool=execute_tool,
+                model=None, max_tokens=max_tokens, temperature=temperature,
+            )
+        if _should_retry_same_provider(exc):
+            await asyncio.sleep(exc.retry_after)
+            return await fn(
+                system=system, messages=messages, tools=tools, execute_tool=execute_tool,
+                model=model, max_tokens=max_tokens, temperature=temperature,
+            )
+        raise
 
 
 async def _agentic_anthropic(
@@ -366,7 +432,7 @@ async def _agentic_anthropic(
                 tools=anthropic_tools, max_tokens=max_tokens, temperature=temperature,
             )
         except anthropic.APIStatusError as exc:
-            raise LLMError(exc.status_code, str(exc)) from exc
+            raise LLMError(exc.status_code, str(exc), retry_after=_retry_after_seconds(exc.response)) from exc
         except anthropic.APIConnectionError as exc:
             raise LLMError(503, str(exc)) from exc
         text = "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -414,7 +480,7 @@ async def _agentic_groq(
             try:
                 r.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                raise LLMError(r.status_code, r.text) from exc
+                raise LLMError(r.status_code, r.text, retry_after=_retry_after_seconds(r)) from exc
             message = r.json()["choices"][0]["message"]
             text = (message.get("content") or "").strip()
             tool_calls = message.get("tool_calls") or []
@@ -464,7 +530,7 @@ async def _agentic_gemini(
             try:
                 r.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                raise LLMError(r.status_code, r.text) from exc
+                raise LLMError(r.status_code, r.text, retry_after=_retry_after_seconds(r)) from exc
             candidates = r.json().get("candidates") or []
             parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
             text = "".join(p.get("text", "") for p in parts if "text" in p).strip()

@@ -16,10 +16,11 @@ from app.config import settings
 
 
 class _FakeResponse:
-    def __init__(self, payload=None, status_code=200):
+    def __init__(self, payload=None, status_code=200, headers=None):
         self._payload = payload
         self.status_code = status_code
         self.text = json.dumps(payload) if payload is not None else ""
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -274,3 +275,123 @@ def test_complete_does_not_fall_back_when_fallback_provider_is_disabled(monkeypa
         ))
 
     assert len(_FakeAsyncClient.calls) == 1
+
+
+# ---- Same-provider retry when no fallback is usable -------------------------
+# The common real-world deployment: only GROQ_API_KEY is set, so
+# ATLAS_LLM_FALLBACK_PROVIDER="gemini" is configured by name but has no
+# credentials (see test_complete_does_not_fall_back_when_fallback_has_no_credentials
+# above) -- a 429 used to always surface to the student immediately. If
+# Groq told us a short wait, it's worth sleeping it out and retrying once.
+
+def _no_sleep(monkeypatch):
+    """Replaces asyncio.sleep with an instant no-op that records the
+    requested delay, so tests exercise the real retry path without
+    actually waiting."""
+    waits = []
+
+    async def _fake_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(claude_module.asyncio, "sleep", _fake_sleep)
+    return waits
+
+
+def test_complete_retries_same_provider_after_a_short_retry_after_header(monkeypatch):
+    waits = _no_sleep(monkeypatch)
+    _install(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=429, payload={"error": "rate limited"}, headers={"retry-after": "2"}),
+            _groq_message(content="Handled after waiting."),
+        ],
+    )
+
+    result = asyncio.run(claude_module.complete(
+        system="sys", messages=[{"role": "user", "content": "hi"}],
+    ))
+
+    assert result == "Handled after waiting."
+    assert waits == [2.0]
+    assert len(_FakeAsyncClient.calls) == 2
+    assert all("groq.com" in c["url"] for c in _FakeAsyncClient.calls)
+
+
+def test_complete_retries_same_provider_after_a_short_wait_parsed_from_the_error_body(monkeypatch):
+    # Groq doesn't always set the Retry-After header -- its error body's
+    # own "...try again in 2.86s" phrasing is the fallback source.
+    waits = _no_sleep(monkeypatch)
+    _install(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=429, payload={
+                "error": {"message": "Rate limit reached. Please try again in 2.86s."},
+            }),
+            _groq_message(content="Handled after waiting."),
+        ],
+    )
+
+    result = asyncio.run(claude_module.complete(
+        system="sys", messages=[{"role": "user", "content": "hi"}],
+    ))
+
+    assert result == "Handled after waiting."
+    assert waits == [2.86]
+
+
+def test_complete_does_not_retry_same_provider_when_the_wait_is_too_long(monkeypatch):
+    waits = _no_sleep(monkeypatch)
+    _install(
+        monkeypatch,
+        [_FakeResponse(status_code=429, payload={"error": "rate limited"}, headers={"retry-after": "60"})],
+    )
+
+    with pytest.raises(claude_module.LLMError) as exc_info:
+        asyncio.run(claude_module.complete(
+            system="sys", messages=[{"role": "user", "content": "hi"}],
+        ))
+
+    assert exc_info.value.status == 429
+    assert waits == []
+    assert len(_FakeAsyncClient.calls) == 1
+
+
+def test_complete_prefers_fallback_over_waiting_when_both_are_available(monkeypatch):
+    waits = _no_sleep(monkeypatch)
+    _install(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=429, payload={"error": "rate limited"}, headers={"retry-after": "2"}),
+            _gemini_text_response("Handled via Gemini."),
+        ],
+        gemini_api_key="fake-gemini-key",
+    )
+
+    result = asyncio.run(claude_module.complete(
+        system="sys", messages=[{"role": "user", "content": "hi"}],
+    ))
+
+    assert result == "Handled via Gemini."
+    assert waits == []  # never slept -- the instant fallback was used instead
+
+
+def test_agentic_complete_retries_same_provider_after_a_short_wait(monkeypatch):
+    waits = _no_sleep(monkeypatch)
+    _install(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=429, payload={"error": "rate limited"}, headers={"retry-after": "1.5"}),
+            _groq_message(content="Handled after waiting."),
+        ],
+    )
+
+    async def _execute(name, args):
+        raise AssertionError("no tool should have been called")
+
+    result = asyncio.run(claude_module.agentic_complete(
+        system="sys", messages=[{"role": "user", "content": "hi"}],
+        tools=[], execute_tool=_execute,
+    ))
+
+    assert result == {"text": "Handled after waiting.", "tool_calls": []}
+    assert waits == [1.5]

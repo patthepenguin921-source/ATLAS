@@ -51,6 +51,11 @@ const RISK_OVERRIDE_OPTIONS: { value: string; label: string }[] = [
 // in Upcoming, where it needs attention, not buried in a history tab).
 const isCompleted = (a: any) => a.status === "graded" || a.status === "submitted";
 
+// Stable identity for a duplicate pair regardless of which order the
+// backend's detector happens to compare the two assignments in -- used to
+// key both the "which one to keep" choice and the busy-state map below.
+const pairKey = (a: string, b: string) => (a < b ? `${a}:${b}` : `${b}:${a}`);
+
 export default function AssignmentsPage() {
   const [items, setItems] = useState<any[] | null>(null);
   const [courses, setCourses] = useState<any[]>([]);
@@ -59,6 +64,13 @@ export default function AssignmentsPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<"upcoming" | "completed">("upcoming");
+  const [courseFilter, setCourseFilter] = useState("");
+  // Possible-duplicate review (see app.services.assignment_dedupe) -- fetched
+  // separately from `load()` below so a hiccup in this still-new endpoint
+  // can never block the assignments list itself from loading.
+  const [duplicates, setDuplicates] = useState<any[]>([]);
+  const [keepChoice, setKeepChoice] = useState<Record<string, string>>({});
+  const [dupBusy, setDupBusy] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<any | null>(null);
   const [editing, setEditing] = useState(false);
   const [formFolders, setFormFolders] = useState<any[]>([]);
@@ -92,8 +104,18 @@ export default function AssignmentsPage() {
       setLoadError(e.message);
     }
   }
+  async function loadDuplicates() {
+    try {
+      setDuplicates((await apiGet("/assignments/possible-duplicates")) ?? []);
+    } catch {
+      // Non-critical: the review section just stays empty rather than
+      // taking the whole page down with it.
+      setDuplicates([]);
+    }
+  }
   useEffect(() => {
     load();
+    loadDuplicates();
   }, []);
 
   // Units/subunits are per-class (see `folders`, migration 0024) -- refetch
@@ -216,12 +238,42 @@ export default function AssignmentsPage() {
     load();
   }
 
+  async function mergeDuplicate(candidate: any) {
+    const [a, b] = candidate.assignments;
+    const key = pairKey(a.id, b.id);
+    const keepId = keepChoice[key] ?? candidate.suggested_keep_id;
+    const discardId = keepId === a.id ? b.id : a.id;
+    setDupBusy((s) => ({ ...s, [key]: true }));
+    try {
+      await apiPost("/assignments/merge", { keep_id: keepId, discard_id: discardId });
+      setDuplicates((ds) => ds.filter((d) => pairKey(d.assignments[0].id, d.assignments[1].id) !== key));
+      load();
+    } finally {
+      setDupBusy((s) => ({ ...s, [key]: false }));
+    }
+  }
+
+  async function dismissDuplicate(candidate: any) {
+    const [a, b] = candidate.assignments;
+    const key = pairKey(a.id, b.id);
+    setDupBusy((s) => ({ ...s, [key]: true }));
+    try {
+      await apiPost("/assignments/dismiss-duplicate", { assignment_id_a: a.id, assignment_id_b: b.id });
+      setDuplicates((ds) => ds.filter((d) => pairKey(d.assignments[0].id, d.assignments[1].id) !== key));
+    } finally {
+      setDupBusy((s) => ({ ...s, [key]: false }));
+    }
+  }
+
   const courseName = (id: string) => courses.find((c) => c.id === id)?.name ?? "—";
   const weightLabel = (w: number | null | undefined) =>
     w === 0.3 ? "Minor (30%)" : w === 0.7 ? "Major (70%)" : w != null ? `${Math.round(w * 100)}%` : null;
   const formFolderOptions = buildFolderOptions(formFolders);
   const detailFolderOptions = buildFolderOptions(detailFolders);
-  const visibleItems = (items ?? []).filter((a) => (tab === "completed" ? isCompleted(a) : !isCompleted(a)));
+  const inCourseFilter = (a: any) => !courseFilter || a.course_id === courseFilter;
+  const visibleItems = (items ?? [])
+    .filter((a) => (tab === "completed" ? isCompleted(a) : !isCompleted(a)))
+    .filter(inCourseFilter);
 
   return (
     <AppShell
@@ -288,6 +340,67 @@ export default function AssignmentsPage() {
         </form>
       )}
 
+      {duplicates.length > 0 && (
+        <div className="card border-atlas-warn/40 mb-6 space-y-3">
+          <div>
+            <div className="text-sm font-medium text-atlas-warn">
+              Possible duplicate assignments ({duplicates.length})
+            </div>
+            <div className="text-xs text-atlas-muted mt-0.5">
+              These look like the same assignment entered or synced twice. Pick which one to keep, or tell us they're actually different.
+            </div>
+          </div>
+          {duplicates.map((d) => {
+            const [a, b] = d.assignments;
+            const key = pairKey(a.id, b.id);
+            const keep = keepChoice[key] ?? d.suggested_keep_id;
+            const busy = !!dupBusy[key];
+            const keepTitle = (keep === a.id ? a : b).title;
+            return (
+              <div key={key} className="border border-atlas-border rounded-lg p-3 space-y-2">
+                <div className="grid sm:grid-cols-2 gap-2">
+                  {[a, b].map((x) => (
+                    <label
+                      key={x.id}
+                      className={`flex items-start gap-2 rounded-md border p-2 cursor-pointer text-sm ${
+                        keep === x.id ? "border-atlas-accent" : "border-atlas-border"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        className="mt-1"
+                        checked={keep === x.id}
+                        onChange={() => setKeepChoice((k) => ({ ...k, [key]: x.id }))}
+                      />
+                      <div className="min-w-0">
+                        <div className="font-medium truncate">{x.title}</div>
+                        <div className="text-xs text-atlas-muted">
+                          {courseName(x.course_id)} · {x.category}
+                          {x.due_date && ` · due ${formatCalendarDate(x.due_date)}`}
+                          {x.external_source && ` · from ${x.external_source}`}
+                        </div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    className="btn-primary text-xs py-1.5"
+                    disabled={busy}
+                    onClick={() => mergeDuplicate(d)}
+                  >
+                    {busy ? "Merging…" : `Keep "${keepTitle}", merge the other in`}
+                  </button>
+                  <button className="btn-ghost text-xs py-1.5" disabled={busy} onClick={() => dismissDuplicate(d)}>
+                    Not duplicates
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {!items && !loadError && <SkeletonList rows={4} />}
       {loadError && !items && (
         <div className="card border-atlas-bad/40 text-sm mb-6">
@@ -299,23 +412,37 @@ export default function AssignmentsPage() {
       {items && !items.length && <Empty>No assignments yet.</Empty>}
 
       {items && items.length > 0 && (
-        <div className="flex gap-1.5 mb-4 border-b border-atlas-border">
-          {([
-            ["upcoming", "Upcoming"],
-            ["completed", "Past & graded"],
-          ] as const).map(([id, label]) => (
-            <button
-              key={id}
-              onClick={() => setTab(id)}
-              className={`px-3 py-2 -mb-px text-sm font-medium border-b-2 transition-colors ${
-                tab === id
-                  ? "border-atlas-accent text-atlas-text"
-                  : "border-transparent text-atlas-muted hover:text-atlas-text hover:border-atlas-border"
-              }`}
-            >
-              {label} ({(items ?? []).filter((a) => (id === "completed" ? isCompleted(a) : !isCompleted(a))).length})
-            </button>
-          ))}
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-4 border-b border-atlas-border">
+          <div className="flex gap-1.5">
+            {([
+              ["upcoming", "Upcoming"],
+              ["completed", "Past & graded"],
+            ] as const).map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                className={`px-3 py-2 -mb-px text-sm font-medium border-b-2 transition-colors ${
+                  tab === id
+                    ? "border-atlas-accent text-atlas-text"
+                    : "border-transparent text-atlas-muted hover:text-atlas-text hover:border-atlas-border"
+                }`}
+              >
+                {label} (
+                {(items ?? [])
+                  .filter((a) => (id === "completed" ? isCompleted(a) : !isCompleted(a)))
+                  .filter(inCourseFilter).length}
+                )
+              </button>
+            ))}
+          </div>
+          <select
+            className="input !w-auto text-xs py-1.5 mb-1.5"
+            value={courseFilter}
+            onChange={(e) => setCourseFilter(e.target.value)}
+          >
+            <option value="">All classes</option>
+            {courses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
         </div>
       )}
       {items && items.length > 0 && !visibleItems.length && (

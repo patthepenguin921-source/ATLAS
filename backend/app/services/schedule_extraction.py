@@ -29,7 +29,7 @@ matching this pattern gets the same treatment regardless of how it arrived.
 from __future__ import annotations
 
 import re
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from app.config import settings
@@ -105,30 +105,6 @@ def is_recurring_glance(*, title: str | None = None, text: str | None = None) ->
     if is_recurring_glance_title(title):
         return True
     return bool(text) and bool(_BROAD_SCOPE_RE.search(text[:_CONTENT_SNIFF_CHARS]))
-
-
-# Grace window (past a glance document's own last-extracted date range)
-# before Atlas stops bothering to re-check it -- covers a sync landing a
-# day or two late, not meant to be generous.
-_GLANCE_RELEVANCE_GRACE_DAYS = 5
-
-
-def glance_still_relevant(metadata: dict[str, Any] | None) -> bool:
-    """True while today is still within (or shortly after) the date range a
-    glance document's own last successful extraction covered, or when
-    there's no recorded range yet to judge by (nothing pulled yet, or a row
-    that predates this field existing) -- keep trying in that case rather
-    than assume it's stale. Once every date the document mentions is safely
-    in the past, there's nothing left in it worth re-mining even if the file
-    itself gets edited later (e.g. a typo fix to an old week's page)."""
-    date_range = (metadata or {}).get("glance_date_range")
-    if not isinstance(date_range, dict) or not date_range.get("end"):
-        return True
-    try:
-        end = date.fromisoformat(date_range["end"])
-    except (TypeError, ValueError):
-        return True
-    return date.today() <= end + timedelta(days=_GLANCE_RELEVANCE_GRACE_DAYS)
 
 
 def _map_category(text: str) -> str:
@@ -440,10 +416,11 @@ async def _tag_as_glance(document_id: str) -> None:
 
 async def _record_glance_date_range(source_document_id: str, dates: list[str]) -> None:
     """Persist the span of dates this document's latest successful
-    extraction actually covered, so `glance_still_relevant` can tell once
-    every date in it is safely in the past. Merges into whatever metadata
-    is already on the row (content_hash, is_glance, ...) rather than
-    overwriting it."""
+    extraction actually covered -- purely informational (e.g. for a debug
+    view), not used to gate whether this document gets re-checked again;
+    see `SchoologyProvider._glance_needs_rewalk` for why re-checking never
+    stops. Merges into whatever metadata is already on the row
+    (content_hash, is_glance, ...) rather than overwriting it."""
     if not dates:
         return
     try:

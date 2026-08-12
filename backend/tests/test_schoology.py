@@ -2836,9 +2836,9 @@ def test_sync_scraped_materials_rewalks_unit_at_a_glance_every_sync(fake_db, mon
     actually changed. The reported bug: a synced "Unit at a Glance" wasn't
     turning into class-schedule events, because once the file existed with
     a storage_path, `_ingest_file` returned immediately without ever
-    re-checking it on a later sync. "Forever" is still bounded by
-    relevance (see `glance_still_relevant`), so today is frozen here to
-    stay within the range the fixture's own extracted dates cover."""
+    re-checking it on a later sync. Today is frozen here purely so the
+    fixture's own extracted dates are deterministic, not because re-walking
+    is ever gated on them."""
     from app.services import schedule_extraction
 
     provider = SchoologyProvider()
@@ -2922,13 +2922,17 @@ def test_sync_scraped_materials_rewalks_unit_at_a_glance_every_sync(fake_db, mon
     assert len(fake_db.tables["documents"]) == 1  # still just the one document row
 
 
-def test_sync_scraped_materials_rewalks_week_at_a_glance_while_relevant_then_stops(fake_db, monkeypatch):
+def test_sync_scraped_materials_rewalks_week_at_a_glance_forever(fake_db, monkeypatch):
     """Unlike the old behavior (pull a plain "Week at a Glance" once, never
-    look at it again), it must now be re-walked and re-checked for changes
-    on every sync for as long as its own extracted date range is still
-    current -- a late correction to an upcoming week's page must not be
-    missed -- and only stop being re-walked once that range is safely in
-    the past, same as a "Unit"/"Semester at a Glance" eventually would."""
+    look at it again), it must be re-walked and re-checked for changes on
+    every sync, indefinitely -- never treated as permanently done just
+    because its own last-extracted date range is safely in the past. A
+    teacher who reuses the exact same "Week at a Glance" link/name every
+    week, rather than posting a fresh one, means a long gap since that old
+    range (e.g. a summer between school years) must not be mistaken for
+    "this page is done forever" -- confirmed against a real account: gating
+    re-checks on that old range meant a new school year's first real week,
+    landed in the very same document, was never even looked at again."""
     from app.services import schedule_extraction
 
     provider = SchoologyProvider()
@@ -2939,13 +2943,16 @@ def test_sync_scraped_materials_rewalks_week_at_a_glance_while_relevant_then_sto
 
     from app.llm import claude
 
-    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+    calls: list[str] = []
+
+    async def _fake_complete_json_v1(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
         if "class schedule" not in system:
             return {"summary": "s", "keywords": [], "doc_type": "other",
                      "importance": "normal", "concepts": []}
+        calls.append(prompt)
         return {"days": [{"date": "2025-10-06", "topic": "Intro", "assignments": []}]}
 
-    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json_v1)
 
     class _FrozenDate(date):
         _today = date(2025, 10, 8)  # a couple days after 10/6 -- still relevant
@@ -2965,6 +2972,7 @@ def test_sync_scraped_materials_rewalks_week_at_a_glance_while_relevant_then_sto
     ))
     doc = fake_db.tables["documents"][0]
     assert doc["metadata"]["glance_date_range"] == {"start": "2025-10-06", "end": "2025-10-06"}
+    assert len(calls) == 1
 
     # Still within the grace window past 10/6 -- must be re-walked, not
     # treated as permanently done.
@@ -2976,8 +2984,10 @@ def test_sync_scraped_materials_rewalks_week_at_a_glance_while_relevant_then_sto
         scraper=scraper2, report=_full_report(),
     ))
     assert "week at a glance" not in (scraper2.known_names_calls[0] or set())
+    assert len(calls) == 1  # unchanged content -- nothing re-run
 
-    # Long past the range now -- nothing left in it worth re-checking.
+    # Months later (e.g. over a summer between school years) and long past
+    # the old range -- still must be re-walked, not skipped via known_names.
     _FrozenDate._today = date(2025, 12, 1)
     scraper3 = _FakeScraperClient(
         [item], files={"/attachment/download/1": (b"%PDF week content", "application/pdf")},
@@ -2986,7 +2996,35 @@ def test_sync_scraped_materials_rewalks_week_at_a_glance_while_relevant_then_sto
         user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
         scraper=scraper3, report=_full_report(),
     ))
-    assert "week at a glance" in (scraper3.known_names_calls[0] or set())
+    assert "week at a glance" not in (scraper3.known_names_calls[0] or set())
+    assert len(calls) == 1  # still unchanged -- nothing re-run yet
+
+    # The teacher finally reuses this same page for a brand-new week, long
+    # after the old range lapsed -- must be detected and extracted, not
+    # silently ignored forever.
+    async def _fake_complete_json_v2(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        if "class schedule" not in system:
+            return {"summary": "s", "keywords": [], "doc_type": "other",
+                     "importance": "normal", "concepts": []}
+        calls.append(prompt)
+        return {"days": [{"date": "2025-12-01", "topic": "New semester kickoff",
+                           "assignments": [{"title": "Lab Safety Quiz", "due_date": "2025-12-03",
+                                             "category": "quiz"}]}]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json_v2)
+    scraper4 = _FakeScraperClient(
+        [item], files={"/attachment/download/1": (b"%PDF new semester content", "application/pdf")},
+    )
+    report4 = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper4, report=report4,
+    ))
+    assert len(calls) == 2
+    events = fake_db.tables["calendar_events"]
+    assert {e["title"] for e in events} == {"New semester kickoff"}
+    assignments = fake_db.tables["assignments"]
+    assert any(a["title"] == "Lab Safety Quiz" and a["due_date"] == "2025-12-03" for a in assignments)
 
 
 def test_sync_scraped_materials_flags_unrecognized_link_it_cannot_fetch(fake_db, monkeypatch):

@@ -64,7 +64,6 @@ from app.llm import claude
 from app.services import ingestion
 from app.services.schedule_extraction import GLANCE_TITLE_RE as _GLANCE_TITLE_RE
 from app.services.schedule_extraction import apply_schedule_from_doc as _apply_schedule_from_doc_shared
-from app.services.schedule_extraction import glance_still_relevant as _glance_still_relevant
 from app.services.schedule_extraction import is_glance as _is_glance
 from app.services.schedule_extraction import is_recurring_glance as _is_recurring_glance
 from app.services.schedule_extraction import is_recurring_glance_title
@@ -993,12 +992,21 @@ class SchoologyProvider(IntegrationProvider):
             # glance file entirely: its title never matched (so
             # `extract_schedule` stays False every sync) and it was never
             # "recurring" either, so it was ingested once and never
-            # rechecked again. Also stops entirely once the document's own
-            # last-extracted date range is safely in the past (see
-            # `glance_still_relevant`) -- no point re-mining an old week's
-            # page just because a late edit changed its hash.
+            # rechecked again. Deliberately never stops rechecking just
+            # because the document's own last-extracted date range is in
+            # the past -- a teacher who reuses the exact same "Week at a
+            # Glance" link/name every week (rather than posting a fresh one)
+            # means a long gap since that old range (a semester break, a
+            # summer) looks identical to "this page is genuinely done
+            # forever", and confirmed against a real account: gating this on
+            # the *old* content's dates meant Atlas silently stopped ever
+            # looking at the page again right as a new school year's first
+            # real week landed in the very same document. The content-hash
+            # check below already makes a recheck of a truly-unchanged page
+            # cheap (no LLM re-run), so there's no real cost to always
+            # trying.
             is_known_glance = existing_meta.get("is_glance") or existing_meta.get("is_recurring_glance")
-            if (extract_schedule or is_known_glance) and _glance_still_relevant(existing_meta):
+            if extract_schedule or is_known_glance:
                 await self._recheck_glance_file_for_changes(
                     user_id=user_id, course_id=course_id, doc_id=existing["id"],
                     existing_meta=existing_meta, content_hash=content_hash,
@@ -1160,10 +1168,10 @@ class SchoologyProvider(IntegrationProvider):
         `recheck_for_changes` (set for an "at a glance" page — see
         `_ingest_file`'s docstring) compares the page's content against the
         hash recorded on the last sync and, if it changed, re-indexes it
-        the same as a brand-new page; if unchanged, this is a no-op. Also
-        stops once the page's own last-extracted date range is safely in
-        the past (see `glance_still_relevant`), same as `_ingest_file`.
-        Returns `(changed, doc_id)` — `changed` is True iff the document row
+        the same as a brand-new page; if unchanged, this is a no-op.
+        Deliberately never stops rechecking based on the page's own
+        last-extracted date range going stale — same reasoning as
+        `_ingest_file`. Returns `(changed, doc_id)` — `changed` is True iff the document row
         was newly created, a flagged stub was upgraded, or (with
         `recheck_for_changes`) its content changed; `doc_id` is always the
         row's id (new or existing) so a caller mining this page for a
@@ -1175,7 +1183,7 @@ class SchoologyProvider(IntegrationProvider):
         )
         content_hash = hashlib.sha256((text or "").encode("utf-8", "ignore")).hexdigest()
         content_changed = bool(existing) and existing_meta.get("content_hash") != content_hash
-        should_recheck = recheck_for_changes and content_changed and _glance_still_relevant(existing_meta)
+        should_recheck = recheck_for_changes and content_changed
         doc_id = existing["id"] if existing else str(uuid.uuid4())
         if existing and not was_flagged_stub and not should_recheck:
             return False, doc_id  # already ingested and (when checked) unchanged — nothing to do
@@ -2043,15 +2051,21 @@ class SchoologyProvider(IntegrationProvider):
         `is_recurring_glance_title` alone used to gate this and missed a
         content-only-detected, single-week glance item entirely (its title
         never said so, and it isn't "recurring" either, so it was pulled
-        once and never looked at again) — for as long as it's still within
-        (or just past) the date range its own last extraction covered, per
-        `glance_still_relevant`. Once that range is safely in the past,
-        there's nothing left in it worth re-walking for."""
-        is_glance_item = bool(
+        once and never looked at again). Deliberately not scoped to "only
+        while its own last-extracted date range is still current" — a
+        teacher who reuses the exact same link/name every week rather than
+        posting a fresh one each time means that range going stale (a
+        semester break, a summer) looks identical to "this page is done
+        forever", and confirmed against a real account: gating on it meant
+        Atlas silently stopped ever re-walking a "Week at a Glance" page
+        right as a new school year's first real week landed in the very
+        same document. The content-hash check in `_ingest_file`/`_ingest_
+        external_page` already makes a rewalk of a truly-unchanged page
+        cheap, so there's no real cost to always trying."""
+        return bool(
             metadata.get("is_glance") or metadata.get("is_recurring_glance")
             or is_recurring_glance_title(metadata.get("material_name"))
         )
-        return is_glance_item and _glance_still_relevant(metadata)
 
     # ---- material ingestion: always via the login-scraper session ----
     async def _sync_scraped_materials(
@@ -2124,18 +2138,16 @@ class SchoologyProvider(IntegrationProvider):
             # actually read the page. Otherwise a document would stay
             # flagged forever even after the underlying problem is fixed.
             # An "at a glance" item (see `_glance_needs_rewalk`) is left out
-            # the same way, every sync, for as long as it's still relevant:
-            # a teacher keeps editing a "Unit/Semester at a Glance" as the
-            # term actually progresses, and even a single week's page can
-            # get a late correction before its dates pass, so it needs to
-            # be re-walked and re-checked for changes, not just pulled once
-            # and treated as done forever — `_ingest_file`/`_ingest_
-            # external_page`'s own content-hash check (see their
+            # the same way, every single sync, permanently: a teacher keeps
+            # editing a "Unit/Semester at a Glance" as the term actually
+            # progresses, even a single week's page can get a late
+            # correction before its dates pass, and a teacher who reuses the
+            # exact same link/name every week (rather than posting a fresh
+            # one) means there's no date past which it's safe to assume
+            # nothing new will ever land there again — `_ingest_file`/
+            # `_ingest_external_page`'s own content-hash check (see their
             # docstrings) is what keeps a re-walk that finds no actual
-            # change cheap (no re-download-triggered LLM re-run), and
-            # `glance_still_relevant` is what eventually lets a page whose
-            # entire date range has passed go back to being "known" and
-            # left alone.
+            # change cheap (no re-download-triggered LLM re-run).
             known_names = {
                 str((row.get("metadata") or {}).get("material_name") or "").strip().lower()
                 for row in existing

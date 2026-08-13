@@ -245,6 +245,42 @@ def test_sync_merges_biology_prep_lab_and_ap_onto_existing_schoology_group_rows(
     assert ap["linked_course_id"] == s1_id  # still linked to the same root
 
 
+def test_sync_prefers_a_manually_set_powerschool_url_over_the_scraped_detail_href(fake_db, monkeypatch):
+    """A course's `powerschool_url` (pasted by the student in Settings/the
+    course page) always wins over whatever detail_href the sync itself
+    scraped -- auto-detection can land on the wrong page entirely (a real
+    account's course-list link resolved to an unrelated "Quick Links"
+    widget instead of the real per-category assignment tables), and a
+    student confirming the exact scores.html URL PowerSchool shows them is
+    the reliable escape hatch for that."""
+    existing_id = str(uuid.uuid4())
+    fake_db.tables["courses"].append({
+        "id": existing_id, "user_id": USER_ID, "name": "AP Calculus AB",
+        "external_source": "powerschool", "external_id": "8817372", "metadata": {},
+        "room": None, "period": None, "teacher_id": None,
+        "powerschool_url": "https://lexington1.powerschool.com/guardian/scores.html?frn=00437309537",
+    })
+
+    provider = PowerSchoolProvider()
+    report = _sync(provider, [
+        _cls("8817372", "AP Calculus AB", detail_href="/guardian/scores.html?frn=wrong-page"),
+    ], monkeypatch, assignments={
+        "https://lexington1.powerschool.com/guardian/scores.html?frn=00437309537": [
+            PSAssignment(name="Real Quiz", category="Quiz", due_date="2026-08-20",
+                         score=9.0, points_possible=10.0, percentage=90.0),
+        ],
+        "/guardian/scores.html?frn=wrong-page": [
+            PSAssignment(name="School Fees and Forms", category="other", due_date=None,
+                         score=None, points_possible=None, percentage=None),
+        ],
+    })
+
+    assert report["courses"] == 1
+    assert report["assignments"] == 1
+    titles = {a["title"] for a in fake_db.tables["assignments"]}
+    assert titles == {"Real Quiz"}
+
+
 def test_sync_does_not_split_a_standalone_course_with_no_lab_counterpart(fake_db, monkeypatch):
     """A stand-alone "AP Biology" with no "Bio PreLab HN"/"Biology ... HN"
     counterpart in this sync must not get needlessly split into a group."""

@@ -71,6 +71,7 @@ interface EditForm {
   teacher_id: string;
   term_id: string;
   color: string | null;
+  powerschool_url: string;
 }
 
 export default function CourseDetailPage() {
@@ -205,6 +206,7 @@ export default function CourseDetailPage() {
       teacher_id: course.teacher_id ?? "",
       term_id: course.term_id ?? "",
       color: course.color ?? null,
+      powerschool_url: course.powerschool_url ?? "",
     });
     setEditing(true);
   }
@@ -215,6 +217,7 @@ export default function CourseDetailPage() {
     const body: any = { ...form, credit_hours: Number(form.credit_hours) || 1.0 };
     body.teacher_id = body.teacher_id || null;
     body.term_id = body.term_id || null;
+    body.powerschool_url = body.powerschool_url.trim() || null;
     await apiPatch(`/courses/${id}`, body);
     setEditing(false);
     await load();
@@ -536,6 +539,18 @@ export default function CourseDetailPage() {
           <div className="md:col-span-4">
             <label className="label">Calendar color</label>
             <ColorPicker courseId={id} value={form.color} onChange={(c) => setForm({ ...form, color: c })} />
+          </div>
+
+          <div className="md:col-span-4">
+            <label className="label">PowerSchool assignments link (optional)</label>
+            <input className="input" type="url" placeholder="https://yourdistrict.powerschool.com/guardian/scores.html?frn=..."
+              value={form.powerschool_url}
+              onChange={(e) => setForm({ ...form, powerschool_url: e.target.value })} />
+            <div className="text-xs text-atlas-muted mt-1">
+              If PowerSchool sync isn't finding this course's assignments on its own, open this exact
+              class's grades page on the PowerSchool website and paste its URL here — sync will use it
+              directly instead of guessing.
+            </div>
           </div>
 
           <button className="btn-primary md:col-span-4">Save changes</button>

@@ -306,10 +306,23 @@ class PowerSchoolProvider(IntegrationProvider):
                     continue
                 courses += 1
 
-                if not cls.detail_href:
+                # A manually-pasted scores.html URL (Settings/course page,
+                # `courses.powerschool_url`) always wins over whatever this
+                # sync scraped -- auto-detection can land on the wrong page
+                # entirely (a real account's course-list link resolved to a
+                # "Quick Links" widget instead of the real per-category
+                # assignment tables), and there's no way to tell that apart
+                # from a real assignments page short of a human confirming
+                # the exact URL PowerSchool itself shows them for that course.
+                override = await supabase.select(
+                    "courses", columns="powerschool_url",
+                    filters={"id": eq(course_id)}, limit=1,
+                )
+                assignments_url = (override[0].get("powerschool_url") if override else None) or cls.detail_href
+                if not assignments_url:
                     continue
                 try:
-                    assignments = await client.fetch_assignments(cls.detail_href)
+                    assignments = await client.fetch_assignments(assignments_url)
                 except Exception as e:  # noqa: BLE001 — one course's markup shouldn't sink the sync
                     errors.append(f"{cls.name}: {e}")
                     continue

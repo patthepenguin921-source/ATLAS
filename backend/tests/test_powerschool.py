@@ -839,13 +839,67 @@ def test_debug_assignments_page_reports_data_rows_and_links():
             "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
         )
         try:
-            result = await client.debug_assignments_page("/guardian/scores.html?frn=1&fg=Q1")
-            assert result["table_count"] == 1
-            table = result["tables"][0]
+            result = await client.debug_assignments_page(
+                "/guardian/scores.html?frn=1&fg=Q1", delay_seconds=0,
+            )
+            immediate = result["immediate"]
+            assert immediate["table_count"] == 1
+            table = immediate["tables"][0]
             assert table["looks_like_assignments"] is False
             assert "AP Calculus AB" in table["sample_data_row_html"]
-            links = {l["text"]: l["href"] for l in result["links"]}
+            links = {l["text"]: l["href"] for l in immediate["links"]}
             assert links["97%"] == "/guardian/scores.html?frn=99999&fg=Q1"
+            # Same fake handler returns identical content both times here.
+            assert result["changed_after_delay"] is False
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_debug_assignments_page_detects_a_delayed_fetch_finding_more():
+    """The whole point of fetching twice: if a delayed plain re-fetch of the
+    exact same URL reveals a real assignment table the immediate fetch
+    didn't have, that's a much cheaper fix (retry-with-delay) than needing
+    real browser/JS automation -- `changed_after_delay` is what a human (or
+    a future code change) checks first to tell those two cases apart."""
+    course_summary_only = """
+    <html><body>
+    <table class="linkDescList">
+      <tr><th>Course</th><th>Teacher</th><th>Final Grade</th></tr>
+      <tr><td>AP Calculus AB</td><td>Ms. Rivera</td><td>97</td></tr>
+    </table>
+    </body></html>
+    """
+    with_assignments = """
+    <html><body>
+    <table class="linkDescList">
+      <tr><th>Course</th><th>Teacher</th><th>Final Grade</th></tr>
+      <tr><td>AP Calculus AB</td><td>Ms. Rivera</td><td>97</td></tr>
+    </table>
+    <table>
+      <tr><th>Due Date</th><th>Category</th><th>Assignment</th><th>Score</th><th>%</th></tr>
+      <tr><td>08/13/2026</td><td>Quiz</td><td>Limits Quiz</td><td>81/100</td><td>81%</td></tr>
+    </table>
+    </body></html>
+    """
+    responses = iter([course_summary_only, with_assignments])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=next(responses))
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            result = await client.debug_assignments_page(
+                "/guardian/scores.html?frn=1&fg=Q1", delay_seconds=0,
+            )
+            assert result["immediate"]["table_count"] == 1
+            assert result["delayed"]["table_count"] == 2
+            assert result["changed_after_delay"] is True
         finally:
             await client.aclose()
 

@@ -374,9 +374,7 @@ interface DebugScrapeResult {
   sample_row_html: string[];
 }
 
-interface DebugAssignmentsScrapeResult {
-  course: string;
-  detail_href: string;
+interface DebugAssignmentsPageSnapshot {
   final_url: string;
   status_code: number;
   table_count: number;
@@ -389,6 +387,18 @@ interface DebugAssignmentsScrapeResult {
     sample_data_row_html: string | null;
   }[];
   links: { text: string; href: string | null; onclick: string | null }[];
+}
+
+interface DebugAssignmentsScrapeResult {
+  course: string;
+  detail_href: string;
+  // Fetched twice (once immediately, once ~4s later) to tell apart "the
+  // assignments grid needs a delayed plain re-fetch" from "it needs actual
+  // JS execution this scraper can't do" -- see debug_assignments_page's
+  // docstring.
+  immediate: DebugAssignmentsPageSnapshot;
+  delayed: DebugAssignmentsPageSnapshot;
+  changed_after_delay: boolean;
 }
 
 interface SchoologyMaterialItem {
@@ -1114,47 +1124,65 @@ function IntegrationsTab() {
           <div className="card mt-4 text-xs space-y-1.5">
             <div className="font-medium text-sm mb-1">Raw assignments-page scrape — {assignmentsDebugResult.course}</div>
             <div>
-              <span className="text-atlas-muted">Fetched: </span>
-              {assignmentsDebugResult.final_url} ({assignmentsDebugResult.status_code})
+              <span className="text-atlas-muted">Fetched twice (immediately, then ~4s later) — </span>
+              <span className={assignmentsDebugResult.changed_after_delay ? "text-atlas-good" : "text-atlas-muted"}>
+                {assignmentsDebugResult.changed_after_delay
+                  ? "the delayed fetch found something different"
+                  : "no difference between the two fetches"}
+              </span>
             </div>
-            <div>
-              <span className="text-atlas-muted">Tables found: </span>
-              {assignmentsDebugResult.table_count}
-            </div>
-            {assignmentsDebugResult.tables.map((t, i) => (
-              <div key={i} className="pt-1">
-                <div className="text-atlas-muted">
-                  Table {i + 1}{t.id ? ` (id="${t.id}")` : ""}{t.class ? ` (class="${t.class}")` : ""} —{" "}
-                  {t.row_count} rows —{" "}
-                  <span className={t.looks_like_assignments ? "text-atlas-good" : "text-atlas-muted"}>
-                    {t.looks_like_assignments ? "parsed as assignments" : "skipped"}
-                  </span>
+            {(
+              [
+                ["Immediate fetch", assignmentsDebugResult.immediate],
+                ["Delayed fetch (+4s)", assignmentsDebugResult.delayed],
+              ] as const
+            ).map(([label, snapshot]) => (
+              <div key={label} className="pt-2 border-t border-atlas-border">
+                <div className="font-medium">{label}</div>
+                <div>
+                  <span className="text-atlas-muted">Fetched: </span>
+                  {snapshot.final_url} ({snapshot.status_code})
                 </div>
-                {t.header_row_html && (
-                  <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto">
-                    {t.header_row_html}
-                  </pre>
-                )}
-                {t.sample_data_row_html && (
-                  <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto mt-1">
-                    {t.sample_data_row_html}
-                  </pre>
+                <div>
+                  <span className="text-atlas-muted">Tables found: </span>
+                  {snapshot.table_count}
+                </div>
+                {snapshot.tables.map((t, i) => (
+                  <div key={i} className="pt-1">
+                    <div className="text-atlas-muted">
+                      Table {i + 1}{t.id ? ` (id="${t.id}")` : ""}{t.class ? ` (class="${t.class}")` : ""} —{" "}
+                      {t.row_count} rows —{" "}
+                      <span className={t.looks_like_assignments ? "text-atlas-good" : "text-atlas-muted"}>
+                        {t.looks_like_assignments ? "parsed as assignments" : "skipped"}
+                      </span>
+                    </div>
+                    {t.header_row_html && (
+                      <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto">
+                        {t.header_row_html}
+                      </pre>
+                    )}
+                    {t.sample_data_row_html && (
+                      <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto mt-1">
+                        {t.sample_data_row_html}
+                      </pre>
+                    )}
+                  </div>
+                ))}
+                {snapshot.links.length > 0 && (
+                  <div className="pt-1">
+                    <div className="text-atlas-muted">
+                      Links on the page — the real assignment breakdown is often reached by clicking a
+                      grade cell's link (or a JS-driven popup) rather than appearing directly on this page:
+                    </div>
+                    <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto">
+                      {snapshot.links
+                        .map((l) => `${l.text || "(no text)"} -> ${l.href ?? l.onclick ?? "(no target)"}`)
+                        .join("\n")}
+                    </pre>
+                  </div>
                 )}
               </div>
             ))}
-            {assignmentsDebugResult.links.length > 0 && (
-              <div className="pt-1">
-                <div className="text-atlas-muted">
-                  Links on the page — the real assignment breakdown is often reached by clicking a
-                  grade cell's link (or a JS-driven popup) rather than appearing directly on this page:
-                </div>
-                <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto">
-                  {assignmentsDebugResult.links
-                    .map((l) => `${l.text || "(no text)"} -> ${l.href ?? l.onclick ?? "(no target)"}`)
-                    .join("\n")}
-                </pre>
-              </div>
-            )}
           </div>
         )}
 

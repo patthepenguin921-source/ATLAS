@@ -6,11 +6,13 @@ const config: Config = {
     extend: {
       colors: {
         atlas: {
-          // "Near-black slate" — deep black-leaning dark, clean blue accent.
-          bg: "#0a0b0e",
-          panel: "#131419",
-          panel2: "#1b1d25",
-          border: "#2b2e39",
+          // Practically-black base, clean blue accent. Panels/border stay a
+          // couple steps lighter than bg so cards and inputs still read as
+          // distinct surfaces against the near-pure-black page.
+          bg: "#020203",
+          panel: "#0c0d10",
+          panel2: "#141519",
+          border: "#26272f",
           text: "#eceef3",
           muted: "#8b90a0",
           accent: "#3b82f6",   // clean blue (was a more indigo/purple-leaning #6a8bff)

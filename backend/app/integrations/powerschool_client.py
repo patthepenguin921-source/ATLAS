@@ -138,26 +138,57 @@ _HEADER_KEYWORDS = {
 }
 
 
+_GRADE_SHAPED_HEADER_FIELDS = ("due_date", "score", "percentage")
+
+
 def _looks_like_assignment_table(table: Tag) -> bool:
     """Whether a table's header row looks like it lists individual
     assignments -- matching at least two of `_HEADER_KEYWORDS`'s column
-    groups (due date/category/name/score/percentage). A course's assignments
-    page commonly renders one such table per grading category rather than a
-    single flat one, so `fetch_assignments` parses every table this returns
-    true for instead of picking just one. Requiring two-plus matches (not
-    one) keeps unrelated tables on the same page -- e.g. a grading-scale
-    legend with only a "%" column -- from being misread as assignments."""
+    groups (due date/category/name/score/percentage), *and* at least one of
+    those being due date/score/percentage specifically. A course's
+    assignments page commonly renders one such table per grading category
+    rather than a single flat one, so `fetch_assignments` parses every table
+    this returns true for instead of picking just one.
+
+    Two-plus matches alone isn't enough: a real account's scores.html page
+    also carries an unrelated "Quick Links"/forms widget (confirmed against
+    Lexington1 -- "School Fees and Forms", "Your available forms.") whose
+    header happened to match "category"+"name" (the two most generic-
+    sounding keyword groups) and got scraped as if each of its rows were an
+    assignment. Requiring due date/score/percentage as well keeps that kind
+    of unrelated list out -- a real assignment table virtually always has
+    at least one of those, and a forms/links widget virtually never does."""
     rows = table.find_all("tr")
     if len(rows) < 2:
         return False
     header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
     if not header_cells:
         return False
-    matches = sum(
-        1 for keywords in _HEADER_KEYWORDS.values()
+    matched_fields = {
+        field for field, keywords in _HEADER_KEYWORDS.items()
         if any(any(k in cell for k in keywords) for cell in header_cells)
-    )
-    return matches >= 2
+    }
+    return len(matched_fields) >= 2 and any(f in matched_fields for f in _GRADE_SHAPED_HEADER_FIELDS)
+
+
+_STATUS_WORD_RE = re.compile(r"\b(missing|late|exempt|excused)\b", re.I)
+
+
+def _table_has_grade_shaped_data(table: Tag) -> bool:
+    """Whether any *data* row (skipping the header) actually contains
+    something grade-shaped -- a score fraction ("8/10"), a percentage, or a
+    missing/late/exempt/excused status -- used as a last-resort fallback
+    when no table's header matched `_looks_like_assignment_table` at all
+    (unrecognized column wording). Deliberately content-driven rather than
+    "just grab the largest table": a non-gradebook widget on the same page
+    (e.g. a "Quick Links"/forms list) can easily be the largest or only
+    table present, especially early in a term before real assignments are
+    posted, and its row text never looks like this."""
+    for row in table.find_all("tr")[1:]:
+        text = row.get_text(" ", strip=True)
+        if _SCORE_RE.search(text) or _PERCENT_RE.search(text) or _STATUS_WORD_RE.search(text):
+            return True
+    return False
 
 # Between school years/terms, PowerSchool lists each requested course with
 # one of these placeholders instead of an assigned section/teacher — not a
@@ -606,11 +637,15 @@ class PowerSchoolClient:
         all_tables = soup.find_all("table")
         tables = [t for t in all_tables if _looks_like_assignment_table(t)]
         if not tables:
-            # Markup varies across PowerSchool versions -- if nothing's
-            # header row matched, fall back to the largest table on the page
-            # rather than giving up entirely.
-            table = max(all_tables, key=lambda t: len(t.find_all("tr")), default=None)
-            tables = [table] if table is not None else []
+            # Header wording varies across PowerSchool versions -- fall back
+            # to any table whose *data* rows (not header) look grade-shaped,
+            # rather than blindly picking the largest table on the page.
+            # That blind fallback used to scrape a real account's unrelated
+            # "Quick Links"/forms widget as if it were the assignments table
+            # whenever it happened to be the only/largest table present --
+            # e.g. early in a term before any real assignments are posted
+            # yet, which is exactly when this fallback path is reached.
+            tables = [t for t in all_tables if _table_has_grade_shaped_data(t)]
 
         assignments: list[PSAssignment] = []
         for table in tables:

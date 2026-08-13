@@ -698,6 +698,43 @@ def test_fetch_assignments_reads_every_per_category_table():
     asyncio.run(run())
 
 
+def test_fetch_assignments_ignores_a_forms_widget_with_no_grade_shaped_data():
+    """Regression: a real account's scores.html page (early in a term, no
+    assignments posted yet for any course) had no real assignment table at
+    all -- only an unrelated "Quick Links"/forms widget ("School Fees and
+    Forms", "Your available forms."). Its header happened to loosely match
+    (2+ generic keyword groups), and being the only/largest table on the
+    page, the old blind fallback scraped its rows as if they were
+    assignments -- 14 fake "assignments" synced across every course, none
+    with a score, due date, or real title. Neither the header-based
+    classifier nor the grade-shaped-data fallback should accept this."""
+    html = """
+    <html><body>
+    <table id="quickLinks">
+      <tr><th>Category</th><th>Description</th></tr>
+      <tr><td>Other</td><td>School Fees and Forms</td></tr>
+      <tr><td>Forms</td><td>Your available forms.</td></tr>
+    </table>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", "student1", "correct-horse", transport=transport
+        )
+        try:
+            assignments = await client.fetch_assignments("/guardian/scores.html?frn=1")
+            assert assignments == []
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_debug_home_page_reports_raw_rows():
     """Diagnostic used when a district's table layout doesn't match this
     client's cell-index assumptions — reports the header row and a few

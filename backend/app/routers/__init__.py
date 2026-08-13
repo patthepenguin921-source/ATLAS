@@ -18,7 +18,7 @@ _CRUD = [
                                "course_level", "has_hn_prep_lab", "has_ap_prep_lab",
                                "credit_hours", "color", "period", "room", "sort_order",
                                "semester", "linked_course_id", "is_active",
-                               "external_id", "external_source", "metadata"},
+                               "external_id", "external_source", "metadata", "powerschool_url"},
                      default_order="sort_order.asc,created_at.desc"),
     make_crud_router(table="assignments", prefix="/assignments", tag="assignments",
                      writable={"course_id", "term_id", "title", "description", "notes",

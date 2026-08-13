@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+import app.integrations.powerschool as powerschool_module
+from app.config import settings
 from app.core.supabase_client import supabase
 from app.integrations.powerschool import PowerSchoolProvider
 from app.integrations.powerschool_client import PSAssignment, PSClass
@@ -83,6 +85,8 @@ class _FakeClient:
     client` is monkeypatched to hand this back directly, same as the real one
     past login."""
 
+    base_url = "https://fake.powerschool.com"
+
     def __init__(self, classes: list[PSClass], assignments: dict[str, list[PSAssignment]] | None = None):
         self._classes = classes
         self._assignments = assignments or {}
@@ -96,6 +100,9 @@ class _FakeClient:
         if isinstance(result, BaseException):
             raise result
         return list(result)
+
+    def cookie_header(self):
+        return "sessionid=fake"
 
     async def aclose(self):
         self.closed = True
@@ -321,6 +328,83 @@ def test_sync_falls_back_to_the_scraped_link_when_the_manual_override_is_stale(f
     assert titles == {"Real Quiz"}
     assert len(report["errors"]) == 1
     assert "re-copied" in report["errors"][0]
+
+
+class _FakeBrowserFetcher:
+    """Stands in for `RenderedAssignmentsFetcher` -- the real one drives an
+    actual headless Chromium (see test_powerschool_browser.py for that),
+    which this fast, mocked-Supabase suite doesn't want to pay for. This
+    only exercises that `sync()` calls it with the right arguments when the
+    plain HTTP fetch comes back empty, and uses whatever it returns."""
+
+    instances: list["_FakeBrowserFetcher"] = []
+
+    def __init__(self, base_url, cookie_header):
+        self.base_url = base_url
+        self.cookie_header_value = cookie_header
+        self.fetched_urls: list[str] = []
+        self.closed = False
+        _FakeBrowserFetcher.instances.append(self)
+
+    async def fetch_rendered_html(self, url):
+        self.fetched_urls.append(url)
+        return "<html>rendered</html>"
+
+    async def aclose(self):
+        self.closed = True
+
+
+def test_sync_falls_back_to_a_real_browser_when_the_plain_fetch_finds_nothing(fake_db, monkeypatch):
+    """Some PowerSchool skins (confirmed against a real Lexington1 account)
+    fill the Assignments grid in via client-side JS well after the initial
+    page load -- a plain HTTP GET's response never contains it, immediately
+    or after any delay (see debug_assignments_page's "fetch twice" check).
+    When the plain fetch comes back empty, `sync()` must fall back to a real
+    headless browser rendering the same URL rather than treating that
+    silently as "this course has no assignments."."""
+    _FakeBrowserFetcher.instances = []
+    monkeypatch.setattr(powerschool_module, "RenderedAssignmentsFetcher", _FakeBrowserFetcher)
+    monkeypatch.setattr(
+        powerschool_module, "parse_assignments_html",
+        lambda html: [
+            PSAssignment(name="Limits Quiz", category="Quiz", due_date="2026-08-13",
+                         score=81.0, points_possible=100.0, percentage=81.0),
+        ] if html == "<html>rendered</html>" else [],
+    )
+    monkeypatch.setattr(settings, "vercel", "")  # not serverless -- browser fallback allowed
+
+    provider = PowerSchoolProvider()
+    report = _sync(provider, [
+        _cls("8817372", "AP Calculus AB", detail_href="/guardian/scores.html?frn=1"),
+    ], monkeypatch, assignments={"/guardian/scores.html?frn=1": []})
+
+    assert report["courses"] == 1
+    assert report["assignments"] == 1
+    titles = {a["title"] for a in fake_db.tables["assignments"]}
+    assert titles == {"Limits Quiz"}
+    assert len(_FakeBrowserFetcher.instances) == 1
+    assert _FakeBrowserFetcher.instances[0].fetched_urls == ["/guardian/scores.html?frn=1"]
+    assert _FakeBrowserFetcher.instances[0].closed is True
+
+
+def test_sync_skips_the_browser_fallback_on_serverless_hosting(fake_db, monkeypatch):
+    """No Chromium binary/execution budget on Vercel -- same gate the
+    existing CAS-login browser fallback already uses (see
+    `_authenticated_client`). A course with genuinely no assignments must
+    stay that way rather than erroring, and the browser fetcher must never
+    even be constructed."""
+    _FakeBrowserFetcher.instances = []
+    monkeypatch.setattr(powerschool_module, "RenderedAssignmentsFetcher", _FakeBrowserFetcher)
+    monkeypatch.setattr(settings, "vercel", "1")  # serverless -- browser fallback must not run
+
+    provider = PowerSchoolProvider()
+    report = _sync(provider, [
+        _cls("8817372", "AP Calculus AB", detail_href="/guardian/scores.html?frn=1"),
+    ], monkeypatch, assignments={"/guardian/scores.html?frn=1": []})
+
+    assert report["courses"] == 1
+    assert report["assignments"] == 0
+    assert _FakeBrowserFetcher.instances == []
 
 
 def test_sync_does_not_split_a_standalone_course_with_no_lab_counterpart(fake_db, monkeypatch):

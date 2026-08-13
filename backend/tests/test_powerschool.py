@@ -942,6 +942,36 @@ def test_probe_login_page_reports_sso_redirect():
     asyncio.run(run())
 
 
+def test_cookie_header_returns_a_pasted_session_cookie():
+    """Regression: a pasted `session_cookie` is set as a raw header on this
+    client's httpx.AsyncClient, never into its cookie jar -- `cookie_header`
+    used to only read the jar, so it came back empty for exactly the auth
+    mode (SSO/cookie-based districts) that most needs to hand its session
+    off to `RenderedAssignmentsFetcher` for the JS-rendered-assignments
+    fallback (see powerschool.py's `sync`)."""
+    transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))
+    client = PowerSchoolClient(
+        "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport,
+    )
+    assert client.cookie_header() == "sessionid=abc123"
+    asyncio.run(client.aclose())
+
+
+def test_cookie_header_after_password_login_reflects_the_jar():
+    async def run():
+        transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", "student1", "correct-horse", transport=transport,
+        )
+        try:
+            await client.login()
+            assert "sessionid=abc123" in client.cookie_header()
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_verify_session_with_valid_cookie():
     async def run():
         transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))

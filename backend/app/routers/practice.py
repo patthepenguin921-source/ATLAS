@@ -9,7 +9,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import CurrentUser, get_current_user
-from app.services import practice as practice_service
+from app.schemas import SubmitPracticeRequest
+from app.services import mistake_analysis, practice as practice_service
 
 router = APIRouter(prefix="/practice", tags=["practice"])
 
@@ -25,6 +26,24 @@ async def get_practice(session_id: str, user: CurrentUser = Depends(get_current_
     if not row:
         raise HTTPException(404, "Not found")
     return row
+
+
+@router.post("/{session_id}/submit")
+async def submit_practice(
+    session_id: str, body: SubmitPracticeRequest, user: CurrentUser = Depends(get_current_user)
+):
+    """Grades a completed quiz/test against its own answer key, records any
+    wrong answers as mistakes (unless the student turned that off in
+    Settings) and updates the concept knowledge model, then saves the
+    resulting score -- see app.services.mistake_analysis. This is the
+    "smart" grading path; `PATCH /{session_id}/score` remains for a plain
+    self-reported percentage on older sessions."""
+    try:
+        return await mistake_analysis.grade_submission(user.id, session_id, body.answers)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.patch("/{session_id}/score")

@@ -235,7 +235,11 @@ export default function CalendarPage() {
               className="w-full text-left card card-hover flex items-center justify-between gap-3"
               onClick={() => {
                 setSelectedDay(null);
-                if (item.course_id) router.push(`/courses/${item.course_id}`);
+                if (item.kind === "assignment") {
+                  router.push(`/assignments?id=${item.id.replace(/^assignment-/, "")}`);
+                } else if (item.course_id) {
+                  router.push(`/courses/${item.course_id}`);
+                }
               }}
             >
               <div className="min-w-0">

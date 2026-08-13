@@ -612,7 +612,11 @@ export default function CourseDetailPage() {
           {grades.length ? (
             <div className="space-y-2">
               {grades.map((g) => (
-                <div key={g.id} className="card flex items-center justify-between gap-4">
+                <div
+                  key={g.id}
+                  className={`card flex items-center justify-between gap-4 ${g.assignment_id ? "card-hover cursor-pointer" : ""}`}
+                  onClick={g.assignment_id ? () => router.push(`/assignments?id=${g.assignment_id}`) : undefined}
+                >
                   <div className="min-w-0">
                     <div className="text-sm font-medium">
                       {g.percentage != null ? `${g.percentage}%` : "—"} {g.letter ? `(${g.letter})` : ""}
@@ -741,14 +745,26 @@ export default function CourseDetailPage() {
           {mistakes.length ? (
             <div className="space-y-2">
               {mistakes.map((m) => (
-                <div key={m.id} className="card flex items-center justify-between gap-4">
-                  <div className="min-w-0 text-sm truncate">{m.description}</div>
-                  <Badge tone={m.resolved ? "good" : "warn"}>{m.resolved ? "resolved" : m.mistake_type || "open"}</Badge>
+                <div key={m.id} className="card gap-2">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0 text-sm truncate">{m.description}</div>
+                    <button
+                      className="shrink-0"
+                      title={m.resolved ? "Mark unresolved" : "Mark resolved"}
+                      onClick={async () => {
+                        await apiPatch(`/mistakes/${m.id}`, { resolved: !m.resolved });
+                        setMistakes((prev) => prev.map((x) => (x.id === m.id ? { ...x, resolved: !x.resolved } : x)));
+                      }}
+                    >
+                      <Badge tone={m.resolved ? "good" : "warn"}>{m.resolved ? "resolved" : m.mistake_type || "open"}</Badge>
+                    </button>
+                  </div>
+                  {m.correction && <div className="text-xs text-atlas-muted mt-1">{m.correction}</div>}
                 </div>
               ))}
             </div>
           ) : (
-            <Empty>No recorded mistakes for this course.</Empty>
+            <Empty>No recorded mistakes for this course. Submit a practice quiz for grading (Study → Practice) to start building this up.</Empty>
           )}
         </Section>
       </div>

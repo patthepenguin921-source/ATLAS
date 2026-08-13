@@ -107,6 +107,47 @@ gcloud scheduler jobs create http atlas-document-processing \
   --headers="X-Cron-Secret=${CRON_SECRET}" \
   --description="Atlas: safety-net sweep for any document neither the post-upload call nor Index now button reached"
 
+# The daily plan, weekly review, and retention decay used to only ever run
+# on a schedule if n8n was separately set up and running (see
+# app.services.scheduled_intelligence's module docstring) -- neither Vercel
+# Cron nor this script ever called them, since the underlying endpoints are
+# scoped to one logged-in user and a scheduler has no session to act as.
+# These three jobs are the Cloud Run/Cloud Scheduler equivalent of the sync
+# jobs above, running every user's update in one sweep the same way
+# run_sync_for_all already does for PowerSchool/Schoology.
+gcloud scheduler jobs create http atlas-daily-plan \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" \
+  --schedule="0 6 * * *" \
+  --time-zone="America/New_York" \
+  --uri="${CLOUD_RUN_URL}/api/v1/agents/cron/daily-plan" \
+  --http-method=GET \
+  --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --attempt-deadline=1800s \
+  --description="Atlas: generate today's plan for every user"
+
+gcloud scheduler jobs create http atlas-weekly-review \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" \
+  --schedule="0 18 * * 0" \
+  --time-zone="America/New_York" \
+  --uri="${CLOUD_RUN_URL}/api/v1/agents/cron/weekly-review" \
+  --http-method=GET \
+  --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --attempt-deadline=1800s \
+  --description="Atlas: generate the weekend review for every user"
+
+gcloud scheduler jobs create http atlas-refresh-retention \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" \
+  --schedule="0 3 * * *" \
+  --time-zone="America/New_York" \
+  --uri="${CLOUD_RUN_URL}/api/v1/knowledge/cron/refresh-retention" \
+  --http-method=GET \
+  --headers="X-Cron-Secret=${CRON_SECRET}" \
+  --attempt-deadline=1800s \
+  --description="Atlas: decay spaced-repetition retention estimates for every user"
+
 echo "Created. Verify with:"
 echo "  gcloud scheduler jobs list --project=$PROJECT_ID --location=$LOCATION"
 echo "Run one immediately with:"

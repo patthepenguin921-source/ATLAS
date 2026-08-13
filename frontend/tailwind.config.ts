@@ -6,13 +6,13 @@ const config: Config = {
     extend: {
       colors: {
         atlas: {
-          // "Cool slate" — neutral dark slate, clean blue accent.
-          bg: "#16181d",
-          panel: "#1d2027",
-          panel2: "#252932",
-          border: "#333846",
-          text: "#e7e9ee",
-          muted: "#9096a3",
+          // "Near-black slate" — deep black-leaning dark, clean blue accent.
+          bg: "#0a0b0e",
+          panel: "#131419",
+          panel2: "#1b1d25",
+          border: "#2b2e39",
+          text: "#eceef3",
+          muted: "#8b90a0",
           accent: "#3b82f6",   // clean blue (was a more indigo/purple-leaning #6a8bff)
           accent2: "#7dd3fc",  // sky
           good: "#4ade80",

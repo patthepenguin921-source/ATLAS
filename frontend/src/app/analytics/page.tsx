@@ -98,7 +98,7 @@ export default function AnalyticsPage() {
                 {snap.at_risk.map((a: any) => (
                   <button
                     key={a.id}
-                    onClick={() => router.push(`/assignments`)}
+                    onClick={() => router.push(`/assignments?id=${a.id}`)}
                     className="card card-hover w-full text-left flex items-center justify-between gap-3"
                     title="View in Assignments"
                   >

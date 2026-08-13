@@ -36,8 +36,14 @@ from app.core.security import CurrentUser, check_cron_secret, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.integrations import google_files
 from app.integrations.schoology import SchoologyProvider
-from app.schemas import DocumentPatchRequest, DriveImportRequest, IngestTextRequest
-from app.services import ingestion, storage_cleanup
+from app.schemas import (
+    DismissDuplicateDocumentsRequest,
+    DocumentPatchRequest,
+    DriveImportRequest,
+    IngestTextRequest,
+    MergeDocumentsRequest,
+)
+from app.services import document_dedupe, ingestion, storage_cleanup
 from app.services.schedule_extraction import apply_schedule_from_doc, is_glance
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -480,6 +486,33 @@ async def resync_document(document_id: str, user: CurrentUser = Depends(get_curr
         status = _RESYNC_ERROR_STATUS.get(result.get("error"), 400)
         raise HTTPException(status, result.get("message", "Couldn't resync this document."))
     return {k: v for k, v in result.items() if k != "ok"}
+
+
+@router.get("/possible-duplicates")
+async def possible_duplicate_documents(user: CurrentUser = Depends(get_current_user)):
+    """Pairs of the student's documents that look like the same file added
+    twice -- see app.services.document_dedupe. Registered ahead of
+    `GET /{document_id}` so "possible-duplicates" is never swallowed as a
+    document id."""
+    return await document_dedupe.find_possible_duplicates(user.id)
+
+
+@router.post("/merge")
+async def merge_documents(body: MergeDocumentsRequest, user: CurrentUser = Depends(get_current_user)):
+    try:
+        return await document_dedupe.merge_documents(user.id, body.keep_id, body.discard_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/dismiss-duplicate", status_code=204)
+async def dismiss_duplicate_documents(
+    body: DismissDuplicateDocumentsRequest, user: CurrentUser = Depends(get_current_user)
+):
+    await document_dedupe.dismiss_duplicate(user.id, body.document_id_a, body.document_id_b)
+    return None
 
 
 @router.get("/{document_id}")

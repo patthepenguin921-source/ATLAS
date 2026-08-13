@@ -1,12 +1,12 @@
 """Knowledge — concepts, the knowledge graph, and the student knowledge model."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app.core.security import CurrentUser, get_current_user
+from app.core.security import CurrentUser, check_cron_secret, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.schemas import KnowledgeReviewRequest
-from app.services import knowledge_model, memory
+from app.services import knowledge_model, memory, scheduled_intelligence
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
@@ -88,3 +88,15 @@ async def review(body: KnowledgeReviewRequest, user: CurrentUser = Depends(get_c
 async def refresh_retention(user: CurrentUser = Depends(get_current_user)):
     count = await knowledge_model.refresh_retention(user.id)
     return {"updated": count}
+
+
+# Automated trigger for schedulers (Vercel Cron, Cloud Scheduler, n8n, …) --
+# refreshes retention decay for every user, same pattern as
+# app.routers.agents' cron/daily-plan and cron/weekly-review (see
+# app.services.scheduled_intelligence's module docstring for why these
+# exist). Secured by ATLAS_CRON_SECRET instead of a user session.
+@router.get("/cron/refresh-retention")
+@router.post("/cron/refresh-retention")
+async def cron_refresh_retention(request: Request):
+    check_cron_secret(request)
+    return await scheduled_intelligence.run_retention_refresh_for_all()

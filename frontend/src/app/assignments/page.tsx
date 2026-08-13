@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Empty, Loading, Badge, Modal, RiskBadge, SkeletonList } from "@/components/ui";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
@@ -57,6 +58,16 @@ const isCompleted = (a: any) => a.status === "graded" || a.status === "submitted
 const pairKey = (a: string, b: string) => (a < b ? `${a}:${b}` : `${b}:${a}`);
 
 export default function AssignmentsPage() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <AssignmentsPageInner />
+    </Suspense>
+  );
+}
+
+function AssignmentsPageInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [items, setItems] = useState<any[] | null>(null);
   const [courses, setCourses] = useState<any[]>([]);
   const [risk, setRisk] = useState<Record<string, { risk_level: string; risk_score: number }>>({});
@@ -118,6 +129,21 @@ export default function AssignmentsPage() {
     loadDuplicates();
   }, []);
 
+  // Deep-link support: every other page in the app (dashboard, calendar,
+  // analytics, course pages) links a specific assignment to
+  // `/assignments?id=<id>` since there's no standalone assignment-detail
+  // route -- this is what makes that id actually open the right thing
+  // instead of just landing on the plain list. Only fires once `items` has
+  // loaded and doesn't fight the user re-opening/closing the modal by hand.
+  useEffect(() => {
+    const id = searchParams.get("id");
+    if (!id || !items) return;
+    if (selected?.id === id) return;
+    const match = items.find((a) => a.id === id);
+    if (match) openDetail(match);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, searchParams]);
+
   // Units/subunits are per-class (see `folders`, migration 0024) -- refetch
   // whenever the add form's course changes, same pattern as the Study
   // page's Practice/Flashcards tabs.
@@ -154,6 +180,9 @@ export default function AssignmentsPage() {
 
   function openDetail(a: any) {
     setSelected(a);
+    if (searchParams.get("id") !== a.id) {
+      router.replace(`/assignments?id=${a.id}`, { scroll: false });
+    }
     setEditing(false);
     setGradeEditing(false);
     setDetail({
@@ -494,7 +523,10 @@ export default function AssignmentsPage() {
 
       <Modal
         open={!!selected}
-        onClose={() => setSelected(null)}
+        onClose={() => {
+          setSelected(null);
+          if (searchParams.get("id")) router.replace("/assignments", { scroll: false });
+        }}
         title={selected?.title}
         draggable
         resizable

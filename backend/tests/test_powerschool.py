@@ -448,7 +448,7 @@ def test_fetch_classes_attendance_grid_layout():
             assert cls.period == "1-3(A-E)"
             assert cls.room == "L F207"
             assert cls.grade_letter is None and cls.grade_percent is None
-            assert cls.detail_href == "scores.html?frn=00437309537&fg=Q1&schoolid=3"
+            assert cls.detail_href == "/guardian/scores.html?frn=00437309537&fg=Q1&schoolid=3"
         finally:
             await client.aclose()
 
@@ -571,7 +571,7 @@ def test_fetch_classes_switches_to_the_next_term_once_the_current_one_concludes(
             # silently starving `fetch_assignments` of any current-term
             # data. It must follow the same cell the grade came from.
             assert classes[0].detail_href == (
-                "scores.html?frn=00437309537&begdate=10/06/2026&enddate=01/02/2027&fg=Q2&schoolid=3"
+                "/guardian/scores.html?frn=00437309537&begdate=10/06/2026&enddate=01/02/2027&fg=Q2&schoolid=3"
             )
         finally:
             await client.aclose()
@@ -607,6 +607,53 @@ def test_fetch_classes_never_misreads_absence_count_as_a_grade(monkeypatch):
             # Falls back to Q1's 100 (the first grade-shaped cell) rather
             # than the trailing "0" attendance counts or nothing at all.
             assert cls.grade_percent == 100.0
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_detail_href_from_a_bare_relative_grade_link_resolves_under_guardian():
+    """The reported bug: a real account's term-grade links are bare relative
+    hrefs with no "/guardian/" prefix at all ("scores.html?frn=...", exactly
+    as in HOME_PAGE_ATTENDANCE_GRID/the Lexington1 fixtures below) since
+    they're meant to be resolved relative to the page they're *on*
+    (/guardian/home.html). httpx's AsyncClient has no notion of "the current
+    page" -- a bare relative request path is always resolved against the
+    client's fixed base_url (the site root), not the last page fetched -- so
+    passing that raw href straight to `fetch_assignments` silently 404's on
+    "<root>/scores.html" instead of "<root>/guardian/scores.html" and no
+    assignments for that course ever sync. `detail_href` must come out
+    already resolved to "/guardian/scores.html?..." so `fetch_assignments`
+    hits the real page."""
+    q2_still_pending = '<td><a href="scores.html?frn=00437309537&amp;begdate=10/06/2026&amp;enddate=01/02/2027&amp;fg=Q2&amp;schoolid=3">[ i ]</a></td>'
+    row_html = f"<html><body><table>{_lexington_calc_row(q2_cell=q2_still_pending)}</table></body></html>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/guardian/home.html" and request.method == "GET":
+            return httpx.Response(200, text=row_html)
+        if request.url.path == "/guardian/scores.html":
+            return httpx.Response(200, text=ASSIGNMENTS_PAGE)
+        # A request resolved to the site root ("/scores.html") instead of
+        # "/guardian/scores.html" is exactly the regression this guards
+        # against -- fail it loudly instead of quietly 404ing like the real
+        # portal did, so a reintroduced bug shows up as a clear assertion
+        # failure rather than an empty (but not obviously wrong) result.
+        raise AssertionError(f"unexpected request to {request.url.path!r}")
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            classes = await client.fetch_classes()
+            cls = classes[0]
+            assert cls.detail_href == (
+                "/guardian/scores.html?frn=00437309537&begdate=08/04/2026&enddate=10/05/2026&fg=Q1&schoolid=3"
+            )
+            assignments = await client.fetch_assignments(cls.detail_href)
+            assert len(assignments) == 2
         finally:
             await client.aclose()
 

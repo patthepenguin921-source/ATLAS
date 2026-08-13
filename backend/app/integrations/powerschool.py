@@ -1,6 +1,16 @@
 """PowerSchool provider — logs into the Guardian/Student portal and imports
 courses, current grades, and per-assignment scores.
 
+Assignments themselves are meant to come from Schoology (which owns the
+richer per-course materials/description) or be entered manually -- when a
+scraped PowerSchool assignment looks like the same real assignment as one
+that already exists in the course (see `assignment_dedupe.find_matching_
+assignment`), its grade is attached to that existing row instead of
+creating a second, redundant assignment. A new assignment row is only
+created here when nothing already matches, so a course with no Schoology
+connection (or a manually-tracked one) still gets its PowerSchool
+assignments and grades.
+
 See `powerschool_client.py` for the login/scraping mechanics and its caveats.
 Credentials are stored encrypted in `integrations.secret_ref` (see
 `app.core.crypto`) since there's no OAuth token to hold onto instead.
@@ -29,7 +39,7 @@ from app.integrations.powerschool_client import (
     parse_assignments_html,
     summarize_assignments_html,
 )
-from app.services import mistake_analysis
+from app.services import assignment_dedupe, mistake_analysis
 
 
 def encrypt_credentials(username: str, password: str) -> str:
@@ -402,18 +412,51 @@ class PowerSchoolProvider(IntegrationProvider):
                     except Exception as e:  # noqa: BLE001 — one course's markup shouldn't sink the sync
                         errors.append(f"{cls.name}: browser-rendered assignments fetch failed: {e}")
 
+                existing_candidates: list[dict[str, Any]] = []
+                if assignments:
+                    candidate_rows = await supabase.select(
+                        "assignments", columns="id,title,due_date,course_id,external_source",
+                        filters={"user_id": eq(user_id), "course_id": eq(course_id)}, limit=500,
+                    ) or []
+                    # Never match onto a row PowerSchool itself created on a
+                    # prior sync -- that one is already found (and its
+                    # due_date/category/status kept up to date) via
+                    # `upsert_assignment`'s own external_id lookup just
+                    # below; matching against it here instead would freeze
+                    # it at whatever those fields were the first time it
+                    # synced, since this loop would then only ever attach a
+                    # grade and never reach that update again.
+                    existing_candidates = [
+                        c for c in candidate_rows if c.get("external_source") != "powerschool"
+                    ]
+
                 for a in assignments:
-                    # PowerSchool assignment rows don't expose a stable id via
-                    # scraping, so the composite key keeps repeat syncs idempotent.
-                    external_id = f"{cls.ccid}:{a.name}:{a.due_date or ''}"
-                    assignment_id = await self.upsert_assignment(user_id, external_id, {
-                        "course_id": course_id,
-                        "title": a.name,
-                        "category": map_category(a.category),
-                        "due_date": a.due_date,
-                        "points_possible": a.points_possible,
-                        "status": map_status(a),
-                    })
+                    # Assignments are meant to come from Schoology or manual
+                    # entry -- PowerSchool only supplies the grade for
+                    # whichever existing row looks like the same real
+                    # assignment (see assignment_dedupe.find_matching_
+                    # assignment), rather than creating a redundant second
+                    # row for something Schoology already synced in under a
+                    # slightly different title.
+                    matched_id = assignment_dedupe.find_matching_assignment(
+                        {"course_id": course_id, "title": a.name, "due_date": a.due_date},
+                        existing_candidates,
+                    )
+                    if matched_id:
+                        assignment_id = matched_id
+                    else:
+                        # PowerSchool assignment rows don't expose a stable id
+                        # via scraping, so the composite key keeps repeat
+                        # syncs of this same (still-unmatched) item idempotent.
+                        external_id = f"{cls.ccid}:{a.name}:{a.due_date or ''}"
+                        assignment_id = await self.upsert_assignment(user_id, external_id, {
+                            "course_id": course_id,
+                            "title": a.name,
+                            "category": map_category(a.category),
+                            "due_date": a.due_date,
+                            "points_possible": a.points_possible,
+                            "status": map_status(a),
+                        })
                     assignments_count += 1
 
                     if a.score is not None or a.percentage is not None:

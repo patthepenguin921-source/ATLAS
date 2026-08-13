@@ -65,9 +65,17 @@ def _parse_due(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # Stripped of tzinfo rather than left as whatever the source happened to
+    # provide -- PowerSchool's scraped due dates are bare, timezone-less
+    # dates ("2026-08-17") while Schoology's are timezone-aware timestamps
+    # ("...T00:00:00Z"), and subtracting a naive datetime from an aware one
+    # raises TypeError instead of comparing. The window check below only
+    # ever looks at whole days apart, so a stripped, always-naive value
+    # compares consistently regardless of which source either side came from.
+    return parsed.replace(tzinfo=None)
 
 
 def _pair_key(a: str, b: str) -> tuple[str, str]:
@@ -86,6 +94,29 @@ def _looks_like_duplicate(a: dict[str, Any], b: dict[str, Any]) -> float | None:
     if due_a and due_b and abs((due_a - due_b).days) > _DUE_DATE_WINDOW_DAYS:
         return None
     return similarity
+
+
+def find_matching_assignment(candidate: dict[str, Any], existing: list[dict[str, Any]]) -> str | None:
+    """The id of whichever row in `existing` looks like the same real
+    assignment as `candidate` (same shape `_looks_like_duplicate` scores --
+    needs `course_id`/`title`/`due_date`), or `None` if nothing scores.
+    Picks the single best-scoring match rather than the first one that
+    clears the threshold, in case more than one existing row plausibly
+    matches (e.g. two similarly-named assignments a couple of days apart).
+
+    Used by `PowerSchoolProvider.sync()` so a PowerSchool-scraped assignment
+    that already exists in Atlas -- entered manually, or synced in from
+    Schoology, which owns assignment *creation*; PowerSchool only ever
+    supplies the grade (see `powerschool.py`'s module docstring) -- gets its
+    grade attached to that existing row instead of creating a second,
+    redundant one that then needs the manual "possible duplicates" merge UI
+    to clean up after the fact."""
+    best_id, best_score = None, 0.0
+    for row in existing:
+        score = _looks_like_duplicate(candidate, row)
+        if score is not None and score > best_score:
+            best_id, best_score = row["id"], score
+    return best_id
 
 
 def _fill_count(a: dict[str, Any]) -> int:

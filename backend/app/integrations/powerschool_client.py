@@ -421,13 +421,27 @@ def parse_assignments_html(html: str) -> list[PSAssignment]:
         if len(rows) < 2:
             continue
 
-        header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
+        # A header cell's own position among <th>/<td> tags isn't always the
+        # data row's real column position -- a real account's Angular-
+        # rendered gradebook (confirmed live) groups several flag columns
+        # (Missing/Late/Exempt/...) under one `colspan="7"` "Flags" header
+        # cell, while the data row itself still renders one <td> per flag.
+        # Naively counting header *tags* instead of the columns they
+        # actually span put every field after that colspan (Score, Grade)
+        # several positions earlier than its real data cell -- silently
+        # reading a flag cell as if it were the score, which parses as
+        # neither a fraction nor a percentage and comes back empty. Summing
+        # each header cell's own `colspan` (defaulting to 1, same as no
+        # colspan attribute at all) instead gives the real flattened column
+        # index a data row's <td>s actually line up with.
         col_index: dict[str, int] = {}
-        for field, keywords in _HEADER_KEYWORDS.items():
-            for i, cell in enumerate(header_cells):
-                if any(k in cell for k in keywords):
-                    col_index[field] = i
-                    break
+        flat_pos = 0
+        for header_cell in rows[0].find_all(["th", "td"]):
+            text = header_cell.get_text(strip=True).lower()
+            for field, keywords in _HEADER_KEYWORDS.items():
+                if field not in col_index and any(k in text for k in keywords):
+                    col_index[field] = flat_pos
+            flat_pos += int(header_cell.get("colspan", 1) or 1)
 
         for row in rows[1:]:
             cells = row.find_all("td")
@@ -460,6 +474,14 @@ def parse_assignments_html(html: str) -> list[PSAssignment]:
             status_text = score_text.lower()
             score, points = _parse_score(score_text)
             _, percentage = _parse_grade(cell("percentage", len(texts) - 1))
+            if percentage is None and score is not None and points:
+                # Not every layout has its own "%" column at all (a real
+                # account's Angular-rendered scoreTable shows a bare
+                # "Score" fraction and a letter/number "Grade" with no "%"
+                # sign anywhere) -- compute it from the fraction that's
+                # always right there rather than leaving the grades tab's
+                # percentage blank when the actual score parsed out fine.
+                percentage = round(score / points * 100, 2)
 
             assignments.append(PSAssignment(
                 name=name,

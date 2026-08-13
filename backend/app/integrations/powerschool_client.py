@@ -557,13 +557,27 @@ class PowerSchoolClient:
             # falling back to a generic scan of the row's links only when
             # that cell had none (e.g. no dated/grade-shaped cell at all).
             if term_href is not None:
-                detail_href = term_href
+                raw_href = term_href
             else:
                 links = row.find_all("a", href=True)
-                detail_href = next(
+                raw_href = next(
                     (l["href"] for l in links if re.search(r"scores|grade|assignment", l["href"], re.I)),
                     links[-1]["href"] if links else None,
                 )
+            # A real account's term-grade links are bare relative hrefs --
+            # "scores.html?frn=..." with no "/guardian/" prefix at all, since
+            # they're meant to be resolved relative to the page they're
+            # *on* (/guardian/home.html). This client's httpx AsyncClient
+            # has no notion of "the current page" though -- it always
+            # resolves a relative request path against the fixed base_url
+            # (the site root), not the last page fetched, so passing that
+            # bare href straight to `fetch_assignments` silently 404's on
+            # "<root>/scores.html" instead of "<root>/guardian/scores.html"
+            # and every assignment for that course goes unsynced. Resolving
+            # it here with a real urljoin (against the page it came from)
+            # keeps it correct whether the source href was relative (the
+            # common case) or already absolute.
+            detail_href = urljoin("/guardian/home.html", raw_href) if raw_href else None
 
             classes.append(PSClass(
                 ccid=ccid,

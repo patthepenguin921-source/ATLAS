@@ -811,6 +811,47 @@ def test_debug_home_page_reports_raw_rows():
     asyncio.run(run())
 
 
+def test_debug_assignments_page_reports_data_rows_and_links():
+    """Confirmed against a real account: a course's `scores.html?frn=...`
+    page can render only a course-summary table (Course/Teacher/Term/Final
+    Grade -- correctly not assignment-shaped, so `fetch_assignments` finds
+    nothing) whose "Final Grade" cell is itself the link to the real
+    per-assignment breakdown, rather than assignments ever appearing on
+    this page directly. The header row alone (what this diagnostic used to
+    report) doesn't show that link -- a sample data row and the page's
+    links do, which is what actually let that real case get diagnosed."""
+    html = """
+    <html><body>
+    <table class="linkDescList">
+      <tr class="center"><th>Course</th><th>Teacher</th><th>Term</th><th>Final Grade</th></tr>
+      <tr><td>AP Calculus AB</td><td>Ms. Rivera</td><td>Q1</td>
+          <td><a href="/guardian/scores.html?frn=99999&fg=Q1">97%</a></td></tr>
+    </table>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            result = await client.debug_assignments_page("/guardian/scores.html?frn=1&fg=Q1")
+            assert result["table_count"] == 1
+            table = result["tables"][0]
+            assert table["looks_like_assignments"] is False
+            assert "AP Calculus AB" in table["sample_data_row_html"]
+            links = {l["text"]: l["href"] for l in result["links"]}
+            assert links["97%"] == "/guardian/scores.html?frn=99999&fg=Q1"
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_probe_login_page_reports_form_found():
     async def run():
         transport = httpx.MockTransport(_handler_factory(valid_password="correct-horse"))

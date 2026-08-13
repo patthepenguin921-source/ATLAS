@@ -730,10 +730,28 @@ class PowerSchoolClient:
         scrapes): reports every table's shape (id/class/row count/header,
         and whether `_looks_like_assignment_table` would parse it) instead
         of parsed assignments, so a district's actual per-course markup can
-        be inspected without browser dev tools access."""
+        be inspected without browser dev tools access.
+
+        Also includes a sample *data* row (not just the header) per table
+        and every link/onclick on the page: a real account confirmed this
+        URL can render a course-summary table (Course/Teacher/Term/Final
+        Grade -- correctly not assignment-shaped) whose "Final Grade" cell
+        is itself the actual link to the per-assignment breakdown, rather
+        than the assignments ever appearing directly on this page. The
+        header row alone doesn't show that link; a data row (or an
+        onclick-driven JS popup target, which some PowerSchool skins use
+        instead of a plain href) does."""
         r = await self._client.get(detail_href)
         soup = BeautifulSoup(r.text, "html.parser")
         tables = soup.find_all("table")
+        links = [
+            {
+                "text": a.get_text(strip=True), "href": a.get("href"),
+                "onclick": a.get("onclick"),
+            }
+            for a in soup.find_all("a")
+            if a.get_text(strip=True) or a.get("href") or a.get("onclick")
+        ]
         return {
             "final_url": str(r.url),
             "status_code": r.status_code,
@@ -745,7 +763,11 @@ class PowerSchoolClient:
                     "row_count": len(t.find_all("tr")),
                     "looks_like_assignments": _looks_like_assignment_table(t),
                     "header_row_html": str(t.find("tr"))[:1500] if t.find("tr") else None,
+                    "sample_data_row_html": (
+                        str(t.find_all("tr")[1])[:1500] if len(t.find_all("tr")) > 1 else None
+                    ),
                 }
                 for t in tables[:12]
             ],
+            "links": links[:60],
         }

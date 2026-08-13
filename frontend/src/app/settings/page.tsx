@@ -386,7 +386,9 @@ interface DebugAssignmentsScrapeResult {
     row_count: number;
     looks_like_assignments: boolean;
     header_row_html: string | null;
+    sample_data_row_html: string | null;
   }[];
+  links: { text: string; href: string | null; onclick: string | null }[];
 }
 
 interface SchoologyMaterialItem {
@@ -1133,8 +1135,26 @@ function IntegrationsTab() {
                     {t.header_row_html}
                   </pre>
                 )}
+                {t.sample_data_row_html && (
+                  <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto mt-1">
+                    {t.sample_data_row_html}
+                  </pre>
+                )}
               </div>
             ))}
+            {assignmentsDebugResult.links.length > 0 && (
+              <div className="pt-1">
+                <div className="text-atlas-muted">
+                  Links on the page — the real assignment breakdown is often reached by clicking a
+                  grade cell's link (or a JS-driven popup) rather than appearing directly on this page:
+                </div>
+                <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto">
+                  {assignmentsDebugResult.links
+                    .map((l) => `${l.text || "(no text)"} -> ${l.href ?? l.onclick ?? "(no target)"}`)
+                    .join("\n")}
+                </pre>
+              </div>
+            )}
           </div>
         )}
 

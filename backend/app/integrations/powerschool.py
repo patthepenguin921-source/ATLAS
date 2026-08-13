@@ -23,6 +23,7 @@ from app.integrations.powerschool_client import (
     map_category,
     map_status,
 )
+from app.services import mistake_analysis
 
 
 def encrypt_credentials(username: str, password: str) -> str:
@@ -297,12 +298,23 @@ class PowerSchoolProvider(IntegrationProvider):
                     assignments_count += 1
 
                     if a.score is not None or a.percentage is not None:
-                        await self.upsert_grade(user_id, assignment_id, course_id, {
+                        grade = await self.upsert_grade(user_id, assignment_id, course_id, {
                             "score": a.score,
                             "points_possible": a.points_possible,
                             "percentage": a.percentage,
                         })
                         grades_count += 1
+                        if grade["changed"]:
+                            # Best-effort -- a mistake-tracking hiccup must
+                            # never sink the sync itself.
+                            try:
+                                await mistake_analysis.record_from_synced_grade(
+                                    user_id, assignment_id=assignment_id, course_id=course_id,
+                                    title=a.name, score=a.score,
+                                    points_possible=a.points_possible, percentage=a.percentage,
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
 
             return {
                 "courses": courses, "assignments": assignments_count,

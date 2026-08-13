@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 import { DailyPlanCard } from "@/components/DailyPlanCard";
@@ -632,6 +633,7 @@ function PracticeTab({ courses }: { courses: { id: string; name: string }[] }) {
 }
 
 function FlashcardsTab({ courses }: { courses: { id: string; name: string }[] }) {
+  const router = useRouter();
   const [courseId, setCourseId] = useState("");
   const [folders, setFolders] = useState<any[]>([]);
   const [folderId, setFolderId] = useState("");
@@ -818,7 +820,21 @@ function FlashcardsTab({ courses }: { courses: { id: string; name: string }[] })
             </button>
             <div className="flex items-center justify-between mt-2">
               <span className="text-xs text-atlas-muted">
-                {current.source_label ? `From: ${current.source_label}` : null}
+                {current.source_label ? (
+                  current.document_id ? (
+                    <button
+                      className="hover:text-atlas-accent hover:underline"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        router.push(`/documents/${current.document_id}`);
+                      }}
+                    >
+                      From: {current.source_label}
+                    </button>
+                  ) : (
+                    `From: ${current.source_label}`
+                  )
+                ) : null}
               </span>
               <span className="text-xs text-atlas-muted">{index + 1} / {deck.length}</span>
             </div>
@@ -869,7 +885,24 @@ function FlashcardsTab({ courses }: { courses: { id: string; name: string }[] })
                     <div className="text-sm font-medium truncate">{c.front}</div>
                     <div className="text-xs text-atlas-muted">
                       {courseName(c.course_id) ?? "General"}
-                      {c.source_label ? ` · ${c.source_label}` : ""}
+                      {c.source_label ? (
+                        c.document_id ? (
+                          <>
+                            {" · "}
+                            <button
+                              className="hover:text-atlas-accent hover:underline"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                router.push(`/documents/${c.document_id}`);
+                              }}
+                            >
+                              {c.source_label}
+                            </button>
+                          </>
+                        ) : (
+                          ` · ${c.source_label}`
+                        )
+                      ) : null}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">

@@ -44,13 +44,23 @@ class _FakeArchivist:
 
 
 class _FakeSupabase:
-    def __init__(self, preferences=None):
+    def __init__(self, preferences=None, documents=None, document_concepts=None):
         self.preferences = preferences if preferences is not None else {}
+        self.documents = documents or []
+        self.document_concepts = document_concepts or []
         self.inserts: list[dict] = []
 
     async def select(self, table, *, columns="*", filters=None, order=None, limit=None, single=False):
+        filters = filters or {}
         if table == "profiles":
             return [{"id": USER_ID, "preferences": self.preferences}]
+        if table == "documents":
+            aid = filters.get("assignment_id", "").removeprefix("eq.")
+            return [d for d in self.documents if d.get("assignment_id") == aid]
+        if table == "document_concepts":
+            raw = filters.get("document_id", "")
+            ids = raw[len("in.("):-1].split(",") if raw.startswith("in.") else [raw.removeprefix("eq.")]
+            return [c for c in self.document_concepts if c["document_id"] in ids]
         return []
 
     async def insert(self, table, rows, *, upsert=False, on_conflict=None):
@@ -63,8 +73,11 @@ class _FakeSettings:
         self.has_llm = has_llm
 
 
-def _install(monkeypatch, *, session=None, preferences=None, llm_results=None, score_calls=None, has_llm=True):
-    fake_db = _FakeSupabase(preferences=preferences)
+def _install(
+    monkeypatch, *, session=None, preferences=None, llm_results=None, score_calls=None,
+    has_llm=True, documents=None, document_concepts=None,
+):
+    fake_db = _FakeSupabase(preferences=preferences, documents=documents, document_concepts=document_concepts)
     monkeypatch.setattr(mistake_analysis, "supabase", fake_db)
     monkeypatch.setattr(mistake_analysis, "Archivist", _FakeArchivist)
     monkeypatch.setattr(mistake_analysis, "settings", _FakeSettings(has_llm))
@@ -197,3 +210,109 @@ def test_grade_submission_raises_value_error_when_session_has_no_questions(monke
     _install(monkeypatch, session=_session(questions=[]))
     with pytest.raises(ValueError):
         asyncio.run(mistake_analysis.grade_submission(USER_ID, SESSION_ID, []))
+
+
+# ---- record_from_synced_grade --------------------------------------------------------
+
+ASSIGNMENT_ID = str(uuid.uuid4())
+DOC_ID = str(uuid.uuid4())
+CONCEPT_ID = str(uuid.uuid4())
+
+
+def _with_linked_concept(monkeypatch, **install_kwargs):
+    fake_db, _, _ = _install(
+        monkeypatch,
+        documents=[{"id": DOC_ID, "assignment_id": ASSIGNMENT_ID}],
+        document_concepts=[{"document_id": DOC_ID, "concept_id": CONCEPT_ID}],
+        **install_kwargs,
+    )
+    return fake_db
+
+
+def test_synced_grade_updates_knowledge_model_even_above_mistake_threshold(monkeypatch):
+    fake_db = _with_linked_concept(monkeypatch)
+    observed = []
+
+    async def fake_observe_grade(user_id, concept_ids, percentage):
+        observed.append((concept_ids, percentage))
+
+    monkeypatch.setattr(mistake_analysis.knowledge_model, "observe_grade", fake_observe_grade)
+
+    asyncio.run(mistake_analysis.record_from_synced_grade(
+        USER_ID, assignment_id=ASSIGNMENT_ID, course_id=COURSE_ID, title="Quiz 4",
+        score=95, points_possible=100, percentage=None,
+    ))
+
+    assert observed == [([CONCEPT_ID], 95.0)]
+    assert not [i for i in fake_db.inserts if i["table"] == "mistakes"]
+
+
+def test_synced_grade_below_threshold_records_a_mistake(monkeypatch):
+    fake_db = _with_linked_concept(monkeypatch)
+
+    async def fake_observe_grade(user_id, concept_ids, percentage):
+        pass
+
+    monkeypatch.setattr(mistake_analysis.knowledge_model, "observe_grade", fake_observe_grade)
+
+    asyncio.run(mistake_analysis.record_from_synced_grade(
+        USER_ID, assignment_id=ASSIGNMENT_ID, course_id=COURSE_ID, title="Quiz 4",
+        score=40, points_possible=100, percentage=None,
+    ))
+
+    mistake_inserts = [i for i in fake_db.inserts if i["table"] == "mistakes"]
+    assert len(mistake_inserts) == 1
+    assert mistake_inserts[0]["rows"]["concept_id"] == CONCEPT_ID
+    assert mistake_inserts[0]["rows"]["mistake_type"] == "knowledge_gap"
+    assert 'Quiz 4' in mistake_inserts[0]["rows"]["description"]
+
+
+def test_synced_grade_respects_mistake_tracking_disabled(monkeypatch):
+    fake_db = _with_linked_concept(monkeypatch, preferences={"mistake_tracking_enabled": False})
+
+    async def fake_observe_grade(user_id, concept_ids, percentage):
+        pass
+
+    monkeypatch.setattr(mistake_analysis.knowledge_model, "observe_grade", fake_observe_grade)
+
+    asyncio.run(mistake_analysis.record_from_synced_grade(
+        USER_ID, assignment_id=ASSIGNMENT_ID, course_id=COURSE_ID, title="Quiz 4",
+        score=40, points_possible=100, percentage=None,
+    ))
+
+    assert not [i for i in fake_db.inserts if i["table"] == "mistakes"]
+
+
+def test_synced_grade_with_no_linked_documents_does_nothing(monkeypatch):
+    fake_db, _, _ = _install(monkeypatch, documents=[], document_concepts=[])
+    called = []
+
+    async def fake_observe_grade(user_id, concept_ids, percentage):
+        called.append(True)
+
+    monkeypatch.setattr(mistake_analysis.knowledge_model, "observe_grade", fake_observe_grade)
+
+    asyncio.run(mistake_analysis.record_from_synced_grade(
+        USER_ID, assignment_id=ASSIGNMENT_ID, course_id=COURSE_ID, title="Quiz 4",
+        score=40, points_possible=100, percentage=None,
+    ))
+
+    assert not called
+    assert not fake_db.inserts
+
+
+def test_synced_grade_computes_percentage_from_score_and_points(monkeypatch):
+    _with_linked_concept(monkeypatch)
+    observed = []
+
+    async def fake_observe_grade(user_id, concept_ids, percentage):
+        observed.append(percentage)
+
+    monkeypatch.setattr(mistake_analysis.knowledge_model, "observe_grade", fake_observe_grade)
+
+    asyncio.run(mistake_analysis.record_from_synced_grade(
+        USER_ID, assignment_id=ASSIGNMENT_ID, course_id=COURSE_ID, title="Quiz 4",
+        score=18, points_possible=20, percentage=None,
+    ))
+
+    assert observed == [90.0]

@@ -208,6 +208,17 @@ class FolderPatchRequest(BaseModel):
 
 
 # ---- Courses ----
+class WhatIfGradeRequest(BaseModel):
+    """One hypothetical scenario for app.services.what_if.simulate -- pass
+    at most one of the two shapes: an existing-assignment override, or a
+    new hypothetical assignment."""
+
+    override_assignment_id: Optional[str] = None
+    override_percentage: Optional[float] = None
+    hypothetical_percentage: Optional[float] = None
+    hypothetical_weight: Optional[float] = None
+
+
 class SplitSemestersRequest(BaseModel):
     """Split a course into two linked semester rows (S1 / S2)."""
 

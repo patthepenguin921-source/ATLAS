@@ -43,7 +43,7 @@ from app.schemas import (
     IngestTextRequest,
     MergeDocumentsRequest,
 )
-from app.services import document_dedupe, ingestion, storage_cleanup
+from app.services import document_dedupe, flashcards, ingestion, storage_cleanup
 from app.services.schedule_extraction import apply_schedule_from_doc, is_glance
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -274,6 +274,11 @@ async def _process_document(
         await Archivist().enrich_or_fallback(
             user_id, doc_id, text, rename_untitled=auto_title, fallback_title=title,
         )
+        # A small starter flashcard deck, automatically -- only for a
+        # document enrichment actually tagged with concepts (so an
+        # announcement/rubric doesn't get cards made from it), and only if
+        # none exist for it yet. See flashcards.maybe_auto_generate.
+        await flashcards.maybe_auto_generate(user_id, doc_id)
 
     # A document whose title/filename marks it as an "at a glance" schedule
     # (e.g. "Week at a Glance", "Unit 4 - At a Glance.pdf") -- or, failing

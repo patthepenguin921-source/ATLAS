@@ -117,8 +117,12 @@ async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str
     for a in rows:
         due = datetime.fromisoformat(a["due_date"].replace("Z", "+00:00")) if a.get("due_date") else soon
         days_left = max(0.25, (due - now).total_seconds() / 86400.0)
-        points = float(a.get("points_possible") or 10)
-        difficulty = float(a.get("difficulty") or 3)
+        # `or` would treat a legitimately-0-point/0-difficulty assignment
+        # (e.g. a completion-only item synced with points_possible=0) the
+        # same as an unset one -- explicit None checks, same pattern
+        # `weight` below already uses.
+        points = float(a["points_possible"]) if a.get("points_possible") is not None else 10.0
+        difficulty = float(a["difficulty"]) if a.get("difficulty") is not None else 3.0
         if a.get("weight") is not None:
             importance = float(a["weight"]) / ASSIGNMENT_WEIGHTS["minor"]
         else:
@@ -129,7 +133,11 @@ async def at_risk_assignments(user_id: str, *, limit: int = 10) -> list[dict[str
             "risk_score": round(risk, 2),
             "risk_level": _risk_level(risk, a["category"], a.get("weight"), a.get("risk_override")),
             "days_left": round(days_left, 1),
-            "overdue": a["status"] in ("missing", "late"),
+            # A status-based flag alone missed anything whose due_date has
+            # simply passed but hasn't (yet) been externally marked
+            # missing/late -- e.g. a manually-added assignment nothing ever
+            # syncs a status update for.
+            "overdue": a["status"] in ("missing", "late") or (bool(a.get("due_date")) and due < now),
         })
     scored.sort(key=lambda x: x["risk_score"], reverse=True)
     return scored[:limit]

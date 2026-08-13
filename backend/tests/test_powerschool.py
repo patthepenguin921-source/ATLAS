@@ -359,6 +359,46 @@ def test_login_success_and_scrape():
     asyncio.run(run())
 
 
+def test_fetch_assignments_status_words_only_match_the_score_cell_not_the_whole_row():
+    """Regression: is_missing/is_late/is_exempt used to substring-search the
+    whole row (every cell joined together), so an assignment NAME containing
+    one of these words as a substring falsely flagged it -- "Plate Tectonics
+    Quiz" contains "late", "Calculate the Area" contains "late", an
+    "Unexcused" comment would match "excused". These must only come from the
+    actual status shown in the score cell."""
+    html = """
+    <html><body>
+    <table id="assignmentsTable">
+      <tr><th>Due Date</th><th>Category</th><th>Assignment</th><th>Score</th><th>%</th></tr>
+      <tr><td>01/12/2026</td><td>Quiz</td><td>Plate Tectonics Quiz</td><td>9/10</td><td>90%</td></tr>
+      <tr><td>01/13/2026</td><td>Homework</td><td>Calculate the Area</td><td>10/10</td><td>100%</td></tr>
+      <tr><td>01/14/2026</td><td>Lab</td><td>Titration Lab</td><td>Late</td><td></td></tr>
+    </table>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", "student1", "correct-horse", transport=transport
+        )
+        try:
+            assignments = await client.fetch_assignments("/guardian/scores.html?frn=1")
+            by_name = {a.name: a for a in assignments}
+
+            assert by_name["Plate Tectonics Quiz"].is_late is False
+            assert by_name["Plate Tectonics Quiz"].score == 9.0
+            assert by_name["Calculate the Area"].is_late is False
+            assert by_name["Titration Lab"].is_late is True
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_fetch_classes_skips_not_available_placeholders():
     """Between school years/terms, PowerSchool lists requested-but-unscheduled
     courses as "Not Available" instead of a real section — these aren't

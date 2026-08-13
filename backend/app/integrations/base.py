@@ -76,15 +76,24 @@ class IntegrationProvider:
 
     async def upsert_grade(
         self, user_id: str, assignment_id: str, course_id: str | None, fields: dict[str, Any]
-    ) -> str:
-        """An assignment has one authoritative grade, so this keys on assignment_id."""
+    ) -> dict[str, Any]:
+        """An assignment has one authoritative grade, so this keys on assignment_id.
+
+        Returns ``{"id": ..., "changed": bool}`` -- ``changed`` is True for a
+        newly-synced grade or one whose score actually moved since the last
+        sync, False for an unchanged repeat. A provider runs twice a day, so
+        without this a caller reacting to "a new grade came in" (see
+        `app.services.mistake_analysis.record_from_synced_grade`) would
+        otherwise re-fire on every sync of a grade nothing changed about.
+        """
         existing = await supabase.select(
-            "grades", columns="id",
+            "grades", columns="id,score",
             filters={"user_id": eq(user_id), "assignment_id": eq(assignment_id)}, limit=1,
         )
         payload = {**fields, "user_id": user_id, "assignment_id": assignment_id, "course_id": course_id}
         if existing:
+            changed = existing[0].get("score") != fields.get("score")
             await supabase.update("grades", payload, filters={"id": eq(existing[0]["id"])})
-            return existing[0]["id"]
+            return {"id": existing[0]["id"], "changed": changed}
         created = await supabase.insert("grades", payload)
-        return created[0]["id"]
+        return {"id": created[0]["id"], "changed": True}

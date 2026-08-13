@@ -98,6 +98,39 @@ export default function CourseDetailPage() {
   const [newTerm, setNewTerm] = useState("");
   const [folders, setFolders] = useState<any[]>([]);
 
+  // Grade what-if calculator (see app.services.what_if) -- "what do I need
+  // on the final to get a B+." Entirely client-side scenario input; the
+  // actual projection math happens server-side against real grade data.
+  const [whatIfOpen, setWhatIfOpen] = useState(false);
+  const [whatIfMode, setWhatIfMode] = useState<"hypothetical" | "override">("hypothetical");
+  const [whatIfPct, setWhatIfPct] = useState("");
+  const [whatIfWeight, setWhatIfWeight] = useState("");
+  const [whatIfAssignmentId, setWhatIfAssignmentId] = useState("");
+  const [whatIfResult, setWhatIfResult] = useState<any>(null);
+  const [whatIfBusy, setWhatIfBusy] = useState(false);
+  const [whatIfError, setWhatIfError] = useState<string | null>(null);
+
+  async function calculateWhatIf() {
+    if (!whatIfPct.trim()) return;
+    setWhatIfBusy(true);
+    setWhatIfError(null);
+    setWhatIfResult(null);
+    try {
+      const body =
+        whatIfMode === "override"
+          ? { override_assignment_id: whatIfAssignmentId, override_percentage: Number(whatIfPct) }
+          : {
+              hypothetical_percentage: Number(whatIfPct),
+              hypothetical_weight: whatIfWeight ? Number(whatIfWeight) : undefined,
+            };
+      setWhatIfResult(await apiPost(`/courses/${id}/what-if`, body));
+    } catch (e: any) {
+      setWhatIfError(e.message);
+    } finally {
+      setWhatIfBusy(false);
+    }
+  }
+
   // Assignments: click-to-view/edit (item 12) + "Add assignment" (also 12).
   const [selectedAssignment, setSelectedAssignment] = useState<any | null>(null);
   const [assignEditing, setAssignEditing] = useState(false);
@@ -540,12 +573,104 @@ export default function CourseDetailPage() {
         </form>
       )}
 
-      <div className="grid grid-cols-2 gap-4 mb-8">
+      <div className="grid grid-cols-2 gap-4 mb-4">
         <Stat
           label="Current grade"
           value={course.current_grade != null ? `${course.current_grade}% ${course.current_letter ?? ""}` : "—"}
           tone={gradeTone(course.current_grade)}
         />
+      </div>
+
+      <div className="card mb-8">
+        <button
+          type="button"
+          className="w-full flex items-center justify-between text-left"
+          onClick={() => setWhatIfOpen((o) => !o)}
+        >
+          <span className="text-sm font-medium">What if…?</span>
+          <span className="text-xs text-atlas-muted">{whatIfOpen ? "Hide" : "Calculate a projected grade"}</span>
+        </button>
+        {whatIfOpen && (
+          <div className="mt-3 space-y-3">
+            <div className="flex gap-1.5">
+              <button
+                className={`pill ${whatIfMode === "hypothetical" ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+                onClick={() => setWhatIfMode("hypothetical")}
+              >
+                A new grade comes in
+              </button>
+              <button
+                className={`pill ${whatIfMode === "override" ? "border-atlas-accent/60 text-atlas-accent" : "text-atlas-muted"}`}
+                onClick={() => setWhatIfMode("override")}
+                disabled={!grades.length}
+                title={!grades.length ? "No existing grades to change" : undefined}
+              >
+                Change an existing grade
+              </button>
+            </div>
+            {whatIfMode === "override" && (
+              <select
+                className="input text-sm"
+                value={whatIfAssignmentId}
+                onChange={(e) => setWhatIfAssignmentId(e.target.value)}
+              >
+                <option value="">Select a grade…</option>
+                {grades.map((g) => (
+                  <option key={g.id} value={g.assignment_id ?? ""} disabled={!g.assignment_id}>
+                    {(assignments.find((a) => a.id === g.assignment_id)?.title) ?? "Untitled"} — currently{" "}
+                    {g.percentage != null ? `${g.percentage}%` : "no score"}
+                  </option>
+                ))}
+              </select>
+            )}
+            <div className="flex flex-wrap items-end gap-2">
+              <div>
+                <label className="label">{whatIfMode === "override" ? "New score" : "Score"} (%)</label>
+                <input
+                  className="input !w-24 text-sm"
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={whatIfPct}
+                  onChange={(e) => setWhatIfPct(e.target.value)}
+                />
+              </div>
+              {whatIfMode === "hypothetical" && (
+                <div>
+                  <label className="label">Weight (optional)</label>
+                  <input
+                    className="input !w-24 text-sm"
+                    type="number"
+                    step="0.1"
+                    placeholder="1"
+                    value={whatIfWeight}
+                    onChange={(e) => setWhatIfWeight(e.target.value)}
+                  />
+                </div>
+              )}
+              <button
+                className="btn-primary text-sm"
+                disabled={whatIfBusy || !whatIfPct.trim() || (whatIfMode === "override" && !whatIfAssignmentId)}
+                onClick={calculateWhatIf}
+              >
+                {whatIfBusy ? "Calculating…" : "Calculate"}
+              </button>
+            </div>
+            {whatIfError && <div className="text-sm text-atlas-bad">{whatIfError}</div>}
+            {whatIfResult && (
+              <div className="flex items-center gap-3 text-sm border-t border-atlas-border pt-3">
+                <span className="text-atlas-muted">
+                  {whatIfResult.current_grade != null ? `${whatIfResult.current_grade}%` : "—"} now
+                </span>
+                <span className="text-atlas-muted">→</span>
+                <span className={`font-medium ${gradeTone(whatIfResult.projected_grade) === "bad" ? "text-atlas-bad" : gradeTone(whatIfResult.projected_grade) === "good" ? "text-atlas-good" : ""}`}>
+                  {whatIfResult.projected_grade != null ? `${whatIfResult.projected_grade}%` : "—"}
+                  {whatIfResult.projected_letter ? ` (${whatIfResult.projected_letter})` : ""} projected
+                </span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="grid md:grid-cols-2 gap-6">

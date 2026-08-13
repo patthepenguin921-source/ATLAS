@@ -136,6 +136,46 @@ MATERIAL ("{label}"):
     return {"status": "done", "count": len(created or rows), "source_label": label, "cards": created or rows}
 
 
+# Small starter deck, not the full max_cards=15 default a student asks for
+# by hand -- this runs unattended on every newly-concept-tagged document, so
+# it stays modest; the student can always generate more from the Study page.
+_AUTO_GENERATE_MAX_CARDS = 8
+
+
+async def maybe_auto_generate(user_id: str, document_id: str) -> None:
+    """Generates a small starter flashcard deck for a document right after
+    it finishes indexing, if it looks like real study material and nothing
+    already exists for it -- called from `app.routers.documents`'
+    `_process_document`, right after AI enrichment. Previously a student had
+    to notice a new document and manually click "Generate flashcards" for
+    every single file; this does it automatically for anything worth it,
+    while leaving generation for an entire class/unit (which needs a scope
+    choice only the student can make) as the manual action it already was.
+
+    "Looks like real study material" is judged by whether the Archivist's
+    enrichment actually tagged this document with concepts (`document_concepts`)
+    -- an announcement, rubric, or personal note gets a summary but rarely a
+    concept, so this naturally skips generating cards from those. Best-
+    effort and silent on any failure or empty result: this must never affect
+    whether document processing itself succeeds."""
+    try:
+        existing = await supabase.select(
+            "flashcards", columns="id",
+            filters={"user_id": eq(user_id), "document_id": eq(document_id)}, limit=1,
+        )
+        if existing:
+            return
+        concepts = await supabase.select(
+            "document_concepts", columns="concept_id",
+            filters={"document_id": eq(document_id)}, limit=1,
+        )
+        if not concepts:
+            return
+        await generate(user_id, document_id=document_id, max_cards=_AUTO_GENERATE_MAX_CARDS)
+    except Exception:
+        pass
+
+
 async def review(user_id: str, flashcard_id: str, quality: int) -> dict[str, Any]:
     rows = await supabase.select(
         "flashcards", filters={"user_id": eq(user_id), "id": eq(flashcard_id)}, limit=1,

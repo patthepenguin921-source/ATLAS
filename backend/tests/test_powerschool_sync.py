@@ -92,7 +92,10 @@ class _FakeClient:
         return list(self._classes)
 
     async def fetch_assignments(self, href):
-        return list(self._assignments.get(href, []))
+        result = self._assignments.get(href, [])
+        if isinstance(result, BaseException):
+            raise result
+        return list(result)
 
     async def aclose(self):
         self.closed = True
@@ -279,6 +282,45 @@ def test_sync_prefers_a_manually_set_powerschool_url_over_the_scraped_detail_hre
     assert report["assignments"] == 1
     titles = {a["title"] for a in fake_db.tables["assignments"]}
     assert titles == {"Real Quiz"}
+
+
+def test_sync_falls_back_to_the_scraped_link_when_the_manual_override_is_stale(fake_db, monkeypatch):
+    """A `powerschool_url` override can itself go stale (e.g. it embeds a
+    session-scoped token from the browser session it was pasted from) even
+    while this sync's own freshly-scraped `detail_href` for the same course
+    still works fine. Regression: this used to drop every assignment for
+    the course, silently and forever, since the override always won and a
+    stale link raising `PowerSchoolAuthError` was treated the same as any
+    other unrecoverable per-course failure."""
+    from app.integrations.powerschool_client import PowerSchoolAuthError
+
+    existing_id = str(uuid.uuid4())
+    fake_db.tables["courses"].append({
+        "id": existing_id, "user_id": USER_ID, "name": "AP Calculus AB",
+        "external_source": "powerschool", "external_id": "8817372", "metadata": {},
+        "room": None, "period": None, "teacher_id": None,
+        "powerschool_url": "https://lexington1.powerschool.com/guardian/scores.html?frn=stale",
+    })
+
+    provider = PowerSchoolProvider()
+    report = _sync(provider, [
+        _cls("8817372", "AP Calculus AB", detail_href="/guardian/scores.html?frn=fresh"),
+    ], monkeypatch, assignments={
+        "https://lexington1.powerschool.com/guardian/scores.html?frn=stale": PowerSchoolAuthError(
+            "Got PowerSchool's sign-in page instead of the assignments page."
+        ),
+        "/guardian/scores.html?frn=fresh": [
+            PSAssignment(name="Real Quiz", category="Quiz", due_date="2026-08-20",
+                         score=9.0, points_possible=10.0, percentage=90.0),
+        ],
+    })
+
+    assert report["courses"] == 1
+    assert report["assignments"] == 1
+    titles = {a["title"] for a in fake_db.tables["assignments"]}
+    assert titles == {"Real Quiz"}
+    assert len(report["errors"]) == 1
+    assert "re-copied" in report["errors"][0]
 
 
 def test_sync_does_not_split_a_standalone_course_with_no_lab_counterpart(fake_db, monkeypatch):

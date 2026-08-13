@@ -213,7 +213,16 @@ async def _run_chunk(
                 "retried on the next sync."
             )
         result["skipped_items"] = result.get("skipped_items") or []
-        await _set_status(user_id, provider, "success", "")
+        # A "success" chunk can still carry real per-course/per-item failures
+        # in `errors` (see the providers' own per-course try/except blocks) --
+        # blanking `last_error` here regardless used to make those invisible
+        # everywhere except a manual "Sync now" click's one-off response: an
+        # automated cron sync could fail the exact same course every single
+        # run and the Integrations page would still show a clean, errorless
+        # "last synced" timestamp forever. Persisting them keeps `status`
+        # "success" (the sync itself did finish) while still surfacing what
+        # went wrong for whoever's connected.
+        await _set_status(user_id, provider, "success", "; ".join(result.get("errors") or []))
         return {"provider": provider, "status": "success", **result}
     except NotImplementedError as e:
         await _set_status(user_id, provider, "idle", str(e))

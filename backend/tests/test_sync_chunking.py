@@ -38,7 +38,7 @@ class _ChunkingProvider:
 def _install_fake_db(monkeypatch, *, initial_status: str, initial_config: dict[str, Any] | None = None):
     """A minimal in-memory stand-in for the integrations row, tracking just
     enough (`status`, `config`) for the claim/resume logic under test."""
-    state = {"status": initial_status, "config": initial_config or {}}
+    state = {"status": initial_status, "config": initial_config or {}, "last_error": ""}
     claim_calls: list[dict] = []
 
     async def _fake_update(table, patch, *, filters):
@@ -55,6 +55,8 @@ def _install_fake_db(monkeypatch, *, initial_status: str, initial_config: dict[s
             state["status"] = patch["status"]
         if "config" in patch:
             state["config"] = patch["config"]
+        if "last_error" in patch:
+            state["last_error"] = patch["last_error"]
         return [{"id": "row-1", **patch}]
 
     async def _fake_select(table, *, columns="*", filters=None, order=None, limit=None, single=False):
@@ -129,3 +131,29 @@ def test_run_sync_loops_chunks_internally_until_done(monkeypatch):
     assert provider.calls == 3  # two "continue" chunks, then the final one
     assert len(claim_calls) == 1  # claimed exactly once for the whole run, not per chunk
     assert state["status"] == "success"
+
+
+def test_a_successful_sync_still_persists_per_course_errors_to_last_error(monkeypatch):
+    """Regression: a provider can finish (status="success") while its own
+    `errors` list carries real per-course failures (e.g. one course's
+    assignments link bounced to a sign-in page) -- see the providers'
+    per-course try/except blocks in powerschool.py/schoology.py. Blanking
+    `last_error` to "" on every success used to make those invisible outside
+    a single manual "Sync now" click's one-off response: a cron sync could
+    fail the exact same course every run and the Integrations page would
+    still show a clean, errorless "last synced" timestamp forever."""
+    state, claim_calls = _install_fake_db(monkeypatch, initial_status="idle")
+    provider = _ChunkingProvider(
+        continues=0,
+        final={
+            "courses": 3, "assignments": 20, "grades": 15,
+            "errors": ["AP Calculus: got PowerSchool's sign-in page instead of the assignments page."],
+        },
+    )
+    monkeypatch.setattr(integrations_module, "PROVIDERS", {"schoology": provider})
+
+    result = asyncio.run(integrations_module.run_sync("schoology", USER_ID))
+
+    assert result["status"] == "success"  # the sync itself did finish
+    assert state["status"] == "success"
+    assert "AP Calculus" in state["last_error"]  # but the failure isn't silently dropped

@@ -399,6 +399,42 @@ def test_fetch_assignments_status_words_only_match_the_score_cell_not_the_whole_
     asyncio.run(run())
 
 
+def test_fetch_assignments_raises_when_bounced_to_login_page():
+    """Regression: a course's assignments URL -- whether the auto-scraped
+    `detail_href` or a manually-pasted `courses.powerschool_url` override --
+    can bounce to PowerSchool's own sign-in page instead of the real
+    scores.html content (e.g. a report link tied to a different browser
+    session than the one this client is authenticated as). That used to
+    parse as "0 tables found on the page", indistinguishable from a course
+    that genuinely has no assignments posted yet -- silently dropping every
+    assignment for that course, sync after sync, with no error surfaced
+    anywhere. It must raise instead of returning an empty list."""
+    login_page = """
+    <html><head><title>Parent Sign In</title></head><body>
+    <form action="/guardian/home.html" method="post" name="LoginForm" id="LoginForm">
+      <input type="text" name="account" />
+      <input type="password" name="pw" />
+    </form>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=login_page)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", session_cookie="sessionid=abc123", transport=transport
+        )
+        try:
+            with pytest.raises(PowerSchoolAuthError):
+                await client.fetch_assignments("/guardian/scores.html?frn=1")
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_fetch_classes_skips_not_available_placeholders():
     """Between school years/terms, PowerSchool lists requested-but-unscheduled
     courses as "Not Available" instead of a real section — these aren't

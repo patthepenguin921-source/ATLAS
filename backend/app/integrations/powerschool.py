@@ -318,11 +318,34 @@ class PowerSchoolProvider(IntegrationProvider):
                     "courses", columns="powerschool_url",
                     filters={"id": eq(course_id)}, limit=1,
                 )
-                assignments_url = (override[0].get("powerschool_url") if override else None) or cls.detail_href
+                override_url = (override[0].get("powerschool_url") if override else None) or None
+                assignments_url = override_url or cls.detail_href
                 if not assignments_url:
                     continue
                 try:
                     assignments = await client.fetch_assignments(assignments_url)
+                except PowerSchoolAuthError as e:
+                    # A manually-pasted override can itself go stale (see
+                    # fetch_assignments's docstring -- PowerSchool report
+                    # links can be tied to the browser session they were
+                    # copied from) even while this sync's own freshly-
+                    # scraped `cls.detail_href` for the same course is still
+                    # good. Fall back to it instead of dropping every
+                    # assignment for the course sync after sync until a
+                    # human happens to notice and re-paste the link.
+                    if override_url and cls.detail_href and cls.detail_href != override_url:
+                        try:
+                            assignments = await client.fetch_assignments(cls.detail_href)
+                            errors.append(
+                                f"{cls.name}: the manually-pasted PowerSchool link needs to be "
+                                f"re-copied ({e}) -- used the auto-detected link for this sync instead."
+                            )
+                        except Exception as e2:  # noqa: BLE001 — one course's markup shouldn't sink the sync
+                            errors.append(f"{cls.name}: {e2}")
+                            continue
+                    else:
+                        errors.append(f"{cls.name}: {e}")
+                        continue
                 except Exception as e:  # noqa: BLE001 — one course's markup shouldn't sink the sync
                     errors.append(f"{cls.name}: {e}")
                     continue

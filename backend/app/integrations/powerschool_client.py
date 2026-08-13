@@ -626,6 +626,26 @@ class PowerSchoolClient:
         r = await self._client.get(detail_href)
         soup = BeautifulSoup(r.text, "html.parser")
 
+        # A manually-pasted `courses.powerschool_url` override (or a stale
+        # scraped link) can bounce to the sign-in page instead of the real
+        # scores.html content -- PowerSchool's own report links sometimes
+        # embed a session- or request-scoped token (e.g. `frn=...`) that
+        # stops working outside the browser session it was copied from, even
+        # though the same account's `/guardian/home.html` session is still
+        # perfectly valid (which is why `verify_session()` alone doesn't
+        # catch this). Without this check that bounce silently parses as "0
+        # tables found" -- indistinguishable from a course that genuinely
+        # has no assignments posted yet -- and every assignment for that
+        # course goes unsynced, sync-after-sync, with no error anywhere.
+        if next((f for f in soup.find_all("form") if _is_login_form(f)), None) is not None:
+            raise PowerSchoolAuthError(
+                "Got PowerSchool's sign-in page instead of the assignments page. If "
+                "this course uses a manually-pasted PowerSchool assignments link, that "
+                "link may be tied to the browser session it was copied from and need to "
+                "be re-copied; otherwise your PowerSchool session may have expired -- "
+                "log in again and paste a fresh session cookie."
+            )
+
         # Real accounts (confirmed against Lexington1) render assignments as
         # one table *per grading category* (Homework, Test, Quiz, ...) on the
         # course's scores.html page, not a single flat table -- the old

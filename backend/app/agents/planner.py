@@ -74,7 +74,7 @@ unit), split it into several dated chunks (e.g. "Outline", "Draft body",
 "Revise + cite") spread across the days between now and its due date instead
 of leaving it as one task the night before.
 
-At-risk assignments (highest first): {[{'title': a['title'], 'risk': a['risk_score'], 'risk_level': a['risk_level'], 'days_left': a['days_left']} for a in risk]}
+At-risk assignments (highest first): {[{'id': a['id'], 'title': a['title'], 'risk': a['risk_score'], 'risk_level': a['risk_level'], 'days_left': a['days_left']} for a in risk]}
 
 Return JSON with this exact shape:
 {{
@@ -84,6 +84,8 @@ Return JSON with this exact shape:
     {{"date": "YYYY-MM-DD", "task": "...", "course": "...",
       "part": "e.g. 'Part 1 of 3' if this is a chunk of a bigger project, else null",
       "due_date": "YYYY-MM-DD of the assignment's real deadline, or null",
+      "assignment_id": "copy the matching \\"id\\" value verbatim from the at-risk list above if this
+        task IS that specific assignment (or one dated chunk of it), else null -- never invent one",
       "estimated_minutes": <int>, "why": "..."}}
   ],
   "motivational_note": "short encouraging line"

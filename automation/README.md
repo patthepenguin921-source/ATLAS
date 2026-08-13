@@ -21,10 +21,16 @@ twice a day — no n8n, no separate service to run:
    timezone support), so across the DST boundary this drifts to 6am/3pm
    Eastern until the entries are next adjusted by an hour — still the same
    twice-daily cadence, just shifted. Each sync runs for **every** user who
-   has that provider connected and enabled, not just one student. If exact
-   Eastern-time firing across DST matters, use the Cloud Run + Cloud
-   Scheduler path below instead — Cloud Scheduler supports real
-   `America/New_York` scheduling.
+   has that provider connected and enabled, not just one student. The same
+   `crons` block also hits `GET .../agents/cron/daily-plan` (10:00 UTC),
+   `GET .../agents/cron/weekly-review` (Sundays 22:00 UTC), and
+   `GET .../knowledge/cron/refresh-retention` (07:00 UTC) — see
+   `app.services.scheduled_intelligence`'s module docstring for why these
+   needed the same "run for every user" treatment the sync endpoints already
+   had, instead of only ever firing through the n8n blueprints below. If
+   exact Eastern-time firing across DST matters for any of these, use the
+   Cloud Run + Cloud Scheduler path below instead — Cloud Scheduler supports
+   real `America/New_York` scheduling.
 4. Check `GET /api/v1/integrations` (or the Integrations page) for
    `last_synced_at` / `last_error` to confirm it's running, for both
    providers.
@@ -52,17 +58,19 @@ If the backend runs on Cloud Run instead:
    CRON_SECRET=the-same-value-as-ATLAS_CRON_SECRET \
    ./automation/cloud-scheduler-setup.sh
    ```
-   This creates six jobs: the twice-daily Schoology sync and the
+   This creates nine jobs: the twice-daily Schoology sync and the
    twice-daily PowerSchool sync (each 7am/4pm America/New_York, real IANA
    timezone — no UTC math needed), a daily storage-cleanup sweep (9am)
    that finalizes document deletions — deleting a document in the app
    removes it immediately, but its R2 file itself is only queued for
    removal and stays recoverable for 24h (see `app.services.storage_cleanup`);
-   this job is what actually clears it out once that window passes — and a
-   15-minute document-processing safety-net sweep (see below). All six call
-   their endpoint with an `X-Cron-Secret` header — the same endpoints
-   accept either that header or Vercel's Bearer-token form, so no code
-   changes are needed either way.
+   this job is what actually clears it out once that window passes — a
+   15-minute document-processing safety-net sweep (see below); and the
+   daily plan (6am), weekly review (Sundays 6pm), and retention-decay
+   (3am) sweeps, each running for every user the same way the sync jobs
+   do. All nine call their endpoint with an `X-Cron-Secret` header — the
+   same endpoints accept either that header or Vercel's Bearer-token form,
+   so no code changes are needed either way.
 3. Once Cloud Run is live, the `crons` block in `vercel.json` becomes dead
    weight (nothing left on Vercel for it to call) — fine to leave or remove.
 4. Already ran this script before the storage-cleanup job existed? Re-run
@@ -129,12 +137,21 @@ button also failing, first suspect the backend itself is unreachable or
 erroring (check `GET /api/v1/integrations`-style reachability, or the
 button's error response) before assuming the ingestion code regressed.
 
-## n8n blueprints (for jobs with no native scheduler yet)
+## n8n blueprints (optional -- Vercel Cron / Cloud Scheduler now cover this natively)
 
-The daily plan, weekly review, and retention refresh don't have a Vercel Cron
-entry yet, so these importable [n8n](https://n8n.io) workflow blueprints
-still cover them (an `lms-sync.workflow.json` blueprint is kept here too, for
-setups not deployed on Vercel).
+The daily plan, weekly review, and retention refresh used to have no native
+scheduler entry at all -- these were the *only* way any of the three ever
+ran automatically. That's no longer true: `vercel.json`'s `crons` block and
+`cloud-scheduler-setup.sh` both now hit `agents/cron/daily-plan`,
+`agents/cron/weekly-review`, and `knowledge/cron/refresh-retention` directly
+(see the sections above), each running for every user the same way the
+PowerSchool/Schoology sync jobs already did. These importable
+[n8n](https://n8n.io) blueprints still work and remain here as an
+alternative for a deployment using neither scheduler (or for anyone who
+prefers managing schedules through n8n) -- just don't enable both a native
+cron entry and the matching n8n workflow for the same job, or it'll run
+twice. (`lms-sync.workflow.json` is kept for the same reason, covering a
+setup deployed on neither Vercel nor Cloud Run.)
 
 ## Setup
 

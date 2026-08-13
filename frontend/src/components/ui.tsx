@@ -374,7 +374,7 @@ export function Ring({
   return (
     <div
       className="relative rounded-full shrink-0"
-      style={{ width: size, height: size, background: `conic-gradient(${color} ${clamped * 3.6}deg, var(--ring-track, #252932) 0deg)` }}
+      style={{ width: size, height: size, background: `conic-gradient(${color} ${clamped * 3.6}deg, var(--ring-track, #1b1d25) 0deg)` }}
     >
       <div
         className="absolute rounded-full bg-atlas-panel grid place-items-center font-bold tabular-nums"

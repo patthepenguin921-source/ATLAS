@@ -49,6 +49,12 @@ type BulkResult = {
   error?: string;
 };
 
+// Stable identity for a duplicate pair regardless of which order the
+// backend's detector happens to compare the two documents in -- used to key
+// both the "which one to keep" choice and the busy-state map below. Mirrors
+// the assignments page's identical duplicate-review pattern.
+const pairKey = (a: string, b: string) => (a < b ? `${a}:${b}` : `${b}:${a}`);
+
 export default function DocumentsPage() {
   const router = useRouter();
   const [docs, setDocs] = useState<any[] | null>(null);
@@ -70,6 +76,12 @@ export default function DocumentsPage() {
   // list (the original behavior); otherwise a class id or "general" shows
   // that divider's own folder tree via FolderPane.
   const [divider, setDivider] = useState<string>("all");
+  // Possible-duplicate review (see app.services.document_dedupe) -- fetched
+  // separately from `load()` below so a hiccup in this endpoint can never
+  // block the document list itself from loading.
+  const [duplicates, setDuplicates] = useState<any[]>([]);
+  const [keepChoice, setKeepChoice] = useState<Record<string, string>>({});
+  const [dupBusy, setDupBusy] = useState<Record<string, boolean>>({});
 
   async function load() {
     try {
@@ -86,14 +98,51 @@ export default function DocumentsPage() {
       setLoadError(friendlyError(err));
     }
   }
+  async function loadDuplicates() {
+    try {
+      setDuplicates((await apiGet("/documents/possible-duplicates")) ?? []);
+    } catch {
+      // Non-critical: the review section just stays empty rather than
+      // taking the whole page down with it.
+      setDuplicates([]);
+    }
+  }
   useEffect(() => {
     load();
+    loadDuplicates();
     // Ping the backend so we can warn clearly if uploads will fail because the
     // API is unreachable (the usual cause of "Couldn't reach the server").
     fetch(`${API_BASE}/health`)
       .then((r) => setBackendDown(!r.ok))
       .catch(() => setBackendDown(true));
   }, []);
+
+  async function mergeDuplicate(candidate: any) {
+    const [a, b] = candidate.documents;
+    const key = pairKey(a.id, b.id);
+    const keepId = keepChoice[key] ?? candidate.suggested_keep_id;
+    const discardId = keepId === a.id ? b.id : a.id;
+    setDupBusy((s) => ({ ...s, [key]: true }));
+    try {
+      await apiPost("/documents/merge", { keep_id: keepId, discard_id: discardId });
+      setDuplicates((ds) => ds.filter((d) => pairKey(d.documents[0].id, d.documents[1].id) !== key));
+      load();
+    } finally {
+      setDupBusy((s) => ({ ...s, [key]: false }));
+    }
+  }
+
+  async function dismissDuplicate(candidate: any) {
+    const [a, b] = candidate.documents;
+    const key = pairKey(a.id, b.id);
+    setDupBusy((s) => ({ ...s, [key]: true }));
+    try {
+      await apiPost("/documents/dismiss-duplicate", { document_id_a: a.id, document_id_b: b.id });
+      setDuplicates((ds) => ds.filter((d) => pairKey(d.documents[0].id, d.documents[1].id) !== key));
+    } finally {
+      setDupBusy((s) => ({ ...s, [key]: false }));
+    }
+  }
 
   // Chunk/embed + AI enrichment happen in a separate request that's kicked
   // off right after upload (see `triggerProcessing` below), so a freshly
@@ -393,6 +442,68 @@ export default function DocumentsPage() {
           Anything it's not confident about gets flagged for a quick check.
         </p>
       </form>
+
+      {duplicates.length > 0 && (
+        <div className="card border-atlas-warn/40 mb-6 space-y-3">
+          <div>
+            <div className="text-sm font-medium text-atlas-warn">
+              Possible duplicate documents ({duplicates.length})
+            </div>
+            <div className="text-xs text-atlas-muted mt-0.5">
+              These look like the same file added twice — e.g. once from Drive, once uploaded by hand.
+              Pick which one to keep (its content, chunks, and flashcards absorb the other's), or tell us
+              they're actually different files.
+            </div>
+          </div>
+          {duplicates.map((d) => {
+            const [a, b] = d.documents;
+            const key = pairKey(a.id, b.id);
+            const keep = keepChoice[key] ?? d.suggested_keep_id;
+            const busy = !!dupBusy[key];
+            const keepTitle = (keep === a.id ? a : b).title;
+            return (
+              <div key={key} className="border border-atlas-border rounded-lg p-3 space-y-2">
+                <div className="grid sm:grid-cols-2 gap-2">
+                  {[a, b].map((x) => (
+                    <label
+                      key={x.id}
+                      className={`flex items-start gap-2 rounded-md border p-2 cursor-pointer text-sm ${
+                        keep === x.id ? "border-atlas-accent" : "border-atlas-border"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        className="mt-1"
+                        checked={keep === x.id}
+                        onChange={() => setKeepChoice((k) => ({ ...k, [key]: x.id }))}
+                      />
+                      <div className="min-w-0">
+                        <div className="font-medium truncate">{x.title}</div>
+                        <div className="text-xs text-atlas-muted">
+                          {courseName(x.course_id)} · {DOC_TYPE_LABEL[x.doc_type] ?? x.doc_type ?? "—"}
+                          {x.ingested ? " · indexed" : " · processing…"}
+                        </div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    className="btn-primary text-xs py-1.5"
+                    disabled={busy}
+                    onClick={() => mergeDuplicate(d)}
+                  >
+                    {busy ? "Merging…" : `Keep "${keepTitle}", merge the other in`}
+                  </button>
+                  <button className="btn-ghost text-xs py-1.5" disabled={busy} onClick={() => dismissDuplicate(d)}>
+                    Not the same document
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {!docs && !loadError && <SkeletonList rows={3} />}
       {loadError && !docs && (

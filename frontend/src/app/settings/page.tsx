@@ -13,6 +13,7 @@ interface Profile {
   grade_level?: string | null;
   gpa_goal?: number | null;
   timezone?: string | null;
+  preferences?: { mistake_tracking_enabled?: boolean } & Record<string, any>;
 }
 
 interface Fact {
@@ -23,7 +24,7 @@ interface Fact {
   updated_at: string;
 }
 
-const TABS = ["Account", "Integrations", "Memory"] as const;
+const TABS = ["Account", "Integrations", "Learning", "Memory"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function SettingsPage() {
@@ -63,7 +64,10 @@ function SettingsPageInner() {
           </button>
         ))}
       </div>
-      {tab === "Account" ? <AccountTab /> : tab === "Integrations" ? <IntegrationsTab /> : <MemoryTab />}
+      {tab === "Account" ? <AccountTab />
+        : tab === "Integrations" ? <IntegrationsTab />
+        : tab === "Learning" ? <LearningTab />
+        : <MemoryTab />}
     </AppShell>
   );
 }
@@ -165,6 +169,67 @@ function AccountTab() {
           </button>
           {saved && <span className="text-xs text-atlas-good">Saved</span>}
         </div>
+      </div>
+    </Section>
+  );
+}
+
+function LearningTab() {
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  function load() {
+    apiGet<Profile>("/profile").then(setProfile).catch((e: any) => setLoadError(e.message));
+  }
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function setMistakeTracking(enabled: boolean) {
+    if (!profile) return;
+    const preferences = { ...profile.preferences, mistake_tracking_enabled: enabled };
+    setProfile({ ...profile, preferences });
+    try {
+      await apiPatch<Profile>("/profile", { preferences });
+    } catch {
+      load(); // revert the optimistic update on failure
+    }
+  }
+
+  if (loadError && !profile) {
+    return (
+      <div className="card border-atlas-bad/40 text-sm">
+        <div className="font-medium text-atlas-bad">Couldn't load your profile</div>
+        <div className="text-atlas-muted mt-1">{loadError}</div>
+        <button className="btn-ghost text-xs mt-2" onClick={load}>Retry</button>
+      </div>
+    );
+  }
+  if (!profile) return <SkeletonList rows={1} />;
+
+  const trackingEnabled = profile.preferences?.mistake_tracking_enabled !== false;
+
+  return (
+    <Section title="Mistake tracking">
+      <div className="card max-w-2xl space-y-3">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={trackingEnabled}
+            onChange={(e) => setMistakeTracking(e.target.checked)}
+          />
+          <div>
+            <div className="text-sm font-medium">Automatically track quiz mistakes</div>
+            <div className="text-xs text-atlas-muted mt-0.5">
+              When you submit a generated practice quiz or test for grading (Study → Practice), Atlas
+              records what you got wrong -- and why (conceptual, careless, procedural, or a knowledge
+              gap) -- and uses it to adjust when concepts come back up for review. Turn this off if you'd
+              rather Atlas only grade the quiz without keeping a record. You can review and resolve
+              recorded mistakes from each class's page.
+            </div>
+          </div>
+        </label>
       </div>
     </Section>
   );

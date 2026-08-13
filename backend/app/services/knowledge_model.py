@@ -101,7 +101,14 @@ async def review(
 
 async def observe_grade(user_id: str, concept_ids: list[str], percentage: float) -> None:
     """Translate a graded outcome into a review signal for its concepts."""
-    quality = max(0, min(5, round(percentage / 20)))  # 100% -> 5, 60% -> 3
+    # Python's round() is round-half-to-even, not round-half-up -- percentage/20
+    # lands exactly on a .5 boundary for every multiple of 10 (10/30/50/70/90),
+    # and round-to-even collapsed 70% and 90% to the identical quality=4 (both
+    # "round to the nearest even integer" from 3.5/4.5), silently losing the
+    # difference between two meaningfully different scores. floor(x + 0.5) is
+    # the standard round-half-up trick and matches this function's own comment
+    # ("100% -> 5, 60% -> 3") unambiguously.
+    quality = max(0, min(5, math.floor(percentage / 20 + 0.5)))  # 100% -> 5, 60% -> 3
     for cid in concept_ids:
         await review(user_id, cid, quality)
 

@@ -225,7 +225,7 @@ export default function DashboardPage() {
                       <button
                         key={a.id}
                         className="w-full text-left text-sm px-2 py-1.5 rounded-lg hover:bg-atlas-panel2 truncate flex items-center gap-1.5"
-                        onClick={() => router.push("/assignments")}
+                        onClick={() => router.push(`/assignments?id=${a.id}`)}
                       >
                         <Icon name="assignment" className="w-3.5 h-3.5 text-atlas-muted shrink-0" />
                         {a.title} <span className="text-xs text-atlas-muted">· {courseName(a.course_id)}</span>
@@ -286,7 +286,7 @@ export default function DashboardPage() {
                 <div className="space-y-2">
                   {data.priorities_today.map((a: any) => (
                     <button key={a.id}
-                      onClick={() => router.push("/assignments")}
+                      onClick={() => router.push(`/assignments?id=${a.id}`)}
                       className="card card-hover w-full text-left flex items-center justify-between">
                       <div>
                         <div className="text-sm font-medium">{a.title}</div>
@@ -310,7 +310,7 @@ export default function DashboardPage() {
                 <div className="space-y-2">
                   {data.at_risk.map((a: any) => (
                     <button key={a.id}
-                      onClick={() => router.push("/assignments")}
+                      onClick={() => router.push(`/assignments?id=${a.id}`)}
                       className="card card-hover w-full text-left flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-sm font-medium truncate">{a.title}</div>

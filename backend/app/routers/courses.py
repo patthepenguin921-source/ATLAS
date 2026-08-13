@@ -11,7 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import CurrentUser, get_current_user
 from app.core.supabase_client import eq, supabase
-from app.schemas import SplitSemestersRequest
+from app.schemas import SplitSemestersRequest, WhatIfGradeRequest
+from app.services import what_if
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -37,6 +38,25 @@ async def course_semesters(course_id: str, user: CurrentUser = Depends(get_curre
         order="semester.asc",
     ) or []
     return linked
+
+
+@router.post("/{course_id}/what-if")
+async def what_if_grade(
+    course_id: str, body: WhatIfGradeRequest, user: CurrentUser = Depends(get_current_user)
+):
+    """"What do I need on the final to get a B+" -- recomputes this course's
+    weighted grade under a hypothetical scenario without changing anything.
+    See app.services.what_if.simulate."""
+    try:
+        return await what_if.simulate(
+            user.id, course_id,
+            override_assignment_id=body.override_assignment_id,
+            override_percentage=body.override_percentage,
+            hypothetical_percentage=body.hypothetical_percentage,
+            hypothetical_weight=body.hypothetical_weight,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("/{course_id}/split-semesters")

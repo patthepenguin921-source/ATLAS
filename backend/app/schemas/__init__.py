@@ -131,6 +131,15 @@ class FlashcardReviewRequest(BaseModel):
     quality: int = Field(ge=0, le=5)
 
 
+# ---- Practice ----
+class SubmitPracticeRequest(BaseModel):
+    """Submitted answers for a generated quiz/test -- see
+    app.services.mistake_analysis.grade_submission. Index-aligned with the
+    practice session's own `questions`; a null entry means left blank."""
+
+    answers: list[Optional[str]]
+
+
 # ---- Search ----
 class SearchRequest(BaseModel):
     query: str
@@ -199,6 +208,17 @@ class FolderPatchRequest(BaseModel):
 
 
 # ---- Courses ----
+class WhatIfGradeRequest(BaseModel):
+    """One hypothetical scenario for app.services.what_if.simulate -- pass
+    at most one of the two shapes: an existing-assignment override, or a
+    new hypothetical assignment."""
+
+    override_assignment_id: Optional[str] = None
+    override_percentage: Optional[float] = None
+    hypothetical_percentage: Optional[float] = None
+    hypothetical_weight: Optional[float] = None
+
+
 class SplitSemestersRequest(BaseModel):
     """Split a course into two linked semester rows (S1 / S2)."""
 
@@ -219,6 +239,19 @@ class MergeAssignmentsRequest(BaseModel):
 class DismissDuplicateAssignmentsRequest(BaseModel):
     assignment_id_a: str
     assignment_id_b: str
+
+
+# ---- Documents ----
+class MergeDocumentsRequest(BaseModel):
+    """Merge one document into another -- see app.services.document_dedupe."""
+
+    keep_id: str
+    discard_id: str
+
+
+class DismissDuplicateDocumentsRequest(BaseModel):
+    document_id_a: str
+    document_id_b: str
 
 
 # ---- Drive import ----

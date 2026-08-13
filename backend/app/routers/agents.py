@@ -4,19 +4,19 @@ from __future__ import annotations
 from datetime import date as date_cls
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.agents import chat_scope, get_agent, tools
 from app.agents.memory_keeper import MemoryKeeper
 from app.agents.registry import Analyst, Coach, Planner, Tutor
 from app.agents.summarizer import get_summary, maybe_update_summary
-from app.core.security import CurrentUser, get_current_user
+from app.core.security import CurrentUser, check_cron_secret, get_current_user
 from app.core.supabase_client import eq, supabase
 from app.schemas import (ActionConfirmRequest, AnalyzeRequest, ChatRequest, ExplainRequest,
                          MessageFeedbackRequest, PlanRequest, QuizRequest, RegenerateRequest,
                          ReviewRequest)
 from app.services import practice as practice_service
-from app.services import schedule
+from app.services import schedule, scheduled_intelligence
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -279,6 +279,28 @@ async def analyze(body: AnalyzeRequest, user: CurrentUser = Depends(get_current_
 @router.post("/coach/weekly-review")
 async def weekly_review(body: ReviewRequest, user: CurrentUser = Depends(get_current_user)):
     return await Coach().weekly_review(user.id, body.week_start)
+
+
+# Automated triggers for schedulers (Vercel Cron, Cloud Scheduler, n8n, …) --
+# run for every user, since a scheduler has no logged-in session to scope a
+# request to the way the endpoints above do. Secured by ATLAS_CRON_SECRET
+# instead of a user session; see `check_cron_secret` and
+# `app.services.scheduled_intelligence`'s module docstring for why these
+# exist (n8n was previously the *only* way either ever ran on a schedule).
+# GET: Vercel Cron Jobs always invoke via GET. POST: kept for n8n/curl/other
+# schedulers that prefer it -- both do the same thing.
+@router.get("/cron/daily-plan")
+@router.post("/cron/daily-plan")
+async def cron_daily_plan(request: Request):
+    check_cron_secret(request)
+    return await scheduled_intelligence.run_daily_plans_for_all()
+
+
+@router.get("/cron/weekly-review")
+@router.post("/cron/weekly-review")
+async def cron_weekly_review(request: Request):
+    check_cron_secret(request)
+    return await scheduled_intelligence.run_weekly_reviews_for_all()
 
 
 @router.get("/conversations")

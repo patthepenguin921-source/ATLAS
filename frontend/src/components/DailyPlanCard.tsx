@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { formatCalendarDate } from "@/lib/date";
 
 export function dayLabel(dateStr: string, planDate: string): string {
@@ -35,6 +36,7 @@ export function DailyPlanCard({
   onRegenerate?: () => void;
   regenerating?: boolean;
 }) {
+  const router = useRouter();
   if (!plan) return null;
   return (
     <div className="card">
@@ -61,7 +63,13 @@ export function DailyPlanCard({
             </div>
             <div className="space-y-2">
               {tasks.map((t: any, i: number) => (
-                <div key={i} className="flex items-start justify-between gap-3 text-sm">
+                <div
+                  key={i}
+                  className={`flex items-start justify-between gap-3 text-sm rounded-lg -mx-2 px-2 py-1 ${
+                    t.assignment_id ? "cursor-pointer hover:bg-atlas-panel2" : ""
+                  }`}
+                  onClick={t.assignment_id ? () => router.push(`/assignments?id=${t.assignment_id}`) : undefined}
+                >
                   <div className="min-w-0">
                     <span>{t.task}</span>
                     {t.part && <span className="text-atlas-muted"> · {t.part}</span>}

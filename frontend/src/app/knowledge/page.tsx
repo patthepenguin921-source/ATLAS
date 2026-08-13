@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 import { DailyPlanCard } from "@/components/DailyPlanCard";
@@ -194,6 +195,14 @@ function PracticeTab({ courses }: { courses: { id: string; name: string }[] }) {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<Set<number>>(new Set());
+  // Answers for the freshly-generated quiz above, and the grading result
+  // once submitted (see POST /practice/{id}/submit -- app.services.mistake_analysis).
+  // Grading records wrong answers as mistakes and updates the concept
+  // knowledge model, which plain "reveal answer" never did.
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [grading, setGrading] = useState(false);
+  const [graded, setGraded] = useState<any>(null);
+  const [gradeError, setGradeError] = useState<string | null>(null);
 
   const [history, setHistory] = useState<any[] | null>(null);
   const [viewingPast, setViewingPast] = useState<any | null>(null);
@@ -251,6 +260,9 @@ function PracticeTab({ courses }: { courses: { id: string; name: string }[] }) {
     setError(null);
     setResult(null);
     setRevealed(new Set());
+    setAnswers({});
+    setGraded(null);
+    setGradeError(null);
     try {
       const r = await apiPost("/agents/tutor/quiz", {
         topic: topic.trim(),
@@ -276,6 +288,22 @@ function PracticeTab({ courses }: { courses: { id: string; name: string }[] }) {
       else next.add(i);
       return next;
     });
+  }
+
+  async function submitForGrading() {
+    if (!result?.practice_session_id) return;
+    setGrading(true);
+    setGradeError(null);
+    try {
+      const answerList = result.questions.map((_: any, i: number) => answers[i] ?? null);
+      const r = await apiPost(`/practice/${result.practice_session_id}/submit`, { answers: answerList });
+      setGraded(r);
+      loadHistory();
+    } catch (e: any) {
+      setGradeError(e.message);
+    } finally {
+      setGrading(false);
+    }
   }
 
   async function explain() {
@@ -394,27 +422,95 @@ function PracticeTab({ courses }: { courses: { id: string; name: string }[] }) {
                 From the internet -- not grounded in your own materials.
               </div>
             )}
-            {result.questions.map((q: any, i: number) => (
-              <div key={i} className="card">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="text-sm font-medium">{i + 1}. {q.q}</div>
-                  {q.concept && <Badge tone="accent">{q.concept}</Badge>}
-                </div>
-                {q.choices?.length > 0 && (
-                  <ul className="text-sm text-atlas-muted mt-2 space-y-1 list-disc list-inside">
-                    {q.choices.map((c: string, ci: number) => <li key={ci}>{c}</li>)}
-                  </ul>
-                )}
-                {revealed.has(i) ? (
-                  <div className="mt-2 text-sm border-t border-atlas-border pt-2">
-                    <div><span className="text-atlas-good font-medium">Answer:</span> {q.answer}</div>
-                    {q.explanation && <div className="text-atlas-muted mt-1">{q.explanation}</div>}
+            {result.questions.map((q: any, i: number) => {
+              const graded_i = graded?.results?.find((r: any) => r.i === i);
+              return (
+                <div key={i} className="card">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="text-sm font-medium">{i + 1}. {q.q}</div>
+                    {q.concept && <Badge tone="accent">{q.concept}</Badge>}
                   </div>
-                ) : (
-                  <button className="btn-ghost text-xs mt-2" onClick={() => toggleReveal(i)}>Reveal answer</button>
-                )}
+
+                  {!graded && q.type === "multiple_choice" && q.choices?.length > 0 ? (
+                    <div className="text-sm mt-2 space-y-1">
+                      {q.choices.map((c: string, ci: number) => (
+                        <label key={ci} className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name={`q-${i}`}
+                            checked={answers[i] === c}
+                            onChange={() => setAnswers((a) => ({ ...a, [i]: c }))}
+                          />
+                          {c}
+                        </label>
+                      ))}
+                    </div>
+                  ) : !graded ? (
+                    <input
+                      className="input mt-2"
+                      placeholder="Your answer…"
+                      value={answers[i] ?? ""}
+                      onChange={(e) => setAnswers((a) => ({ ...a, [i]: e.target.value }))}
+                    />
+                  ) : q.choices?.length > 0 ? (
+                    <ul className="text-sm text-atlas-muted mt-2 space-y-1 list-disc list-inside">
+                      {q.choices.map((c: string, ci: number) => <li key={ci}>{c}</li>)}
+                    </ul>
+                  ) : null}
+
+                  {graded_i ? (
+                    <div className="mt-2 text-sm border-t border-atlas-border pt-2">
+                      <div className="flex items-center gap-2">
+                        <Badge tone={graded_i.correct ? "good" : "bad"}>
+                          {graded_i.correct ? "Correct" : "Incorrect"}
+                        </Badge>
+                        {graded_i.mistake_type && <Badge tone="warn">{graded_i.mistake_type}</Badge>}
+                      </div>
+                      {graded_i.your_answer && (
+                        <div className="text-atlas-muted mt-1">You answered: {graded_i.your_answer}</div>
+                      )}
+                      {!graded_i.correct && (
+                        <div><span className="text-atlas-good font-medium">Answer:</span> {q.answer}</div>
+                      )}
+                      {(graded_i.correction || q.explanation) && (
+                        <div className="text-atlas-muted mt-1">{graded_i.correction || q.explanation}</div>
+                      )}
+                    </div>
+                  ) : revealed.has(i) ? (
+                    <div className="mt-2 text-sm border-t border-atlas-border pt-2">
+                      <div><span className="text-atlas-good font-medium">Answer:</span> {q.answer}</div>
+                      {q.explanation && <div className="text-atlas-muted mt-1">{q.explanation}</div>}
+                    </div>
+                  ) : (
+                    <button className="btn-ghost text-xs mt-2" onClick={() => toggleReveal(i)}>Reveal answer</button>
+                  )}
+                </div>
+              );
+            })}
+            {!graded && (
+              <div className="flex items-center gap-3">
+                <button
+                  className="btn-primary text-sm"
+                  onClick={submitForGrading}
+                  disabled={grading || !result.practice_session_id}
+                  title={!result.practice_session_id ? "This quiz wasn't saved, so it can't be graded" : undefined}
+                >
+                  {grading ? "Grading…" : "Submit for grading"}
+                </button>
+                <span className="text-xs text-atlas-muted">
+                  Grading records what you got wrong so Atlas can review it with you later.
+                </span>
               </div>
-            ))}
+            )}
+            {gradeError && <div className="text-sm text-atlas-bad">{gradeError}</div>}
+            {graded && (
+              <div className="card border-atlas-accent/40 flex items-center justify-between">
+                <span className="text-sm font-medium">Score: {graded.score}%</span>
+                <Badge tone={graded.score >= 80 ? "good" : graded.score >= 60 ? "warn" : "bad"}>
+                  {graded.results.filter((r: any) => r.correct).length}/{graded.results.length} correct
+                </Badge>
+              </div>
+            )}
           </div>
         )}
       </Section>
@@ -537,6 +633,7 @@ function PracticeTab({ courses }: { courses: { id: string; name: string }[] }) {
 }
 
 function FlashcardsTab({ courses }: { courses: { id: string; name: string }[] }) {
+  const router = useRouter();
   const [courseId, setCourseId] = useState("");
   const [folders, setFolders] = useState<any[]>([]);
   const [folderId, setFolderId] = useState("");
@@ -723,7 +820,21 @@ function FlashcardsTab({ courses }: { courses: { id: string; name: string }[] })
             </button>
             <div className="flex items-center justify-between mt-2">
               <span className="text-xs text-atlas-muted">
-                {current.source_label ? `From: ${current.source_label}` : null}
+                {current.source_label ? (
+                  current.document_id ? (
+                    <button
+                      className="hover:text-atlas-accent hover:underline"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        router.push(`/documents/${current.document_id}`);
+                      }}
+                    >
+                      From: {current.source_label}
+                    </button>
+                  ) : (
+                    `From: ${current.source_label}`
+                  )
+                ) : null}
               </span>
               <span className="text-xs text-atlas-muted">{index + 1} / {deck.length}</span>
             </div>
@@ -774,7 +885,24 @@ function FlashcardsTab({ courses }: { courses: { id: string; name: string }[] })
                     <div className="text-sm font-medium truncate">{c.front}</div>
                     <div className="text-xs text-atlas-muted">
                       {courseName(c.course_id) ?? "General"}
-                      {c.source_label ? ` · ${c.source_label}` : ""}
+                      {c.source_label ? (
+                        c.document_id ? (
+                          <>
+                            {" · "}
+                            <button
+                              className="hover:text-atlas-accent hover:underline"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                router.push(`/documents/${c.document_id}`);
+                              }}
+                            >
+                              {c.source_label}
+                            </button>
+                          </>
+                        ) : (
+                          ` · ${c.source_label}`
+                        )
+                      ) : null}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">

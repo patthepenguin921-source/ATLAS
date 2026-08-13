@@ -195,3 +195,52 @@ def test_graded_and_excused_assignments_are_never_at_risk(monkeypatch):
     result = asyncio.run(analytics.at_risk_assignments(USER_ID))
 
     assert result == []
+
+
+def test_overdue_flag_true_for_a_past_due_date_even_without_a_missing_status(monkeypatch):
+    """A status-only check missed anything past its due_date that nothing's
+    (yet) externally flagged missing/late -- e.g. a manually-added
+    assignment nothing syncs a status update for."""
+    now = datetime.now(timezone.utc)
+    rows = [
+        _assignment(title="Quietly overdue", status="not_started",
+                    due_date=(now - timedelta(days=2)).isoformat()),
+    ]
+    _install(monkeypatch, rows)
+
+    result = asyncio.run(analytics.at_risk_assignments(USER_ID))
+
+    assert result[0]["overdue"] is True
+
+
+def test_overdue_flag_false_for_a_future_due_date_and_ok_status(monkeypatch):
+    now = datetime.now(timezone.utc)
+    rows = [
+        _assignment(title="Not due yet", status="not_started",
+                    due_date=(now + timedelta(days=3)).isoformat()),
+    ]
+    _install(monkeypatch, rows)
+
+    result = asyncio.run(analytics.at_risk_assignments(USER_ID))
+
+    assert result[0]["overdue"] is False
+
+
+def test_zero_points_possible_is_not_treated_as_unset(monkeypatch):
+    """`0 or 10` previously evaluated to 10 -- a legitimately 0-point,
+    completion-only assignment must score as worth 0 points, not 10."""
+    now = datetime.now(timezone.utc)
+    due = (now + timedelta(days=3)).isoformat()
+    rows = [
+        _assignment(title="Completion only", status="not_started", due_date=due,
+                    points_possible=0, difficulty=3),
+        _assignment(title="Ten points", status="not_started", due_date=due,
+                    points_possible=10, difficulty=3),
+    ]
+    _install(monkeypatch, rows)
+
+    result = asyncio.run(analytics.at_risk_assignments(USER_ID))
+    by_title = {r["title"]: r for r in result}
+
+    assert by_title["Completion only"]["risk_score"] == 0.0
+    assert by_title["Ten points"]["risk_score"] > 0.0

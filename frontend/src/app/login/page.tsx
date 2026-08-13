@@ -47,7 +47,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="flex items-center justify-center gap-2.5">
-            <LogoMark className="w-8 h-8 text-atlas-accent" bg="#16181d" />
+            <LogoMark className="w-8 h-8 text-atlas-accent" bg="#0a0b0e" />
             <span className="text-3xl font-semibold tracking-tight">Atlas</span>
           </div>
           <p className="text-atlas-muted text-sm mt-1">Your academic operating system</p>

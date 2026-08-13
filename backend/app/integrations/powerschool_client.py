@@ -587,7 +587,6 @@ class PowerSchoolClient:
             if not cells:
                 continue
             texts = [c.get_text(strip=True) for c in cells]
-            row_text = " ".join(texts).lower()
 
             def cell(field: str, default_idx: int) -> str:
                 idx = col_index.get(field, default_idx)
@@ -596,7 +595,17 @@ class PowerSchoolClient:
             name = cell("name", min(2, len(texts) - 1))
             if not name:
                 continue
-            score, points = _parse_score(cell("score", min(3, len(texts) - 1)))
+            score_text = cell("score", min(3, len(texts) - 1))
+            # PowerSchool shows "Missing"/"Late"/"Exempt"/"Excused" as the
+            # score cell's own content in place of a numeric score -- check
+            # only that cell, not every column joined together. The whole-
+            # row text this used to check also includes the assignment's own
+            # name, and an unanchored substring search there false-positives
+            # on any name that happens to contain one of these words, e.g.
+            # "Plate Tectonics Quiz" contains "late", "Calculate the Area"
+            # contains "late", "Unexcused" would (wrongly) match "excused".
+            status_text = score_text.lower()
+            score, points = _parse_score(score_text)
             _, percentage = _parse_grade(cell("percentage", len(texts) - 1))
 
             assignments.append(PSAssignment(
@@ -604,8 +613,8 @@ class PowerSchoolClient:
                 category=cell("category", 1),
                 due_date=_parse_date(cell("due_date", 0)),
                 score=score, points_possible=points, percentage=percentage,
-                is_missing="missing" in row_text,
-                is_late="late" in row_text,
-                is_exempt=("exempt" in row_text or "excused" in row_text),
+                is_missing=bool(re.search(r"\bmissing\b", status_text)),
+                is_late=bool(re.search(r"\blate\b", status_text)),
+                is_exempt=bool(re.search(r"\bexempt\b", status_text)) or bool(re.search(r"\bexcused\b", status_text)),
             ))
         return assignments

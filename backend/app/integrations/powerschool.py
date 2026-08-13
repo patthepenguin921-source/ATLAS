@@ -14,7 +14,11 @@ from app.core.crypto import decrypt_json, encrypt_json
 from app.core.supabase_client import eq, supabase
 from app.integrations import course_mapping
 from app.integrations.base import IntegrationProvider
-from app.integrations.powerschool_browser import BrowserLoginError, login_and_get_cookie_header
+from app.integrations.powerschool_browser import (
+    BrowserLoginError,
+    RenderedAssignmentsFetcher,
+    login_and_get_cookie_header,
+)
 from app.integrations.powerschool_client import (
     PSClass,
     PowerSchoolAuthError,
@@ -22,6 +26,8 @@ from app.integrations.powerschool_client import (
     UnsupportedLoginFlow,
     map_category,
     map_status,
+    parse_assignments_html,
+    summarize_assignments_html,
 )
 from app.services import mistake_analysis
 
@@ -247,11 +253,30 @@ class PowerSchoolProvider(IntegrationProvider):
                 cls = next((c for c in classes if c.detail_href), classes[0])
             if not cls.detail_href:
                 raise RuntimeError(f"{cls.name} has no assignments detail link to scrape.")
-            return {
+            result = {
                 "course": cls.name,
                 "detail_href": cls.detail_href,
                 **await client.debug_assignments_page(cls.detail_href),
             }
+            # Also report what a real headless browser sees rendering the
+            # exact same URL: some PowerSchool skins (confirmed against a
+            # real Lexington1 account) fill the Assignments grid in via
+            # client-side JS well after the initial page load -- the two
+            # plain-HTTP snapshots above can be identical to each other and
+            # still miss it entirely. Not attempted on serverless (Vercel) --
+            # no Chromium binary/execution budget there.
+            if not settings.is_serverless:
+                browser_fetcher = RenderedAssignmentsFetcher(client.base_url, client.cookie_header())
+                try:
+                    rendered_html = await browser_fetcher.fetch_rendered_html(cls.detail_href)
+                    result["browser_rendered"] = summarize_assignments_html(
+                        rendered_html, final_url=cls.detail_href, status_code=200,
+                    )
+                except Exception as e:  # noqa: BLE001 — diagnostic-only, must not crash the debug tool
+                    result["browser_rendered_error"] = str(e)
+                finally:
+                    await browser_fetcher.aclose()
+            return result
         finally:
             await client.aclose()
 
@@ -261,6 +286,7 @@ class PowerSchoolProvider(IntegrationProvider):
         # been needed the way it is for Schoology's per-course materials
         # walk; see SchoologyProvider.sync.
         client = await self._authenticated_client(user_id)
+        browser_fetcher: RenderedAssignmentsFetcher | None = None
         try:
             classes = await client.fetch_classes()
             courses = assignments_count = grades_count = excluded = 0
@@ -350,6 +376,32 @@ class PowerSchoolProvider(IntegrationProvider):
                     errors.append(f"{cls.name}: {e}")
                     continue
 
+                if not assignments and not settings.is_serverless:
+                    # Some PowerSchool skins (confirmed against a real
+                    # Lexington1 account) fill the Assignments grid in via
+                    # client-side JS well after the initial page load -- a
+                    # plain GET's response never contains it at all, so a
+                    # course with real, scored assignments can still come
+                    # back empty here. Fall back to a real headless browser
+                    # to render the exact same URL and try again; lazily
+                    # started (and reused across courses) since spinning up
+                    # Chromium per course would otherwise pay that cost even
+                    # for courses that genuinely have nothing posted yet.
+                    # Not attempted on serverless (Vercel) -- no Chromium
+                    # binary/execution budget there, same gate the CAS-login
+                    # browser fallback already uses.
+                    try:
+                        if browser_fetcher is None:
+                            browser_fetcher = RenderedAssignmentsFetcher(
+                                client.base_url, client.cookie_header(),
+                            )
+                        rendered_html = await browser_fetcher.fetch_rendered_html(assignments_url)
+                        rendered_assignments = parse_assignments_html(rendered_html)
+                        if rendered_assignments:
+                            assignments = rendered_assignments
+                    except Exception as e:  # noqa: BLE001 — one course's markup shouldn't sink the sync
+                        errors.append(f"{cls.name}: browser-rendered assignments fetch failed: {e}")
+
                 for a in assignments:
                     # PowerSchool assignment rows don't expose a stable id via
                     # scraping, so the composite key keeps repeat syncs idempotent.
@@ -388,4 +440,6 @@ class PowerSchoolProvider(IntegrationProvider):
                 "grades": grades_count, "excluded": excluded, "errors": errors,
             }
         finally:
+            if browser_fetcher is not None:
+                await browser_fetcher.aclose()
             await client.aclose()

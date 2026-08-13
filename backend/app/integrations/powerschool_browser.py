@@ -18,6 +18,8 @@ attempt.
 """
 from __future__ import annotations
 
+from urllib.parse import urljoin, urlsplit
+
 from playwright.async_api import async_playwright
 
 from app.integrations.powerschool_client import PowerSchoolAuthError, _LOGIN_PATHS
@@ -30,6 +32,75 @@ _MOBILE_SAFARI_UA = (
 
 class BrowserLoginError(PowerSchoolAuthError):
     pass
+
+
+def _cookie_header_to_playwright_cookies(cookie_header: str, base_url: str) -> list[dict]:
+    domain = urlsplit(base_url).hostname
+    cookies = []
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        cookies.append({"name": name.strip(), "value": value.strip(), "domain": domain, "path": "/"})
+    return cookies
+
+
+class RenderedAssignmentsFetcher:
+    """A reusable headless-browser session for rendering however many
+    courses' assignments pages a single `PowerSchoolProvider.sync()` run
+    needs, instead of paying Playwright's launch cost (a real Chromium
+    process) again for every course that needs it -- some PowerSchool
+    skins (confirmed against a real Lexington1 account) fill the
+    Assignments grid in via client-side JS after the initial page load, so
+    a plain HTTP GET's response never contains it, immediately or after any
+    delay. `_authenticated_client`'s already-verified session cookie is
+    handed straight to the browser context instead of logging in again."""
+
+    def __init__(
+        self, base_url: str, cookie_header: str, *, executable_path: str | None = None,
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._cookie_header = cookie_header
+        self._executable_path = executable_path
+        self._playwright = None
+        self._browser = None
+        self._context = None
+
+    async def _ensure_context(self):
+        if self._context is not None:
+            return
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(
+            executable_path=self._executable_path,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        self._context = await self._browser.new_context(user_agent=_MOBILE_SAFARI_UA)
+        await self._context.add_cookies(
+            _cookie_header_to_playwright_cookies(self._cookie_header, self._base_url)
+        )
+
+    async def fetch_rendered_html(self, url: str) -> str:
+        """Navigates to `url` (relative hrefs are resolved the same way
+        `PowerSchoolClient.fetch_classes` resolves them -- against
+        `/guardian/home.html`, the page they're normally clicked from) and
+        waits for the network to go idle before returning the fully-rendered
+        HTML, so any assignments grid that loads via a background XHR/fetch
+        after the initial page load has had a chance to actually appear."""
+        await self._ensure_context()
+        full_url = url if url.startswith("http") else urljoin(f"{self._base_url}/guardian/home.html", url)
+        page = await self._context.new_page()
+        try:
+            await page.goto(full_url, wait_until="networkidle", timeout=30000)
+            return await page.content()
+        finally:
+            await page.close()
+
+    async def aclose(self) -> None:
+        if self._browser is not None:
+            await self._browser.close()
+        if self._playwright is not None:
+            await self._playwright.stop()
 
 
 async def login_and_get_cookie_header(

@@ -399,6 +399,13 @@ interface DebugAssignmentsScrapeResult {
   immediate: DebugAssignmentsPageSnapshot;
   delayed: DebugAssignmentsPageSnapshot;
   changed_after_delay: boolean;
+  // What a real headless browser sees rendering the same URL -- some
+  // PowerSchool skins fill the Assignments grid in via client-side JS that
+  // never appears in either plain-HTTP fetch above. Omitted entirely on
+  // serverless hosting (no Chromium available there); browser_rendered_error
+  // instead of browser_rendered if the render itself failed.
+  browser_rendered?: DebugAssignmentsPageSnapshot;
+  browser_rendered_error?: string;
 }
 
 interface SchoologyMaterialItem {
@@ -1135,6 +1142,9 @@ function IntegrationsTab() {
               [
                 ["Immediate fetch", assignmentsDebugResult.immediate],
                 ["Delayed fetch (+4s)", assignmentsDebugResult.delayed],
+                ...(assignmentsDebugResult.browser_rendered
+                  ? ([["Real browser render", assignmentsDebugResult.browser_rendered]] as const)
+                  : []),
               ] as const
             ).map(([label, snapshot]) => (
               <div key={label} className="pt-2 border-t border-atlas-border">
@@ -1183,6 +1193,11 @@ function IntegrationsTab() {
                 )}
               </div>
             ))}
+            {assignmentsDebugResult.browser_rendered_error && (
+              <div className="pt-2 border-t border-atlas-border text-atlas-bad">
+                Real browser render failed: {assignmentsDebugResult.browser_rendered_error}
+              </div>
+            )}
           </div>
         )}
 

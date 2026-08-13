@@ -383,6 +383,136 @@ def map_status(a: PSAssignment) -> str:
     return "not_started"
 
 
+def parse_assignments_html(html: str) -> list[PSAssignment]:
+    """The actual assignments-table parsing, factored out of
+    `PowerSchoolClient.fetch_assignments` so it can run against HTML from
+    *either* source: a plain HTTP GET's response text, or a real headless
+    browser's fully-rendered `page.content()` (see
+    `powerschool_browser.render_assignments_html`) -- some PowerSchool
+    skins (confirmed against a real Lexington1 account) fill the Assignments
+    grid in via client-side JS after the initial page load, so a plain GET's
+    response never contains it at all, immediately or after any delay."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Real accounts (confirmed against Lexington1) render assignments as
+    # one table *per grading category* (Homework, Test, Quiz, ...) on the
+    # course's scores.html page, not a single flat table -- the old
+    # "id/class contains 'assignment', else just the single largest
+    # table" selection only ever picked one of those tables, so every
+    # other category's assignments silently never made it into a sync.
+    # Score every table by whether its header row looks assignment-shaped
+    # and parse all of them, not just one.
+    all_tables = soup.find_all("table")
+    tables = [t for t in all_tables if _looks_like_assignment_table(t)]
+    if not tables:
+        # Header wording varies across PowerSchool versions -- fall back
+        # to any table whose *data* rows (not header) look grade-shaped,
+        # rather than blindly picking the largest table on the page.
+        # That blind fallback used to scrape a real account's unrelated
+        # "Quick Links"/forms widget as if it were the assignments table
+        # whenever it happened to be the only/largest table present --
+        # e.g. early in a term before any real assignments are posted
+        # yet, which is exactly when this fallback path is reached.
+        tables = [t for t in all_tables if _table_has_grade_shaped_data(t)]
+
+    assignments: list[PSAssignment] = []
+    for table in tables:
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+
+        header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
+        col_index: dict[str, int] = {}
+        for field, keywords in _HEADER_KEYWORDS.items():
+            for i, cell in enumerate(header_cells):
+                if any(k in cell for k in keywords):
+                    col_index[field] = i
+                    break
+
+        for row in rows[1:]:
+            cells = row.find_all("td")
+            if not cells:
+                continue
+            # A category table's trailing "Category Total: 92%"-style
+            # summary row is a single wide (colspan'd) cell, not a real
+            # assignment -- skip it rather than importing its summary
+            # text as a fake assignment name.
+            if len(cells) == 1 and cells[0].has_attr("colspan"):
+                continue
+            texts = [c.get_text(strip=True) for c in cells]
+
+            def cell(field: str, default_idx: int) -> str:
+                idx = col_index.get(field, default_idx)
+                return texts[idx] if 0 <= idx < len(texts) else ""
+
+            name = cell("name", min(2, len(texts) - 1))
+            if not name:
+                continue
+            score_text = cell("score", min(3, len(texts) - 1))
+            # PowerSchool shows "Missing"/"Late"/"Exempt"/"Excused" as the
+            # score cell's own content in place of a numeric score -- check
+            # only that cell, not every column joined together. The whole-
+            # row text this used to check also includes the assignment's own
+            # name, and an unanchored substring search there false-positives
+            # on any name that happens to contain one of these words, e.g.
+            # "Plate Tectonics Quiz" contains "late", "Calculate the Area"
+            # contains "late", "Unexcused" would (wrongly) match "excused".
+            status_text = score_text.lower()
+            score, points = _parse_score(score_text)
+            _, percentage = _parse_grade(cell("percentage", len(texts) - 1))
+
+            assignments.append(PSAssignment(
+                name=name,
+                category=cell("category", 1),
+                due_date=_parse_date(cell("due_date", 0)),
+                score=score, points_possible=points, percentage=percentage,
+                is_missing=bool(re.search(r"\bmissing\b", status_text)),
+                is_late=bool(re.search(r"\blate\b", status_text)),
+                is_exempt=bool(re.search(r"\bexempt\b", status_text)) or bool(re.search(r"\bexcused\b", status_text)),
+            ))
+    return assignments
+
+
+def summarize_assignments_html(html: str, *, final_url: str, status_code: int) -> dict:
+    """The reporting half of the assignments-page diagnostic: every table's
+    shape (id/class/row count/header + a sample data row, and whether
+    `_looks_like_assignment_table` would parse it) and every link/onclick on
+    the page, in the same shape regardless of whether `html` came from a
+    plain HTTP GET or a real headless browser's rendered `page.content()` --
+    shared so `debug_scrape_assignments` can report a browser-rendered
+    snapshot in an identical shape to the two plain-HTTP ones it already
+    reports (see `PowerSchoolClient.debug_assignments_page`)."""
+    soup = BeautifulSoup(html, "html.parser")
+    tables = soup.find_all("table")
+    links = [
+        {
+            "text": a.get_text(strip=True), "href": a.get("href"),
+            "onclick": a.get("onclick"),
+        }
+        for a in soup.find_all("a")
+        if a.get_text(strip=True) or a.get("href") or a.get("onclick")
+    ]
+    return {
+        "final_url": final_url,
+        "status_code": status_code,
+        "table_count": len(tables),
+        "tables": [
+            {
+                "id": t.get("id"),
+                "class": " ".join(t.get("class") or []),
+                "row_count": len(t.find_all("tr")),
+                "looks_like_assignments": _looks_like_assignment_table(t),
+                "header_row_html": str(t.find("tr"))[:1500] if t.find("tr") else None,
+                "sample_data_row_html": (
+                    str(t.find_all("tr")[1])[:1500] if len(t.find_all("tr")) > 1 else None
+                ),
+            }
+            for t in tables[:12]
+        ],
+        "links": links[:60],
+    }
+
+
 class PowerSchoolClient:
     def __init__(
         self, base_url: str, username: str = "", password: str = "",
@@ -391,6 +521,7 @@ class PowerSchoolClient:
         self._base = base_url.rstrip("/")
         self._user = username
         self._pw = password
+        self._session_cookie = session_cookie
         headers = {"User-Agent": "Mozilla/5.0 (compatible; AtlasAcademicAssistant/1.0)"}
         if session_cookie:
             # Districts that gate PowerSchool behind SSO (Google/Microsoft/Clever)
@@ -647,117 +778,43 @@ class PowerSchoolClient:
                 "log in again and paste a fresh session cookie."
             )
 
-        # Real accounts (confirmed against Lexington1) render assignments as
-        # one table *per grading category* (Homework, Test, Quiz, ...) on the
-        # course's scores.html page, not a single flat table -- the old
-        # "id/class contains 'assignment', else just the single largest
-        # table" selection only ever picked one of those tables, so every
-        # other category's assignments silently never made it into a sync.
-        # Score every table by whether its header row looks assignment-shaped
-        # and parse all of them, not just one.
-        all_tables = soup.find_all("table")
-        tables = [t for t in all_tables if _looks_like_assignment_table(t)]
-        if not tables:
-            # Header wording varies across PowerSchool versions -- fall back
-            # to any table whose *data* rows (not header) look grade-shaped,
-            # rather than blindly picking the largest table on the page.
-            # That blind fallback used to scrape a real account's unrelated
-            # "Quick Links"/forms widget as if it were the assignments table
-            # whenever it happened to be the only/largest table present --
-            # e.g. early in a term before any real assignments are posted
-            # yet, which is exactly when this fallback path is reached.
-            tables = [t for t in all_tables if _table_has_grade_shaped_data(t)]
+        return parse_assignments_html(r.text)
 
-        assignments: list[PSAssignment] = []
-        for table in tables:
-            rows = table.find_all("tr")
-            if len(rows) < 2:
-                continue
+    def cookie_header(self) -> str:
+        """The client's current cookies (whether pasted in as `session_cookie`
+        or accumulated by a successful `login()`) as a `Cookie:`-header-shaped
+        string, so a caller can hand this exact session off to a real headless
+        browser (see `powerschool_browser.RenderedAssignmentsFetcher`) instead
+        of logging in a second time.
 
-            header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
-            col_index: dict[str, int] = {}
-            for field, keywords in _HEADER_KEYWORDS.items():
-                for i, cell in enumerate(header_cells):
-                    if any(k in cell for k in keywords):
-                        col_index[field] = i
-                        break
+        A pasted `session_cookie` is set as a raw header on this client's
+        `httpx.AsyncClient` (see `__init__`), never into its cookie jar --
+        `self._client.cookies` would come back empty for that auth mode even
+        though every request this client makes is, in fact, authenticated.
+        Cookies accumulated by a successful password `login()` (the other
+        auth mode) land in that jar the normal httpx way instead, so both
+        sources are merged here; the jar wins on a name collision since it
+        reflects whatever the server most recently actually set."""
+        cookies: dict[str, str] = {}
+        if self._session_cookie:
+            for part in self._session_cookie.split(";"):
+                part = part.strip()
+                if "=" in part:
+                    name, value = part.split("=", 1)
+                    cookies[name.strip()] = value.strip()
+        for c in self._client.cookies.jar:
+            cookies[c.name] = c.value
+        return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
-            for row in rows[1:]:
-                cells = row.find_all("td")
-                if not cells:
-                    continue
-                # A category table's trailing "Category Total: 92%"-style
-                # summary row is a single wide (colspan'd) cell, not a real
-                # assignment -- skip it rather than importing its summary
-                # text as a fake assignment name.
-                if len(cells) == 1 and cells[0].has_attr("colspan"):
-                    continue
-                texts = [c.get_text(strip=True) for c in cells]
-
-                def cell(field: str, default_idx: int) -> str:
-                    idx = col_index.get(field, default_idx)
-                    return texts[idx] if 0 <= idx < len(texts) else ""
-
-                name = cell("name", min(2, len(texts) - 1))
-                if not name:
-                    continue
-                score_text = cell("score", min(3, len(texts) - 1))
-                # PowerSchool shows "Missing"/"Late"/"Exempt"/"Excused" as the
-                # score cell's own content in place of a numeric score -- check
-                # only that cell, not every column joined together. The whole-
-                # row text this used to check also includes the assignment's own
-                # name, and an unanchored substring search there false-positives
-                # on any name that happens to contain one of these words, e.g.
-                # "Plate Tectonics Quiz" contains "late", "Calculate the Area"
-                # contains "late", "Unexcused" would (wrongly) match "excused".
-                status_text = score_text.lower()
-                score, points = _parse_score(score_text)
-                _, percentage = _parse_grade(cell("percentage", len(texts) - 1))
-
-                assignments.append(PSAssignment(
-                    name=name,
-                    category=cell("category", 1),
-                    due_date=_parse_date(cell("due_date", 0)),
-                    score=score, points_possible=points, percentage=percentage,
-                    is_missing=bool(re.search(r"\bmissing\b", status_text)),
-                    is_late=bool(re.search(r"\blate\b", status_text)),
-                    is_exempt=bool(re.search(r"\bexempt\b", status_text)) or bool(re.search(r"\bexcused\b", status_text)),
-                ))
-        return assignments
+    @property
+    def base_url(self) -> str:
+        return self._base
 
     async def _snapshot_assignments_page(self, detail_href: str) -> dict:
         """One fetch-and-summarize pass over the assignments detail page,
         shared by `debug_assignments_page`'s immediate and delayed fetches."""
         r = await self._client.get(detail_href)
-        soup = BeautifulSoup(r.text, "html.parser")
-        tables = soup.find_all("table")
-        links = [
-            {
-                "text": a.get_text(strip=True), "href": a.get("href"),
-                "onclick": a.get("onclick"),
-            }
-            for a in soup.find_all("a")
-            if a.get_text(strip=True) or a.get("href") or a.get("onclick")
-        ]
-        return {
-            "final_url": str(r.url),
-            "status_code": r.status_code,
-            "table_count": len(tables),
-            "tables": [
-                {
-                    "id": t.get("id"),
-                    "class": " ".join(t.get("class") or []),
-                    "row_count": len(t.find_all("tr")),
-                    "looks_like_assignments": _looks_like_assignment_table(t),
-                    "header_row_html": str(t.find("tr"))[:1500] if t.find("tr") else None,
-                    "sample_data_row_html": (
-                        str(t.find_all("tr")[1])[:1500] if len(t.find_all("tr")) > 1 else None
-                    ),
-                }
-                for t in tables[:12]
-            ],
-            "links": links[:60],
-        }
+        return summarize_assignments_html(r.text, final_url=str(r.url), status_code=r.status_code)
 
     async def debug_assignments_page(self, detail_href: str, *, delay_seconds: float = 4.0) -> dict:
         """Diagnostic twin of `debug_home_page` for a course's assignments

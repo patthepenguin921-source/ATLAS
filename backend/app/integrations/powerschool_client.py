@@ -16,6 +16,7 @@ but may need tuning against a real district's PowerSchool instance.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -724,23 +725,9 @@ class PowerSchoolClient:
                 ))
         return assignments
 
-    async def debug_assignments_page(self, detail_href: str) -> dict:
-        """Diagnostic twin of `debug_home_page` for a course's assignments
-        detail page (the `scores.html?...&frn=...` page `fetch_assignments`
-        scrapes): reports every table's shape (id/class/row count/header,
-        and whether `_looks_like_assignment_table` would parse it) instead
-        of parsed assignments, so a district's actual per-course markup can
-        be inspected without browser dev tools access.
-
-        Also includes a sample *data* row (not just the header) per table
-        and every link/onclick on the page: a real account confirmed this
-        URL can render a course-summary table (Course/Teacher/Term/Final
-        Grade -- correctly not assignment-shaped) whose "Final Grade" cell
-        is itself the actual link to the per-assignment breakdown, rather
-        than the assignments ever appearing directly on this page. The
-        header row alone doesn't show that link; a data row (or an
-        onclick-driven JS popup target, which some PowerSchool skins use
-        instead of a plain href) does."""
+    async def _snapshot_assignments_page(self, detail_href: str) -> dict:
+        """One fetch-and-summarize pass over the assignments detail page,
+        shared by `debug_assignments_page`'s immediate and delayed fetches."""
         r = await self._client.get(detail_href)
         soup = BeautifulSoup(r.text, "html.parser")
         tables = soup.find_all("table")
@@ -770,4 +757,44 @@ class PowerSchoolClient:
                 for t in tables[:12]
             ],
             "links": links[:60],
+        }
+
+    async def debug_assignments_page(self, detail_href: str, *, delay_seconds: float = 4.0) -> dict:
+        """Diagnostic twin of `debug_home_page` for a course's assignments
+        detail page (the `scores.html?...&frn=...` page `fetch_assignments`
+        scrapes): reports every table's shape (id/class/row count/header,
+        and whether `_looks_like_assignment_table` would parse it) instead
+        of parsed assignments, so a district's actual per-course markup can
+        be inspected without browser dev tools access.
+
+        Also includes a sample *data* row (not just the header) per table
+        and every link/onclick on the page: a real account confirmed this
+        URL can render a course-summary table (Course/Teacher/Term/Final
+        Grade -- correctly not assignment-shaped) whose "Final Grade" cell
+        is itself the actual link to the per-assignment breakdown, rather
+        than the assignments ever appearing directly on this page. The
+        header row alone doesn't show that link; a data row (or an
+        onclick-driven JS popup target, which some PowerSchool skins use
+        instead of a plain href) does.
+
+        Fetches *twice* -- once immediately, once ~4s later -- and reports
+        both: the same real account showed a fully browser-rendered
+        Assignments table (Due Date/Category/Assignment/Score/Grade) that a
+        plain immediate GET of the exact same URL never returned, and its
+        student described the real page itself "taking a few seconds to
+        load." That's consistent with either the assignments grid loading
+        via client-side JS this scraper can't execute, or (cheaper to rule
+        out first) the same plain HTTP response simply completing/filling in
+        a beat after the course-summary shell -- this reports both fetches
+        so that can be told apart without needing the browser's own network
+        tab."""
+        immediate = await self._snapshot_assignments_page(detail_href)
+        await asyncio.sleep(delay_seconds)
+        delayed = await self._snapshot_assignments_page(detail_href)
+        return {
+            "immediate": immediate,
+            "delayed": delayed,
+            "changed_after_delay": immediate["table_count"] != delayed["table_count"]
+            or [t["looks_like_assignments"] for t in immediate["tables"]]
+            != [t["looks_like_assignments"] for t in delayed["tables"]],
         }

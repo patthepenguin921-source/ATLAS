@@ -613,6 +613,44 @@ def test_fetch_classes_never_misreads_absence_count_as_a_grade(monkeypatch):
     asyncio.run(run())
 
 
+def test_fetch_assignments_reads_every_per_category_table():
+    """Real accounts (Lexington1) render assignments as one table *per
+    grading category* on the course's scores.html page, not a single flat
+    table -- each category's table must be parsed, not just whichever one
+    happens to be picked as "the" assignments table."""
+    html = """
+    <html><body>
+    <table id="categoryScore-1"><tr><th>Due Date</th><th>Category</th><th>Assignment</th><th>Score</th><th>%</th></tr>
+      <tr><td>01/12/2026</td><td>Quiz</td><td>Chapter 4 Quiz</td><td>8/10</td><td>80%</td></tr>
+    </table>
+    <table id="categoryScore-2"><tr><th>Due Date</th><th>Category</th><th>Assignment</th><th>Score</th><th>%</th></tr>
+      <tr><td>01/15/2026</td><td>Homework</td><td>Worksheet 4B</td><td>Missing</td><td></td></tr>
+      <tr><td colspan="5">Category Total: 92%</td></tr>
+    </table>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", "student1", "correct-horse", transport=transport
+        )
+        try:
+            assignments = await client.fetch_assignments("/guardian/scores.html?frn=1")
+            names = {a.name for a in assignments}
+            assert names == {"Chapter 4 Quiz", "Worksheet 4B"}
+            # The category-total footer row (a single colspan'd cell) must
+            # not be imported as a fake assignment named after its own text.
+            assert "Category Total: 92%" not in names
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_debug_home_page_reports_raw_rows():
     """Diagnostic used when a district's table layout doesn't match this
     client's cell-index assumptions — reports the header row and a few

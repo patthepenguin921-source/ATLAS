@@ -374,6 +374,21 @@ interface DebugScrapeResult {
   sample_row_html: string[];
 }
 
+interface DebugAssignmentsScrapeResult {
+  course: string;
+  detail_href: string;
+  final_url: string;
+  status_code: number;
+  table_count: number;
+  tables: {
+    id: string | null;
+    class: string;
+    row_count: number;
+    looks_like_assignments: boolean;
+    header_row_html: string | null;
+  }[];
+}
+
 interface SchoologyMaterialItem {
   name: string;
   type: string | null;
@@ -512,6 +527,10 @@ function IntegrationsTab() {
   const [debugging, setDebugging] = useState(false);
   const [debugResult, setDebugResult] = useState<DebugScrapeResult | null>(null);
   const [debugError, setDebugError] = useState<string | null>(null);
+  const [assignmentsDebugging, setAssignmentsDebugging] = useState(false);
+  const [assignmentsDebugResult, setAssignmentsDebugResult] = useState<DebugAssignmentsScrapeResult | null>(null);
+  const [assignmentsDebugError, setAssignmentsDebugError] = useState<string | null>(null);
+  const [assignmentsDebugQuery, setAssignmentsDebugQuery] = useState("");
   const [schoologyDebugging, setSchoologyDebugging] = useState(false);
   const [schoologyDebugResult, setSchoologyDebugResult] = useState<SchoologyDebugResult | null>(null);
   const [schoologyDebugError, setSchoologyDebugError] = useState<string | null>(null);
@@ -822,6 +841,24 @@ function IntegrationsTab() {
     }
   }
 
+  async function debugScrapeAssignments() {
+    setAssignmentsDebugging(true);
+    setAssignmentsDebugError(null);
+    setAssignmentsDebugResult(null);
+    try {
+      const q = assignmentsDebugQuery.trim();
+      const path = q
+        ? `/integrations/powerschool/debug-scrape-assignments?q=${encodeURIComponent(q)}`
+        : "/integrations/powerschool/debug-scrape-assignments";
+      const result = await apiGet<DebugAssignmentsScrapeResult>(path);
+      setAssignmentsDebugResult(result);
+    } catch (err: any) {
+      setAssignmentsDebugError(err.message ?? "Could not fetch that course's assignments page.");
+    } finally {
+      setAssignmentsDebugging(false);
+    }
+  }
+
   async function debugFetchSchoology() {
     setSchoologyDebugging(true);
     setSchoologyDebugError(null);
@@ -954,6 +991,11 @@ function IntegrationsTab() {
                     items={[
                       { label: "Edit login", onClick: openConnectModal },
                       { label: debugging ? "Fetching…" : "Debug scrape", onClick: debugScrape, disabled: debugging },
+                      {
+                        label: assignmentsDebugging ? "Fetching…" : "Debug course assignments",
+                        onClick: debugScrapeAssignments,
+                        disabled: assignmentsDebugging,
+                      },
                       { label: "Disconnect", onClick: () => disconnect("powerschool"), danger: true },
                     ]}
                   />
@@ -965,6 +1007,17 @@ function IntegrationsTab() {
               )}
             </div>
           </div>
+          {powerschool && (
+            <div className="mt-3 pt-3 border-t border-atlas-border flex items-center gap-2">
+              <input
+                className="input text-xs"
+                placeholder="Debug course assignments: search a course, e.g. AP Calculus…"
+                value={assignmentsDebugQuery}
+                onChange={(e) => setAssignmentsDebugQuery(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && debugScrapeAssignments()}
+              />
+            </div>
+          )}
         </div>
 
         {error && <div className="card mt-4 text-sm text-atlas-bad">{error}</div>}
@@ -1049,6 +1102,37 @@ function IntegrationsTab() {
                 <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto">
                   {html}
                 </pre>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {assignmentsDebugError && <div className="card mt-4 text-sm text-atlas-bad">{assignmentsDebugError}</div>}
+        {assignmentsDebugResult && (
+          <div className="card mt-4 text-xs space-y-1.5">
+            <div className="font-medium text-sm mb-1">Raw assignments-page scrape — {assignmentsDebugResult.course}</div>
+            <div>
+              <span className="text-atlas-muted">Fetched: </span>
+              {assignmentsDebugResult.final_url} ({assignmentsDebugResult.status_code})
+            </div>
+            <div>
+              <span className="text-atlas-muted">Tables found: </span>
+              {assignmentsDebugResult.table_count}
+            </div>
+            {assignmentsDebugResult.tables.map((t, i) => (
+              <div key={i} className="pt-1">
+                <div className="text-atlas-muted">
+                  Table {i + 1}{t.id ? ` (id="${t.id}")` : ""}{t.class ? ` (class="${t.class}")` : ""} —{" "}
+                  {t.row_count} rows —{" "}
+                  <span className={t.looks_like_assignments ? "text-atlas-good" : "text-atlas-muted"}>
+                    {t.looks_like_assignments ? "parsed as assignments" : "skipped"}
+                  </span>
+                </div>
+                {t.header_row_html && (
+                  <pre className="whitespace-pre-wrap break-all bg-atlas-panel2 p-2 rounded max-h-40 overflow-auto">
+                    {t.header_row_html}
+                  </pre>
+                )}
               </div>
             ))}
           </div>

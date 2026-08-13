@@ -224,6 +224,37 @@ class PowerSchoolProvider(IntegrationProvider):
         finally:
             await client.aclose()
 
+    async def debug_scrape_assignments(self, user_id: str, query: str | None = None) -> dict[str, Any]:
+        """Fetches one course's assignments detail page (`detail_href`) and
+        reports its raw table structure — the per-course counterpart to
+        `debug_scrape`, for diagnosing why a course's assignment-level
+        grades aren't coming through even though its overall grade is.
+        `query` narrows to the first course whose name contains it (e.g.
+        `?q=AP+Calculus`); omitted, the first course with a detail link at
+        all is used."""
+        client = await self._authenticated_client(user_id)
+        try:
+            classes = await client.fetch_classes()
+            if not classes:
+                raise RuntimeError("No courses found on the grades page to scrape.")
+            if query:
+                q = query.strip().lower()
+                cls = next((c for c in classes if q in c.name.lower()), None)
+                if cls is None:
+                    names = ", ".join(c.name for c in classes)
+                    raise RuntimeError(f"No course matching {query!r} found. Courses: {names}")
+            else:
+                cls = next((c for c in classes if c.detail_href), classes[0])
+            if not cls.detail_href:
+                raise RuntimeError(f"{cls.name} has no assignments detail link to scrape.")
+            return {
+                "course": cls.name,
+                "detail_href": cls.detail_href,
+                **await client.debug_assignments_page(cls.detail_href),
+            }
+        finally:
+            await client.aclose()
+
     async def sync(self, user_id: str, *, deadline: float | None = None) -> dict[str, Any]:
         # `deadline` isn't honored here — a PowerSchool account's course list
         # is small enough (one grades-page scrape) that chunking has never

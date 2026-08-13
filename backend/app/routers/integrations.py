@@ -466,6 +466,21 @@ async def debug_scrape_powerschool(user: CurrentUser = Depends(get_current_user)
         raise HTTPException(502, str(e)) from e
 
 
+@router.get("/powerschool/debug-scrape-assignments")
+async def debug_scrape_powerschool_assignments(
+    q: str | None = None, user: CurrentUser = Depends(get_current_user)
+):
+    """Fetches one course's assignments detail page and reports its raw
+    table structure — the per-course counterpart to debug-scrape, for
+    diagnosing why a course's assignment-level grades aren't coming through.
+    `q` narrows to the first course whose name contains it."""
+    provider = PROVIDERS["powerschool"]
+    try:
+        return await provider.debug_scrape_assignments(user.id, query=q)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e)) from e
+
+
 @router.post("/powerschool/connect-session", status_code=201)
 async def connect_powerschool_session(
     body: PowerSchoolConnectSessionRequest, user: CurrentUser = Depends(get_current_user)

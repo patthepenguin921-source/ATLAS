@@ -137,6 +137,28 @@ _HEADER_KEYWORDS = {
     "percentage": ("%", "percent"),
 }
 
+
+def _looks_like_assignment_table(table: Tag) -> bool:
+    """Whether a table's header row looks like it lists individual
+    assignments -- matching at least two of `_HEADER_KEYWORDS`'s column
+    groups (due date/category/name/score/percentage). A course's assignments
+    page commonly renders one such table per grading category rather than a
+    single flat one, so `fetch_assignments` parses every table this returns
+    true for instead of picking just one. Requiring two-plus matches (not
+    one) keeps unrelated tables on the same page -- e.g. a grading-scale
+    legend with only a "%" column -- from being misread as assignments."""
+    rows = table.find_all("tr")
+    if len(rows) < 2:
+        return False
+    header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
+    if not header_cells:
+        return False
+    matches = sum(
+        1 for keywords in _HEADER_KEYWORDS.values()
+        if any(any(k in cell for k in keywords) for cell in header_cells)
+    )
+    return matches >= 2
+
 # Between school years/terms, PowerSchool lists each requested course with
 # one of these placeholders instead of an assigned section/teacher — not a
 # real class yet, so `fetch_classes` skips rows named this.
@@ -559,62 +581,102 @@ class PowerSchoolClient:
         r = await self._client.get(detail_href)
         soup = BeautifulSoup(r.text, "html.parser")
 
-        table = soup.find("table", id=re.compile("assignment", re.I)) \
-            or soup.find("table", class_=re.compile("assignment", re.I))
-        if table is None:
-            # Markup varies across PowerSchool versions — fall back to the
-            # largest table on the page rather than giving up entirely.
-            tables = soup.find_all("table")
-            table = max(tables, key=lambda t: len(t.find_all("tr")), default=None)
-        if table is None:
-            return []
-
-        rows = table.find_all("tr")
-        if len(rows) < 2:
-            return []
-
-        header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
-        col_index: dict[str, int] = {}
-        for field, keywords in _HEADER_KEYWORDS.items():
-            for i, cell in enumerate(header_cells):
-                if any(k in cell for k in keywords):
-                    col_index[field] = i
-                    break
+        # Real accounts (confirmed against Lexington1) render assignments as
+        # one table *per grading category* (Homework, Test, Quiz, ...) on the
+        # course's scores.html page, not a single flat table -- the old
+        # "id/class contains 'assignment', else just the single largest
+        # table" selection only ever picked one of those tables, so every
+        # other category's assignments silently never made it into a sync.
+        # Score every table by whether its header row looks assignment-shaped
+        # and parse all of them, not just one.
+        all_tables = soup.find_all("table")
+        tables = [t for t in all_tables if _looks_like_assignment_table(t)]
+        if not tables:
+            # Markup varies across PowerSchool versions -- if nothing's
+            # header row matched, fall back to the largest table on the page
+            # rather than giving up entirely.
+            table = max(all_tables, key=lambda t: len(t.find_all("tr")), default=None)
+            tables = [table] if table is not None else []
 
         assignments: list[PSAssignment] = []
-        for row in rows[1:]:
-            cells = row.find_all("td")
-            if not cells:
+        for table in tables:
+            rows = table.find_all("tr")
+            if len(rows) < 2:
                 continue
-            texts = [c.get_text(strip=True) for c in cells]
 
-            def cell(field: str, default_idx: int) -> str:
-                idx = col_index.get(field, default_idx)
-                return texts[idx] if 0 <= idx < len(texts) else ""
+            header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
+            col_index: dict[str, int] = {}
+            for field, keywords in _HEADER_KEYWORDS.items():
+                for i, cell in enumerate(header_cells):
+                    if any(k in cell for k in keywords):
+                        col_index[field] = i
+                        break
 
-            name = cell("name", min(2, len(texts) - 1))
-            if not name:
-                continue
-            score_text = cell("score", min(3, len(texts) - 1))
-            # PowerSchool shows "Missing"/"Late"/"Exempt"/"Excused" as the
-            # score cell's own content in place of a numeric score -- check
-            # only that cell, not every column joined together. The whole-
-            # row text this used to check also includes the assignment's own
-            # name, and an unanchored substring search there false-positives
-            # on any name that happens to contain one of these words, e.g.
-            # "Plate Tectonics Quiz" contains "late", "Calculate the Area"
-            # contains "late", "Unexcused" would (wrongly) match "excused".
-            status_text = score_text.lower()
-            score, points = _parse_score(score_text)
-            _, percentage = _parse_grade(cell("percentage", len(texts) - 1))
+            for row in rows[1:]:
+                cells = row.find_all("td")
+                if not cells:
+                    continue
+                # A category table's trailing "Category Total: 92%"-style
+                # summary row is a single wide (colspan'd) cell, not a real
+                # assignment -- skip it rather than importing its summary
+                # text as a fake assignment name.
+                if len(cells) == 1 and cells[0].has_attr("colspan"):
+                    continue
+                texts = [c.get_text(strip=True) for c in cells]
 
-            assignments.append(PSAssignment(
-                name=name,
-                category=cell("category", 1),
-                due_date=_parse_date(cell("due_date", 0)),
-                score=score, points_possible=points, percentage=percentage,
-                is_missing=bool(re.search(r"\bmissing\b", status_text)),
-                is_late=bool(re.search(r"\blate\b", status_text)),
-                is_exempt=bool(re.search(r"\bexempt\b", status_text)) or bool(re.search(r"\bexcused\b", status_text)),
-            ))
+                def cell(field: str, default_idx: int) -> str:
+                    idx = col_index.get(field, default_idx)
+                    return texts[idx] if 0 <= idx < len(texts) else ""
+
+                name = cell("name", min(2, len(texts) - 1))
+                if not name:
+                    continue
+                score_text = cell("score", min(3, len(texts) - 1))
+                # PowerSchool shows "Missing"/"Late"/"Exempt"/"Excused" as the
+                # score cell's own content in place of a numeric score -- check
+                # only that cell, not every column joined together. The whole-
+                # row text this used to check also includes the assignment's own
+                # name, and an unanchored substring search there false-positives
+                # on any name that happens to contain one of these words, e.g.
+                # "Plate Tectonics Quiz" contains "late", "Calculate the Area"
+                # contains "late", "Unexcused" would (wrongly) match "excused".
+                status_text = score_text.lower()
+                score, points = _parse_score(score_text)
+                _, percentage = _parse_grade(cell("percentage", len(texts) - 1))
+
+                assignments.append(PSAssignment(
+                    name=name,
+                    category=cell("category", 1),
+                    due_date=_parse_date(cell("due_date", 0)),
+                    score=score, points_possible=points, percentage=percentage,
+                    is_missing=bool(re.search(r"\bmissing\b", status_text)),
+                    is_late=bool(re.search(r"\blate\b", status_text)),
+                    is_exempt=bool(re.search(r"\bexempt\b", status_text)) or bool(re.search(r"\bexcused\b", status_text)),
+                ))
         return assignments
+
+    async def debug_assignments_page(self, detail_href: str) -> dict:
+        """Diagnostic twin of `debug_home_page` for a course's assignments
+        detail page (the `scores.html?...&frn=...` page `fetch_assignments`
+        scrapes): reports every table's shape (id/class/row count/header,
+        and whether `_looks_like_assignment_table` would parse it) instead
+        of parsed assignments, so a district's actual per-course markup can
+        be inspected without browser dev tools access."""
+        r = await self._client.get(detail_href)
+        soup = BeautifulSoup(r.text, "html.parser")
+        tables = soup.find_all("table")
+        return {
+            "final_url": str(r.url),
+            "status_code": r.status_code,
+            "table_count": len(tables),
+            "tables": [
+                {
+                    "id": t.get("id"),
+                    "class": " ".join(t.get("class") or []),
+                    "row_count": len(t.find_all("tr")),
+                    "looks_like_assignments": _looks_like_assignment_table(t),
+                    "header_row_html": str(t.find("tr"))[:1500] if t.find("tr") else None,
+                }
+                for t in tables[:12]
+            ],
+        }

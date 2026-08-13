@@ -183,7 +183,7 @@ def _term_date_range(href: str) -> tuple[date, date] | None:
         return None
 
 
-def _dated_term_cell(cell: Tag) -> tuple[str | None, float | None, tuple[date, date] | None]:
+def _dated_term_cell(cell: Tag) -> tuple[str | None, float | None, tuple[date, date] | None, str | None]:
     """A single reporting-term grade cell -- almost always a link to
     `scores.html?...` wrapping either a letter grade, a percent-with-"%", or
     (confirmed against a real account) a bare percent number with no "%"
@@ -191,19 +191,22 @@ def _dated_term_cell(cell: Tag) -> tuple[str | None, float | None, tuple[date, d
     cell that's actually such a dated link, never a plain unlinked `<td>`
     (e.g. an absence/tardy count elsewhere in the same row) -- otherwise a
     perfect-attendance "0" would get misread as a 0% grade. Returns
-    `(letter, percent, term_window)`; `term_window` is `_term_date_range`'s
-    result, `None` when the cell isn't a dated link at all."""
+    `(letter, percent, term_window, href)`; `term_window` is
+    `_term_date_range`'s result, `None` when the cell isn't a dated link at
+    all; `href` is that same link's target, so callers can fetch assignments
+    for the exact term a grade came from instead of guessing."""
     text = cell.get_text(strip=True)
     letter, percent = _grade_from_cell(text)
     link = cell.find("a", href=True)
-    window = _term_date_range(link["href"]) if link is not None else None
+    href = link["href"] if link is not None else None
+    window = _term_date_range(href) if href is not None else None
     if letter is None and percent is None and window is not None:
         if m := _BARE_NUMBER_RE.fullmatch(text):
             percent = float(m.group())
-    return letter, percent, window
+    return letter, percent, window, href
 
 
-def _current_term_grade(cells: list[Tag]) -> tuple[str | None, float | None]:
+def _current_term_grade(cells: list[Tag]) -> tuple[str | None, float | None, str | None]:
     """Pick the grade for whichever reporting term (quarter, semester, ...)
     is actually current *today* -- not just the first grade-shaped cell in
     the row, which stops being the right one to show once that term ends
@@ -214,17 +217,24 @@ def _current_term_grade(cells: list[Tag]) -> tuple[str | None, float | None]:
     -- the most specific, most-recently-updated number a student actually
     wants. Falls back to the first grade-shaped cell regardless of date
     when nothing here is dated (or nothing's currently in-window) -- e.g.
-    between school years, or every dated term still showing "[ i ]"."""
+    between school years, or every dated term still showing "[ i ]".
+    Also returns that winning cell's own link href, so the caller can fetch
+    assignments for the same term the displayed grade actually came from --
+    without it, the grade correctly rolls from Q1 to Q2 once Q1 ends, but
+    the assignments page fetched stays pinned to whichever term's link
+    happens to appear first in the row (almost always Q1), so real, current
+    per-assignment data silently stops coming in as soon as a term rolls
+    over."""
     today = date.today()
-    fallback: tuple[str | None, float | None] = (None, None)
-    best: tuple[str | None, float | None] = (None, None)
+    fallback: tuple[str | None, float | None, str | None] = (None, None, None)
+    best: tuple[str | None, float | None, str | None] = (None, None, None)
     best_span: timedelta | None = None
     for c in cells:
-        letter, percent, window = _dated_term_cell(c)
+        letter, percent, window, href = _dated_term_cell(c)
         if not (letter or percent):
             continue
-        if fallback == (None, None):
-            fallback = (letter, percent)
+        if fallback[0] is None and fallback[1] is None:
+            fallback = (letter, percent, href)
         if window is None:
             continue
         beg, end = window
@@ -232,7 +242,7 @@ def _current_term_grade(cells: list[Tag]) -> tuple[str | None, float | None]:
             continue
         span = end - beg
         if best_span is None or span < best_span:
-            best, best_span = (letter, percent), span
+            best, best_span = (letter, percent, href), span
     return best if best_span is not None else fallback
 
 
@@ -519,13 +529,19 @@ class PowerSchoolClient:
             # data. Early in a term they're all "[ i ]" placeholders, which
             # correctly yields no grade.
             name_idx = cells.index(name_cell)
-            grade_letter, grade_percent = _current_term_grade(cells[name_idx + 1:])
+            grade_letter, grade_percent, term_href = _current_term_grade(cells[name_idx + 1:])
 
-            links = row.find_all("a", href=True)
-            detail_href = next(
-                (l["href"] for l in links if re.search(r"scores|grade|assignment", l["href"], re.I)),
-                links[-1]["href"] if links else None,
-            )
+            # Prefer the exact term cell the displayed grade came from --
+            # falling back to a generic scan of the row's links only when
+            # that cell had none (e.g. no dated/grade-shaped cell at all).
+            if term_href is not None:
+                detail_href = term_href
+            else:
+                links = row.find_all("a", href=True)
+                detail_href = next(
+                    (l["href"] for l in links if re.search(r"scores|grade|assignment", l["href"], re.I)),
+                    links[-1]["href"] if links else None,
+                )
 
             classes.append(PSClass(
                 ccid=ccid,

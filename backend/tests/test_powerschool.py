@@ -525,6 +525,14 @@ def test_fetch_classes_switches_to_the_next_term_once_the_current_one_concludes(
             classes = await client.fetch_classes()
             assert len(classes) == 1
             assert classes[0].grade_percent == 95.0
+            # The reported bug: the displayed grade correctly rolled over to
+            # Q2, but `detail_href` stayed pinned to whichever term's link
+            # happened to appear first in the row (Q1's, now closed) --
+            # silently starving `fetch_assignments` of any current-term
+            # data. It must follow the same cell the grade came from.
+            assert classes[0].detail_href == (
+                "scores.html?frn=00437309537&begdate=10/06/2026&enddate=01/02/2027&fg=Q2&schoolid=3"
+            )
         finally:
             await client.aclose()
 

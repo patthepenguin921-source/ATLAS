@@ -3027,6 +3027,95 @@ def test_sync_scraped_materials_rewalks_week_at_a_glance_forever(fake_db, monkey
     assert any(a["title"] == "Lab Safety Quiz" and a["due_date"] == "2025-12-03" for a in assignments)
 
 
+def test_sync_scraped_materials_detects_glance_by_folder_alone(fake_db, monkeypatch):
+    """The reported real-world bug: a teacher's week-at-a-glance file named
+    only a date range ("August 10th-14th" -- no "at a glance" phrasing in
+    the name) whose own extracted text also never says "at a glance"
+    anywhere (just a plain day-by-day table), filed directly inside a
+    folder named "WAG-Week at a Glance". Neither the title check nor the
+    content sniff can catch this one -- only the folder it's filed in says
+    what it is -- and a sibling document nested several folders *beneath*
+    that same glance folder (real slides/notes, not a schedule) must not be
+    swept up just because that folder happens to be an ancestor."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    glance_item = MaterialLink(
+        name="August 10th-14th", href="/attachment/download/1",
+        kind="item", material_type="File",
+        folder_path="Syllabus and Standards/WAG-Week at a Glance",
+    )
+    nested_item = MaterialLink(
+        name="Notes: Biology Review", href="/attachment/download/2",
+        kind="item", material_type="File",
+        folder_path="WAG-Week at a Glance/Important Documents/Day One Presentations",
+    )
+    scraper = _FakeScraperClient(
+        [glance_item, nested_item],
+        files={
+            "/attachment/download/1": (b"wag pdf bytes", "application/pdf"),
+            "/attachment/download/2": (b"notes pdf bytes", "application/pdf"),
+        },
+    )
+
+    def _fake_extract_text(content, mt, fn=""):
+        if content == b"wag pdf bytes":
+            return (
+                "August 10th-14th\n\n"
+                "| Date | Topic | Homework |\n"
+                "| M, 8/10 | Cell structure | Reading pg 12-14 |\n"
+            )
+        return "Slide deck content about biology review."
+
+    monkeypatch.setattr(ingestion, "extract_text", _fake_extract_text)
+
+    from app.llm import claude
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        if "class schedule" not in system:
+            return {"summary": "s", "keywords": [], "doc_type": "other",
+                     "importance": "normal", "concepts": []}
+        return {"days": [{"date": "2026-08-10", "topic": "Cell structure", "assignments": []}]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["errors"] == []
+    events = fake_db.tables["calendar_events"]
+    assert {e["title"] for e in events} == {"Cell structure"}
+
+    docs = {d["metadata"]["material_name"]: d for d in fake_db.tables["documents"]}
+    assert docs["August 10th-14th"]["metadata"].get("is_glance") is True
+    # The nested slide deck, merely filed several folders beneath the WAG
+    # folder, must not be misdetected as a schedule document.
+    assert "is_glance" not in docs["Notes: Biology Review"]["metadata"]
+
+    # A later sync, with the file's storage_path already on file: even
+    # though `is_glance`/`is_recurring_glance` were correctly set to True on
+    # the first sync above, `_glance_needs_rewalk` must also recognize this
+    # document from its stored `folder` alone -- so a document first
+    # ingested *before* this folder check existed (its metadata never got
+    # `is_glance` set at all) still gets picked back up on its very next
+    # sync, with no manual backfill needed.
+    scraper2 = _FakeScraperClient(
+        [glance_item, nested_item],
+        files={
+            "/attachment/download/1": (b"wag pdf bytes", "application/pdf"),
+            "/attachment/download/2": (b"notes pdf bytes", "application/pdf"),
+        },
+    )
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper2, report=_full_report(),
+    ))
+    assert "august 10th-14th" not in (scraper2.known_names_calls[0] or set())
+
+
 def test_sync_scraped_materials_flags_unrecognized_link_it_cannot_fetch(fake_db, monkeypatch):
     """A genuine external link Atlas can't classify as Google or an
     assignment, and can't actually fetch/read either (unreachable, blocked,

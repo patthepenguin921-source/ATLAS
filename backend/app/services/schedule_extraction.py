@@ -85,6 +85,31 @@ def is_recurring_glance_title(title: str | None) -> bool:
     return is_glance_title(title) and bool(_BROAD_SCOPE_RE.search(title or ""))
 
 
+def is_glance_folder(folder: str | None) -> bool:
+    """True if a document's own containing folder -- the *last* segment of
+    a breadcrumb like "Syllabus and Standards/WAG-Week at a Glance" -- is
+    itself named as an "at a glance" folder. A teacher who names the actual
+    week's file just "August 10th-14th" (no "at a glance" phrasing anywhere
+    in the file's own name or body text) still files it directly inside a
+    folder that says so, and confirmed against a real account that's as
+    reliable a signal as the title/content checks above are -- sometimes
+    more reliable, since a plain date-range filename never matches
+    `GLANCE_TITLE_RE` and a table-shaped document doesn't always spell "at a
+    glance" out anywhere in its own extracted text either.
+
+    Deliberately only the last segment, not any ancestor folder -- a whole
+    tree of unrelated slides/notes/images nested many levels beneath a real
+    "WAG-Week at a Glance" folder (a real, confirmed example: ".../WAG-Week
+    at a Glance/Important Documents/Day One Presentations/...") must not
+    all get swept up as schedule documents just because that folder happens
+    to sit somewhere above them -- only an item filed *directly* in the
+    glance folder counts."""
+    if not folder:
+        return False
+    last_segment = folder.rsplit("/", 1)[-1].strip()
+    return bool(GLANCE_TITLE_RE.search(last_segment))
+
+
 def is_glance(*, title: str | None = None, text: str | None = None) -> bool:
     """True if this document is an "at a glance" schedule document, by its
     title/filename or (as a fallback, once there's text to check) its own

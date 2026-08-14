@@ -174,6 +174,34 @@ def _risk_level(
     return level
 
 
+async def mistake_patterns(user_id: str, *, days: int = 90) -> list[dict[str, Any]]:
+    """Groups logged mistakes -- manually recorded on an assignment, or
+    auto-logged by `app.services.mistake_analysis` from a synced grade or a
+    graded practice quiz -- by course + mistake_type, so "conceptual slips
+    keep happening in Bio" actually surfaces as a pattern instead of staying
+    a pile of individual rows nobody re-reads."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = await supabase.select(
+        "mistakes",
+        columns="course_id,mistake_type,resolved,occurred_at",
+        filters={"user_id": eq(user_id), "occurred_at": f"gte.{since}"},
+        order="occurred_at.desc",
+    ) or []
+    by_key: dict[tuple[str | None, str], dict[str, Any]] = {}
+    for m in rows:
+        key = (m.get("course_id"), m.get("mistake_type") or "unspecified")
+        bucket = by_key.setdefault(key, {
+            "course_id": key[0], "mistake_type": key[1],
+            "count": 0, "unresolved": 0, "latest": m["occurred_at"],
+        })
+        bucket["count"] += 1
+        if not m.get("resolved"):
+            bucket["unresolved"] += 1
+    out = list(by_key.values())
+    out.sort(key=lambda b: b["count"], reverse=True)
+    return out
+
+
 async def snapshot(user_id: str) -> dict[str, Any]:
     return {
         "predicted_gpa_weighted": await predicted_gpa(user_id, True),
@@ -181,6 +209,7 @@ async def snapshot(user_id: str) -> dict[str, Any]:
         "grade_trends": await grade_trend(user_id),
         "study_efficiency": await study_efficiency(user_id),
         "at_risk": await at_risk_assignments(user_id),
+        "mistake_patterns": await mistake_patterns(user_id),
     }
 
 

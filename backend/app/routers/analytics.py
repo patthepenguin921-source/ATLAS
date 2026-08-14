@@ -35,3 +35,8 @@ async def at_risk(limit: int = 10, user: CurrentUser = Depends(get_current_user)
 @router.get("/study-efficiency")
 async def study_efficiency(days: int = 30, user: CurrentUser = Depends(get_current_user)):
     return await svc.study_efficiency(user.id, days=days)
+
+
+@router.get("/mistake-patterns")
+async def mistake_patterns(days: int = 90, user: CurrentUser = Depends(get_current_user)):
+    return await svc.mistake_patterns(user.id, days=days)

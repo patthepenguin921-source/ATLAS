@@ -6,6 +6,17 @@ import { AppShell } from "@/components/AppShell";
 import { Stat, RevealStat, Section, Empty, SkeletonStats, Badge, RiskBadge } from "@/components/ui";
 import { apiGet, apiPost } from "@/lib/api";
 
+// Matches the labels used on the assignment detail page's "What did you get
+// wrong?" logger (frontend/src/app/assignments/page.tsx) so the same
+// mistake_type reads the same way everywhere.
+const MISTAKE_TYPE_LABEL: Record<string, string> = {
+  conceptual: "Conceptual",
+  careless: "Careless",
+  procedural: "Procedural",
+  knowledge_gap: "Knowledge gap",
+  unspecified: "Uncategorized",
+};
+
 export default function AnalyticsPage() {
   const router = useRouter();
   const [snap, setSnap] = useState<any>(null);
@@ -111,6 +122,30 @@ export default function AnalyticsPage() {
                 ))}
               </div>
             ) : <Empty>No high-risk items right now.</Empty>}
+          </Section>
+
+          <Section title="Recurring mistakes">
+            {snap.mistake_patterns?.length ? (
+              <div className="space-y-2">
+                {snap.mistake_patterns.map((p: any, i: number) => (
+                  <button
+                    key={i}
+                    onClick={() => p.course_id && router.push(`/courses/${p.course_id}`)}
+                    className="card card-hover w-full text-left flex items-center justify-between gap-3"
+                  >
+                    <span className="text-sm min-w-0">
+                      <span className="font-medium">{courseName(p.course_id)}</span>
+                      <span className="text-atlas-muted"> · {MISTAKE_TYPE_LABEL[p.mistake_type] ?? p.mistake_type} · {p.count}x</span>
+                    </span>
+                    {p.unresolved > 0 && <Badge tone="warn">{p.unresolved} unresolved</Badge>}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <Empty>
+                Nothing logged yet — log what you got wrong (and why) from an assignment's detail view to see patterns here.
+              </Empty>
+            )}
           </Section>
         </>
       )}

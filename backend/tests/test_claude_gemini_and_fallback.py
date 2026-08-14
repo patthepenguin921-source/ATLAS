@@ -157,6 +157,74 @@ def test_complete_falls_back_to_gemini_after_groq_429(monkeypatch):
     assert "generativelanguage.googleapis.com" in _FakeAsyncClient.calls[1]["url"]
 
 
+def test_complete_falls_back_to_gemini_after_groq_tokens_per_minute_413(monkeypatch):
+    """The reported real-world bug: Groq's tokens-per-minute rate limit (a
+    long document pushing this minute's usage over the org's shared TPM
+    cap -- a real "at a glance" schedule extraction with an 8000-token
+    completion budget did this) comes back as a 413 ("Payload Too Large"),
+    not a 429, even though its body is the exact same kind of rate limit
+    (`"code": "rate_limit_exceeded"`). Left unnormalized this skipped the
+    fallback entirely and just failed -- must be treated the same as an
+    ordinary 429 and fall back to the free Gemini provider."""
+    _install(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=413, payload={"error": {
+                "message": "Request too large for model `llama-3.3-70b-versatile` "
+                           "... tokens per minute (TPM): Limit 12000, Requested 12703, "
+                           "please reduce your message size and try again.",
+                "type": "tokens", "code": "rate_limit_exceeded",
+            }}),
+            _gemini_text_response("Handled via Gemini."),
+        ],
+        gemini_api_key="fake-gemini-key",
+    )
+
+    result = asyncio.run(claude_module.complete(
+        system="sys", messages=[{"role": "user", "content": "hi"}],
+    ))
+
+    assert result == "Handled via Gemini."
+    assert len(_FakeAsyncClient.calls) == 2
+
+
+def test_complete_retries_same_provider_after_groq_tokens_per_minute_413_with_no_fallback(monkeypatch):
+    """Same 413 tokens-rate-limit case as above, but with no fallback
+    provider credentials on hand -- since Groq's own error body never gives
+    an explicit wait hint for this one (unlike an ordinary 429's "try again
+    in 2.86s"), a short default wait is still worth trying before giving up,
+    since it's a continuously-refilling bucket, not a real outage."""
+    _install(
+        monkeypatch,
+        [
+            _FakeResponse(status_code=413, payload={"error": {
+                "message": "Request too large ... tokens per minute (TPM): "
+                           "Limit 12000, Requested 12703, please reduce your "
+                           "message size and try again.",
+                "type": "tokens", "code": "rate_limit_exceeded",
+            }}),
+            _groq_message(content="Second attempt succeeded."),
+        ],
+    )
+
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def _fake_sleep(seconds):
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(claude_module.complete(
+        system="sys", messages=[{"role": "user", "content": "hi"}],
+    ))
+
+    assert result == "Second attempt succeeded."
+    assert len(_FakeAsyncClient.calls) == 2
+    assert sleeps == [3.0]
+
+
 def test_agentic_complete_falls_back_to_gemini_after_groq_429(monkeypatch):
     _install(
         monkeypatch,

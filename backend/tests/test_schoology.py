@@ -1321,6 +1321,64 @@ def test_sync_scraped_materials_stops_at_deadline_mid_course_without_reingesting
     assert {d["metadata"]["material_name"] for d in docs} == {"One.pdf", "Two.pdf"}
 
 
+def test_sync_scraped_materials_skips_one_slow_item_instead_of_dying_mid_chunk(fake_db, monkeypatch):
+    """The reported "This step of the sync timed out after 150s and was
+    aborted" error persisting even after the fix above: the loop's own
+    `deadline` check only runs *between* items, so one item whose own
+    ingest round trip runs long can, on its own, blow straight through the
+    chunk's remaining budget with nothing to stop it -- at which point
+    `_run_chunk`'s outer `asyncio.wait_for` hard-cancels the *whole* chunk
+    mid-item, before this method's own resumable-progress bookkeeping ever
+    gets a chance to run, so "try syncing again" just restarts and hits the
+    exact same slow item again forever. A per-item timeout must let that
+    one item fail on its own (reported, retried next sync) while the rest
+    of this chunk's items still get ingested and the chunk itself still
+    reports done."""
+    import app.integrations.schoology as schoology_module
+
+    monkeypatch.setattr(schoology_module, "_ITEM_INGEST_TIMEOUT_SECONDS", 0.05)
+    provider = schoology_module.SchoologyProvider()
+    scraper = _SlowFirstItemScraper(
+        [
+            MaterialLink(name="One.pdf", href="/attachment/download/1", kind="item", material_type="File"),
+            MaterialLink(name="Two.pdf", href="/attachment/download/2", kind="item", material_type="File"),
+        ],
+        files={
+            "/attachment/download/1": (b"%PDF-1.4 one", "application/pdf"),
+            "/attachment/download/2": (b"%PDF-1.4 two", "application/pdf"),
+        },
+    )
+
+    report: dict[str, Any] = {"documents": 0, "skipped": 0, "errors": []}
+    finished = asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert finished is True  # the chunk itself completed, not aborted
+    assert any("One.pdf" in e and "took longer than" in e for e in report["errors"])
+    docs = fake_db.tables["documents"]
+    # The slow item never finished ingesting; the fast one right after it
+    # still did.
+    assert {d["metadata"]["material_name"] for d in docs} == {"Two.pdf"}
+
+    # Retried on a later sync (no more slowness), the previously-skipped
+    # item is picked up normally.
+    scraper2 = _FakeScraperClient(
+        scraper._items,
+        files={
+            "/attachment/download/1": (b"%PDF-1.4 one", "application/pdf"),
+            "/attachment/download/2": (b"%PDF-1.4 two", "application/pdf"),
+        },
+    )
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper2, report=report,
+    ))
+    docs = fake_db.tables["documents"]
+    assert {d["metadata"]["material_name"] for d in docs} == {"One.pdf", "Two.pdf"}
+
+
 def test_sync_materials_only_stops_mid_course_and_resumes_the_same_course(fake_db, monkeypatch):
     """End-to-end version of the test above, through `_sync_materials_only`
     itself -- the no-API-key path that actually produced the reported "150s"

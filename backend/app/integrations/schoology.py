@@ -104,6 +104,25 @@ _ASSIGNMENT_HREF_RE = re.compile(r"assignment", re.I)
 # per item for types (discussion/quiz/album/...) where it's never the case.
 _PROBABLE_VIEWER_TYPES = frozenset({"", "link", "page"})
 
+# Per-item budget inside `_sync_scraped_materials`'s loop -- the reported
+# "This step of the sync timed out after 150s and was aborted" error: the
+# loop's own `deadline` check only ever runs *between* items, so one item
+# whose own download+extract+LLM round trip runs long (a large/OCR'd file,
+# a "Unit/Semester at a Glance" doc mining many days/assignments in one LLM
+# call plus one upsert per day/assignment) can by itself blow straight
+# through the chunk's remaining budget with nothing to stop it -- at which
+# point `_run_chunk`'s own outer `asyncio.wait_for` hard-cancels the whole
+# chunk mid-item, losing this item's work-in-progress *and*, because the
+# cancellation happens inside a nested await with no chance for `sync()`'s
+# own cooperative deadline check to run first, never gets to save resumable
+# progress either -- so "try syncing again" restarts and hits the exact
+# same slow item again, forever. Bounding each item's own ingest lets a
+# genuinely slow item fail on its own (reported, retried next sync) while
+# the rest of this chunk's items, and this chunk's own progress-saving,
+# still get a chance to run. Comfortably under SYNC_CHUNK_SECONDS (90) so a
+# single slow item can never by itself consume the whole chunk budget.
+_ITEM_INGEST_TIMEOUT_SECONDS = 45
+
 
 async def _classify_google_doc(title: str, text: str) -> dict[str, Any] | None:
     """Not every Google Doc a teacher links from course materials is an
@@ -2225,11 +2244,27 @@ class SchoologyProvider(IntegrationProvider):
             for item in items:
                 if deadline is not None and time.monotonic() >= deadline:
                     return False
-                await self._ingest_scraped_material(
-                    user_id=user_id, course_id=course_id, section=section,
-                    item=item, scraper=scraper, google_token=google_token,
-                    known_assignment_titles=known_assignment_titles, report=report,
-                )
+                try:
+                    await asyncio.wait_for(
+                        self._ingest_scraped_material(
+                            user_id=user_id, course_id=course_id, section=section,
+                            item=item, scraper=scraper, google_token=google_token,
+                            known_assignment_titles=known_assignment_titles, report=report,
+                        ),
+                        timeout=_ITEM_INGEST_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    # This one item ran long -- see `_ITEM_INGEST_TIMEOUT_
+                    # SECONDS`'s docstring. Anything it already wrote (e.g.
+                    # the document row itself, if only its schedule-mining
+                    # tail was slow) stays as-is and gets recognized as
+                    # already-known next time; whatever it hadn't gotten to
+                    # yet is retried on the next sync, same as any other
+                    # best-effort failure in this loop.
+                    report["errors"].append(
+                        f"{section.display_name} · {item.name}: took longer than "
+                        f"{_ITEM_INGEST_TIMEOUT_SECONDS}s and was skipped -- it'll be retried on the next sync"
+                    )
             return True
         except SchoologyScraperAuthError as e:
             report["errors"].append(f"{section.display_name} materials (scrape login): {e}")

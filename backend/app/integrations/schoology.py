@@ -1013,6 +1013,23 @@ class SchoologyProvider(IntegrationProvider):
                     existing_meta=existing_meta, content_hash=content_hash,
                     title=title, content=content, content_type=content_type,
                     filename=filename, report=report,
+                    # A document only just now recognized as a glance doc
+                    # (`extract_schedule=True` this call, but never flagged
+                    # `is_glance`/`is_recurring_glance` on any prior sync --
+                    # e.g. one that predates a fix teaching detection to
+                    # recognize its folder/content) has never actually been
+                    # mined for a schedule at all -- the content-hash skip
+                    # below assumes "unchanged since we last processed this
+                    # as a glance doc," which is false here even though the
+                    # file's bytes genuinely haven't changed since the sync
+                    # that first (mis-)ingested it. Confirmed against a real
+                    # AP Biology "August 10th-14th" WAG file: it went
+                    # un-mined forever after being first ingested before
+                    # folder-based detection existed, because every later
+                    # sync re-derived the (correct) glance signal but then
+                    # bailed out on the unchanged hash before ever acting on
+                    # it.
+                    force=bool(extract_schedule and not is_known_glance),
                 )
             return False
         doc_id = existing["id"] if existing else str(uuid.uuid4())
@@ -1125,13 +1142,20 @@ class SchoologyProvider(IntegrationProvider):
     async def _recheck_glance_file_for_changes(
         self, *, user_id: str, course_id: str, doc_id: str, existing_meta: dict[str, Any],
         content_hash: str, title: str, content: bytes, content_type: str, filename: str,
-        report: dict[str, Any] | None,
+        report: dict[str, Any] | None, force: bool = False,
     ) -> None:
         """An already-ingested "at a glance" file, re-downloaded on this
         sync — re-mine it for a schedule only if its content actually
         changed since the hash was last recorded (see `_ingest_file`'s
-        docstring); an unchanged file needs nothing done to it at all."""
-        if existing_meta.get("content_hash") == content_hash:
+        docstring); an unchanged file needs nothing done to it at all.
+
+        `force` (set by `_ingest_file` for a document just now recognized
+        as a glance doc for the first time) skips that unchanged-hash
+        short-circuit -- a file whose content_hash was recorded by an
+        earlier sync that *didn't* know it was a glance doc has never
+        actually had `_apply_schedule_from_doc` run on it, no matter how
+        many times its unchanged bytes get hashed to the same value."""
+        if not force and existing_meta.get("content_hash") == content_hash:
             return
         try:
             text = await asyncio.to_thread(ingestion.extract_text, content, content_type, filename)
@@ -1169,7 +1193,13 @@ class SchoologyProvider(IntegrationProvider):
         `recheck_for_changes` (set for an "at a glance" page — see
         `_ingest_file`'s docstring) compares the page's content against the
         hash recorded on the last sync and, if it changed, re-indexes it
-        the same as a brand-new page; if unchanged, this is a no-op.
+        the same as a brand-new page; if unchanged, this is a no-op --
+        *unless* this page was never actually flagged `is_glance`/
+        `is_recurring_glance` by an earlier sync (one that predates a fix
+        teaching detection to recognize it, or whose own content-sniff
+        missed it), in which case an unchanged hash doesn't mean "already
+        mined," it means "never mined at all" -- see `_ingest_file`'s
+        matching `force` handling for the file-download path.
         Deliberately never stops rechecking based on the page's own
         last-extracted date range going stale — same reasoning as
         `_ingest_file`. Returns `(changed, doc_id)` — `changed` is True iff the document row
@@ -1184,7 +1214,8 @@ class SchoologyProvider(IntegrationProvider):
         )
         content_hash = hashlib.sha256((text or "").encode("utf-8", "ignore")).hexdigest()
         content_changed = bool(existing) and existing_meta.get("content_hash") != content_hash
-        should_recheck = recheck_for_changes and content_changed
+        is_known_glance = bool(existing_meta.get("is_glance") or existing_meta.get("is_recurring_glance"))
+        should_recheck = recheck_for_changes and (content_changed or not is_known_glance)
         doc_id = existing["id"] if existing else str(uuid.uuid4())
         if existing and not was_flagged_stub and not should_recheck:
             return False, doc_id  # already ingested and (when checked) unchanged — nothing to do

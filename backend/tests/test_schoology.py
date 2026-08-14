@@ -3116,6 +3116,80 @@ def test_sync_scraped_materials_detects_glance_by_folder_alone(fake_db, monkeypa
     assert "august 10th-14th" not in (scraper2.known_names_calls[0] or set())
 
 
+def test_glance_doc_predating_folder_detection_still_gets_mined_once_recognized(fake_db, monkeypatch):
+    """The reported real-world bug that survived the folder-detection fix
+    above: a WAG file first ingested *before* that fix existed has
+    `metadata.content_hash` recorded but no `is_glance`/`is_recurring_glance`
+    flag and zero mined calendar_events/assignments -- its own bytes never
+    changed since. Being newly recognized as a glance doc via its folder on
+    a later sync isn't enough on its own: `_ingest_file`'s existing-row path
+    only ever re-mines a glance doc whose content_hash changed, so this
+    would otherwise sit un-mined forever even though every later sync
+    correctly re-derives `extract_schedule=True` for it -- confirmed
+    against a real AP Biology "August 10th-14th" WAG file stuck in exactly
+    this state with 0 calendar_events and 0 assignments days after the
+    folder-detection fix shipped."""
+    provider = SchoologyProvider()
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    glance_item = MaterialLink(
+        name="August 10th-14th", href="/attachment/download/1",
+        kind="item", material_type="File",
+        folder_path="Syllabus and Standards/WAG-Week at a Glance",
+    )
+    wag_bytes = b"wag pdf bytes"
+    # Pre-seed the document row exactly as it would look after an ingest
+    # that predated folder-based detection: stored, hashed, but never
+    # flagged or mined.
+    doc_id = str(uuid.uuid4())
+    fake_db.tables["documents"].append({
+        "id": doc_id, "user_id": USER_ID, "course_id": BIO_COURSE,
+        "external_source": "schoology",
+        "external_id": f"scrape:{SECTION_ID}:august 10th-14th",
+        "storage_path": f"{USER_ID}/{doc_id}/august.pdf",
+        "metadata": {
+            "material_name": "August 10th-14th",
+            "folder": "Syllabus and Standards/WAG-Week at a Glance",
+            "content_hash": hashlib.sha256(wag_bytes).hexdigest(),
+        },
+    })
+
+    scraper = _FakeScraperClient(
+        [glance_item], files={"/attachment/download/1": (wag_bytes, "application/pdf")},
+    )
+
+    def _fake_extract_text(content, mt, fn=""):
+        return (
+            "August 10th-14th\n\n"
+            "| Date | Topic | Homework |\n"
+            "| M, 8/10 | Cell structure | Reading pg 12-14 |\n"
+        )
+
+    monkeypatch.setattr(ingestion, "extract_text", _fake_extract_text)
+
+    from app.llm import claude
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        if "class schedule" not in system:
+            return {"summary": "s", "keywords": [], "doc_type": "other",
+                     "importance": "normal", "concepts": []}
+        return {"days": [{"date": "2026-08-10", "topic": "Cell structure", "assignments": []}]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report = _full_report()
+    asyncio.run(provider._sync_scraped_materials(
+        user_id=USER_ID, course_id=BIO_COURSE, section=_SCRAPE_SECTION,
+        scraper=scraper, report=report,
+    ))
+
+    assert report["errors"] == []
+    docs = {d["metadata"]["material_name"]: d for d in fake_db.tables["documents"]}
+    assert docs["August 10th-14th"]["metadata"].get("is_glance") is True
+    events = fake_db.tables["calendar_events"]
+    assert {e["title"] for e in events} == {"Cell structure"}
+
+
 def test_sync_scraped_materials_flags_unrecognized_link_it_cannot_fetch(fake_db, monkeypatch):
     """A genuine external link Atlas can't classify as Google or an
     assignment, and can't actually fetch/read either (unreachable, blocked,

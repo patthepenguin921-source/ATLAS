@@ -65,6 +65,7 @@ from app.services import ingestion
 from app.services.schedule_extraction import GLANCE_TITLE_RE as _GLANCE_TITLE_RE
 from app.services.schedule_extraction import apply_schedule_from_doc as _apply_schedule_from_doc_shared
 from app.services.schedule_extraction import is_glance as _is_glance
+from app.services.schedule_extraction import is_glance_folder as _is_glance_folder
 from app.services.schedule_extraction import is_recurring_glance as _is_recurring_glance
 from app.services.schedule_extraction import is_recurring_glance_title
 from app.services.schedule_extraction import valid_iso_date
@@ -2061,10 +2062,21 @@ class SchoologyProvider(IntegrationProvider):
         right as a new school year's first real week landed in the very
         same document. The content-hash check in `_ingest_file`/`_ingest_
         external_page` already makes a rewalk of a truly-unchanged page
-        cheap, so there's no real cost to always trying."""
+        cheap, so there's no real cost to always trying.
+
+        Also checks the stored `folder` breadcrumb (`is_glance_folder`), not
+        just the two content-derived flags and the title — an item that was
+        first ingested before its `is_glance`/`is_recurring_glance` flags
+        ever got set correctly (title didn't say so, and the content sniff
+        at the time also missed it) would otherwise stay wrongly marked
+        "done" in `known_names` forever even after a later fix taught
+        ingestion to recognize it; re-deriving straight from `folder` here
+        means such a document gets picked back up on its very next sync
+        with no manual backfill needed."""
         return bool(
             metadata.get("is_glance") or metadata.get("is_recurring_glance")
             or is_recurring_glance_title(metadata.get("material_name"))
+            or _is_glance_folder(metadata.get("folder"))
         )
 
     # ---- material ingestion: always via the login-scraper session ----
@@ -2271,7 +2283,15 @@ class SchoologyProvider(IntegrationProvider):
             "material_name": item.name, "folder": item.folder_path or None,
             "material_type": item.material_type or None, "source_url": item.href,
         }
-        is_glance = bool(_GLANCE_TITLE_RE.search(item.name))
+        # A teacher who names the week's own file just a date range (e.g.
+        # "August 10th-14th", no "at a glance" phrasing in the name itself)
+        # still files it directly inside a folder that says so -- treat
+        # that placement as just as reliable a signal as the title itself
+        # (see `is_glance_folder`), not only a fallback once there's text to
+        # content-sniff: confirmed against a real account where the content
+        # sniff also missed a document exactly like this, so relying on it
+        # alone left the week's whole schedule never mined at all.
+        is_glance = bool(_GLANCE_TITLE_RE.search(item.name)) or _is_glance_folder(item.folder_path)
 
         if is_google_url(item.href):
             ref = parse_google_url(item.href)

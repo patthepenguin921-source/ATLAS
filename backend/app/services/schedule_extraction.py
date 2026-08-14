@@ -182,9 +182,11 @@ async def extract_schedule_from_text(
     sync, same as every other best-effort step in this pipeline."""
     if not settings.has_llm or not text.strip():
         return []
-    excerpt = text.strip()[:12000]
+    stripped = text.strip()
     today = date.today().isoformat()
-    prompt = f"""\
+
+    def _build_prompt(excerpt: str) -> str:
+        return f"""\
 A document titled "{title}" lays out what happens in class on specific days \
 (a "week at a glance" or "unit at a glance" schedule). Today's date is \
 {today}.
@@ -270,20 +272,49 @@ Return JSON with this exact shape:
   ]
 }}
 Omit assignments with no clear title."""
-    try:
-        result = await claude.complete_json(
+
+    async def _call(excerpt: str, max_tokens: int) -> Any:
+        return await claude.complete_json(
             system="You are Atlas's Archivist, precisely extracting a class schedule from a teacher's document.",
-            # A real "Unit ... Assignments List" document (see this module's
-            # docstring) genuinely produced enough days/assignments that
-            # 4000 tokens cut the JSON off mid-array -- an invalid, truncated
-            # response `complete_json`'s own fence-stripping/brace-matching
-            # fallback can't repair (`json.JSONDecodeError: Expecting value`),
-            # losing the *entire* extraction rather than just the tail end of
-            # a long document. 8000 comfortably fits a full unit/semester's
-            # worth of days without materially increasing single-document
-            # cost for the common (much shorter) case.
-            prompt=prompt, max_tokens=8000, temperature=0.0,
+            prompt=_build_prompt(excerpt), max_tokens=max_tokens, temperature=0.0,
         )
+
+    try:
+        # A real "Unit ... Assignments List" document (see this module's
+        # docstring) genuinely produced enough days/assignments that 4000
+        # tokens cut the JSON off mid-array -- an invalid, truncated response
+        # `complete_json`'s own fence-stripping/brace-matching fallback can't
+        # repair (`json.JSONDecodeError: Expecting value`), losing the
+        # *entire* extraction rather than just the tail end of a long
+        # document. 8000 comfortably fits a full unit/semester's worth of
+        # days without materially increasing single-document cost for the
+        # common (much shorter) case.
+        result = await _call(stripped[:12000], 8000)
+    except claude.LLMError as e:
+        # A broad "Unit/Semester at a Glance" document's own excerpt, plus
+        # this call's 8000-token completion budget, can together exceed a
+        # low-TPM model/tier's entire per-minute allowance on their own --
+        # confirmed against a real account: "Limit 12000, Requested 13142"
+        # from Groq, which `complete()`'s own same-provider-retry/fallback
+        # (see app.llm.claude) had already tried and exhausted by the time
+        # this exception reaches here. Retrying the *exact* same request
+        # again would just fail the exact same way, no matter how long the
+        # wait -- but a meaningfully smaller request (a shorter excerpt, a
+        # smaller completion budget) has real headroom to fit under a tight
+        # per-minute cap where the original request didn't, regardless of
+        # which provider ends up serving it. Only worth trying for a rate
+        # limit (429) -- a genuine bad-request/auth/etc. error would just
+        # fail identically again either way.
+        if e.status != 429:
+            if report is not None:
+                report["errors"].append(f"{title}: couldn't extract a schedule from this document ({e})")
+            return []
+        try:
+            result = await _call(stripped[:6000], 4000)
+        except Exception as e2:  # noqa: BLE001
+            if report is not None:
+                report["errors"].append(f"{title}: couldn't extract a schedule from this document ({e2})")
+            return []
     except Exception as e:  # noqa: BLE001
         if report is not None:
             report["errors"].append(f"{title}: couldn't extract a schedule from this document ({e})")

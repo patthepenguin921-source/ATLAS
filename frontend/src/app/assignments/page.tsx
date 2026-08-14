@@ -16,7 +16,13 @@ const CATEGORIES = [
   "homework", "classwork", "quiz", "test", "exam", "project", "essay",
   "lab", "discussion", "presentation", "reading", "participation", "other",
 ];
-const STATUSES = ["not_started", "in_progress", "submitted", "graded", "missing"];
+// "completed" is what a student marking their own work done actually means
+// -- "graded" is reserved for when a real score is on file (PowerSchool/
+// Schoology sync or manual grade entry, both of which set it themselves).
+// "graded" stays in this list, disabled, purely so an already-graded row's
+// dropdown still renders its real current status instead of going blank.
+const STATUSES = ["not_started", "in_progress", "submitted", "completed", "missing", "graded"];
+const SYNC_ONLY_STATUSES = new Set(["graded"]);
 
 // Matches backend/app/services/grading.py's ASSIGNMENT_WEIGHTS -- stored
 // directly in the assignment's existing `weight` column and folded into the
@@ -29,7 +35,7 @@ const WEIGHT_OPTIONS: { value: string; label: string }[] = [
 ];
 
 const statusTone = (s: string) =>
-  s === "graded" || s === "submitted" ? "good" : s === "missing" ? "bad" : "default";
+  s === "graded" || s === "submitted" || s === "completed" ? "good" : s === "missing" ? "bad" : "default";
 
 // 1 (easiest) .. 5 (hardest) -- feeds directly into the at-risk score (see
 // backend/app/services/analytics.py's at_risk_assignments), same as weight.
@@ -47,10 +53,23 @@ const RISK_OVERRIDE_OPTIONS: { value: string; label: string }[] = [
   { value: "extreme", label: "Extreme" },
 ];
 
-// A "completed" assignment is one with a real result -- graded or turned
-// in -- not just past its due date (still-open overdue/missing work stays
-// in Upcoming, where it needs attention, not buried in a history tab).
-const isCompleted = (a: any) => a.status === "graded" || a.status === "submitted";
+// A "completed" assignment is one with a real result -- graded, turned in,
+// or marked done -- not just past its due date (still-open overdue/missing
+// work stays in Upcoming, where it needs attention, not buried in a
+// history tab).
+const isCompleted = (a: any) => a.status === "graded" || a.status === "submitted" || a.status === "completed";
+
+// Matches the `mistakes.mistake_type` free-text convention already used by
+// backend/app/services/mistake_analysis.py's LLM-graded practice quizzes
+// and its PowerSchool-synced-grade auto-logging -- so a manually-logged
+// mistake here shows up in the exact same bucket as those.
+const MISTAKE_TYPES: { value: string; label: string }[] = [
+  { value: "", label: "Not sure" },
+  { value: "conceptual", label: "Conceptual (didn't understand it)" },
+  { value: "careless", label: "Careless (knew it, slipped up)" },
+  { value: "procedural", label: "Procedural (steps/method wrong)" },
+  { value: "knowledge_gap", label: "Knowledge gap (never learned it)" },
+];
 
 // Stable identity for a duplicate pair regardless of which order the
 // backend's detector happens to compare the two assignments in -- used to
@@ -89,6 +108,13 @@ function AssignmentsPageInner() {
   const [gradeEditing, setGradeEditing] = useState(false);
   const [gradeForm, setGradeForm] = useState({ score: "", points_possible: "", letter: "" });
   const [savingGrade, setSavingGrade] = useState(false);
+  // What-did-I-get-wrong-and-why, per assignment -- feeds
+  // backend/app/services/mistake_analysis.py's pattern tracking the same
+  // way a synced low grade or a graded practice quiz already does.
+  const [mistakes, setMistakes] = useState<Record<string, any[]>>({});
+  const [mistakeForm, setMistakeForm] = useState({ description: "", correction: "", mistake_type: "" });
+  const [mistakeAdding, setMistakeAdding] = useState(false);
+  const [savingMistake, setSavingMistake] = useState(false);
   const [detail, setDetail] = useState<{
     description: string; notes: string; weight: string; difficulty: string; points_possible: string;
     risk_override: string; folder_id: string;
@@ -100,14 +126,20 @@ function AssignmentsPageInner() {
 
   async function load() {
     try {
-      const [a, c, r, g] = await Promise.all([
+      const [a, c, r, g, m] = await Promise.all([
         apiGet("/assignments"), apiGet("/courses"), apiGet("/analytics/at-risk?limit=100"),
-        apiGet("/grades?limit=500"),
+        apiGet("/grades?limit=500"), apiGet("/mistakes?limit=500"),
       ]);
       setItems(a);
       setCourses(c);
       setRisk(Object.fromEntries((r ?? []).map((x: any) => [x.id, x])));
       setGrades(Object.fromEntries((g ?? []).filter((x: any) => x.assignment_id).map((x: any) => [x.assignment_id, x])));
+      const byAssignment: Record<string, any[]> = {};
+      for (const x of m ?? []) {
+        if (!x.assignment_id) continue;
+        (byAssignment[x.assignment_id] ??= []).push(x);
+      }
+      setMistakes(byAssignment);
       setLoadError(null);
     } catch (e: any) {
       // Without this, a failed request left `items` at its initial `null`
@@ -185,6 +217,8 @@ function AssignmentsPageInner() {
     }
     setEditing(false);
     setGradeEditing(false);
+    setMistakeAdding(false);
+    setMistakeForm({ description: "", correction: "", mistake_type: "" });
     setDetail({
       description: a.description ?? "", notes: a.notes ?? "",
       weight: a.weight != null ? String(a.weight) : "",
@@ -252,10 +286,45 @@ function AssignmentsPageInner() {
     }
   }
 
+  // Lets a student record what they got wrong on an assignment and why --
+  // stored on the existing `mistakes` table (already fed into the chat
+  // agent's "Unresolved mistakes / patterns" context and, for real synced
+  // grades, auto-logged by mistake_analysis.record_from_synced_grade) so a
+  // grade isn't just a number: it comes with the reasoning behind it for
+  // pattern analysis.
+  async function saveMistake() {
+    if (!selected || !mistakeForm.description.trim()) return;
+    setSavingMistake(true);
+    try {
+      const saved = await apiPost("/mistakes", {
+        assignment_id: selected.id,
+        course_id: selected.course_id,
+        description: mistakeForm.description.trim(),
+        correction: mistakeForm.correction.trim() || null,
+        mistake_type: mistakeForm.mistake_type || null,
+      });
+      setMistakes((prev) => ({ ...prev, [selected.id]: [saved, ...(prev[selected.id] ?? [])] }));
+      setMistakeForm({ description: "", correction: "", mistake_type: "" });
+      setMistakeAdding(false);
+    } finally {
+      setSavingMistake(false);
+    }
+  }
+
+  async function toggleMistakeResolved(m: any) {
+    const saved = await apiPatch(`/mistakes/${m.id}`, { resolved: !m.resolved });
+    setMistakes((prev) => ({
+      ...prev,
+      [m.assignment_id]: (prev[m.assignment_id] ?? []).map((x) => (x.id === m.id ? saved : x)),
+    }));
+  }
+
   async function setStatus(id: string, status: string) {
     await apiPatch(`/assignments/${id}`, {
       status,
-      ...(status === "submitted" ? { submitted_at: new Date().toISOString() } : {}),
+      ...(status === "submitted" || status === "completed"
+        ? { submitted_at: new Date().toISOString() }
+        : {}),
     });
     setSelected((s: any) => (s && s.id === id ? { ...s, status } : s));
     load();
@@ -514,7 +583,11 @@ function AssignmentsPageInner() {
                 value={a.status}
                 onChange={(e) => setStatus(a.id, e.target.value)}
               >
-                {STATUSES.map((s) => <option key={s} value={s}>{s.replace("_", " ")}</option>)}
+                {STATUSES.map((s) => (
+                  <option key={s} value={s} disabled={SYNC_ONLY_STATUSES.has(s) && a.status !== s}>
+                    {s.replace("_", " ")}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
@@ -549,10 +622,14 @@ function AssignmentsPageInner() {
                   <button className="btn-ghost" onClick={() => setEditing(true)}>Edit</button>
                   <button
                     className="btn-primary"
-                    onClick={() => setStatus(selected.id, "graded")}
-                    disabled={selected.status === "graded"}
+                    onClick={() => setStatus(selected.id, "completed")}
+                    disabled={selected.status === "completed" || selected.status === "graded"}
                   >
-                    {selected.status === "graded" ? "Completed" : "Mark complete"}
+                    {selected.status === "graded"
+                      ? "Graded"
+                      : selected.status === "completed"
+                      ? "Completed"
+                      : "Mark complete"}
                   </button>
                 </>
               )}
@@ -698,6 +775,69 @@ function AssignmentsPageInner() {
               ) : (
                 <p className="text-atlas-muted italic text-sm">
                   No grade on file yet{selected.status === "graded" ? " (synced as graded, but no score recorded)" : ""} — enter one if PowerSchool/Schoology hasn't pulled it in.
+                </p>
+              )}
+            </div>
+
+            <div className="border-t border-atlas-border pt-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-xs uppercase text-atlas-muted">What did you get wrong?</div>
+                {!mistakeAdding && (
+                  <button className="text-xs text-atlas-accent hover:underline" onClick={() => setMistakeAdding(true)}>
+                    Log a mistake
+                  </button>
+                )}
+              </div>
+              {mistakeAdding && (
+                <div className="space-y-2 mb-2">
+                  <div>
+                    <label className="text-xs text-atlas-muted">What did you get wrong</label>
+                    <textarea className="input text-sm min-h-[50px]" value={mistakeForm.description}
+                      placeholder="e.g. Mixed up the chain rule with the product rule on #4"
+                      onChange={(e) => setMistakeForm({ ...mistakeForm, description: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-atlas-muted">Why (the fix, for next time)</label>
+                    <textarea className="input text-sm min-h-[50px]" value={mistakeForm.correction}
+                      placeholder="e.g. Forgot to apply the rule to the outer function first — check that first every time"
+                      onChange={(e) => setMistakeForm({ ...mistakeForm, correction: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-atlas-muted">Kind of mistake</label>
+                    <select className="input text-sm" value={mistakeForm.mistake_type}
+                      onChange={(e) => setMistakeForm({ ...mistakeForm, mistake_type: e.target.value })}>
+                      {MISTAKE_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    <button className="btn-primary text-xs py-1.5" onClick={saveMistake}
+                      disabled={savingMistake || !mistakeForm.description.trim()}>
+                      {savingMistake ? "Saving…" : "Save"}
+                    </button>
+                    <button className="btn-ghost text-xs py-1.5" onClick={() => setMistakeAdding(false)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {(mistakes[selected.id] ?? []).length ? (
+                <div className="space-y-2">
+                  {mistakes[selected.id].map((m) => (
+                    <div key={m.id} className={`text-sm border border-atlas-border rounded-md p-2 ${m.resolved ? "opacity-60" : ""}`}>
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="whitespace-pre-wrap">{m.description}</p>
+                        {m.mistake_type && (
+                          <Badge>{MISTAKE_TYPES.find((t) => t.value === m.mistake_type)?.label.split(" (")[0] ?? m.mistake_type}</Badge>
+                        )}
+                      </div>
+                      {m.correction && <p className="text-atlas-muted mt-1 whitespace-pre-wrap">→ {m.correction}</p>}
+                      <button className="text-xs text-atlas-accent hover:underline mt-1" onClick={() => toggleMistakeResolved(m)}>
+                        {m.resolved ? "Mark unresolved" : "Mark resolved"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : !mistakeAdding && (
+                <p className="text-atlas-muted italic text-sm">
+                  Nothing logged yet — recording what you got wrong (and why) helps Atlas spot patterns across assignments.
                 </p>
               )}
             </div>

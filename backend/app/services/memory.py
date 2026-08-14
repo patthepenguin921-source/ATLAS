@@ -40,7 +40,7 @@ async def upcoming_assignments(
         "user_id": eq(user_id),
         "due_date": f"gte.{now.isoformat()}",
         "and": f"(due_date.lte.{horizon.isoformat()})",
-        "status": "not.in.(graded,excused,submitted)",
+        "status": "not.in.(graded,excused,submitted,completed)",
     }
     if course_id:
         filters["course_id"] = eq(course_id)
@@ -159,7 +159,7 @@ async def concepts_needing_review(user_id: str, *, limit: int = 15) -> list[dict
 async def repeated_mistakes(user_id: str, *, limit: int = 15) -> list[dict]:
     return await supabase.select(
         "mistakes",
-        columns="id,description,mistake_type,course_id,concept_id,occurred_at,resolved",
+        columns="id,description,mistake_type,correction,course_id,concept_id,occurred_at,resolved",
         filters={"user_id": eq(user_id), "resolved": eq("false")},
         order="occurred_at.desc",
         limit=limit,
@@ -328,7 +328,8 @@ def render_context(ctx: dict[str, Any]) -> str:
     if ctx.get("repeated_mistakes"):
         lines.append("\n## Unresolved mistakes / patterns")
         for m in ctx["repeated_mistakes"]:
-            lines.append(f"- ({m.get('mistake_type','?')}) {m['description']}")
+            why = f" — why: {m['correction']}" if m.get("correction") else ""
+            lines.append(f"- ({m.get('mistake_type','?')}) {m['description']}{why}")
 
     if ctx.get("documents"):
         lines.append("\n## Documents you have on file (search these before answering from general knowledge)")

@@ -40,8 +40,10 @@ _ASSIGNMENT_CATEGORIES = (
 # Statuses a student would plausibly declare themselves via chat. Deliberately
 # excludes 'graded' (only a real grade sync produces that) and 'excused'
 # (a teacher's call, not the student's) -- update_assignment_status never
-# guesses at either.
-_ASSIGNMENT_STATUSES = ("not_started", "in_progress", "submitted", "missing", "late")
+# guesses at either. 'completed' is the honest self-declared "I did the
+# work" status -- distinct from 'graded', which means a real score is on
+# file.
+_ASSIGNMENT_STATUSES = ("not_started", "in_progress", "submitted", "completed", "missing", "late")
 
 TOOL_SPECS: list[dict[str, Any]] = [
     {
@@ -523,7 +525,7 @@ async def _update_assignment_status(user_id: str, args: dict[str, Any]) -> dict[
     if err:
         return err
     patch: dict[str, Any] = {"status": status}
-    if status == "submitted":
+    if status in ("submitted", "completed"):
         patch["submitted_at"] = datetime.now(timezone.utc).isoformat()
     await supabase.update("assignments", patch, filters={"user_id": eq(user_id), "id": eq(row["id"])})
     return {"status": "done", "message": f'Marked "{row["title"]}" as {status.replace("_", " ")}.'}

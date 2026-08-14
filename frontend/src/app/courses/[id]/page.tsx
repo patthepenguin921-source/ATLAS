@@ -16,7 +16,12 @@ const ASSIGNMENT_CATEGORIES = [
   "homework", "classwork", "quiz", "test", "exam", "project", "essay",
   "lab", "discussion", "presentation", "reading", "participation", "other",
 ];
-const ASSIGNMENT_STATUSES = ["not_started", "in_progress", "submitted", "graded", "missing"];
+// "graded" stays in this list, disabled below, purely so an already-graded
+// row's dropdown still renders its real status -- only a real score
+// (PowerSchool/Schoology sync or manual grade entry) should ever set it;
+// "completed" is what a student marking their own work done means.
+const ASSIGNMENT_STATUSES = ["not_started", "in_progress", "submitted", "completed", "missing", "graded"];
+const SYNC_ONLY_STATUSES = new Set(["graded"]);
 const ASSIGNMENT_WEIGHT_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "Not set" },
   { value: "0.3", label: "Minor (30%)" },
@@ -56,7 +61,8 @@ const SEMESTER_LABEL: Record<string, string> = {
 };
 
 const assignmentStatusTone = (s: string) =>
-  s === "graded" || s === "submitted" ? "good" : s === "missing" || s === "late" ? "bad" : "default";
+  s === "graded" || s === "submitted" || s === "completed" ? "good"
+    : s === "missing" || s === "late" ? "bad" : "default";
 
 interface EditForm {
   name: string;
@@ -286,7 +292,9 @@ export default function CourseDetailPage() {
       risk_override: assignDetail.risk_override || null,
       folder_id: assignDetail.folder_id || null,
     };
-    if (assignDetail.status === "submitted" && selectedAssignment.status !== "submitted") {
+    const nowDone = assignDetail.status === "submitted" || assignDetail.status === "completed";
+    const wasDone = selectedAssignment.status === "submitted" || selectedAssignment.status === "completed";
+    if (nowDone && !wasDone) {
       patch.submitted_at = new Date().toISOString();
     }
     await apiPatch(`/assignments/${selectedAssignment.id}`, patch);
@@ -974,7 +982,11 @@ export default function CourseDetailPage() {
                     <label className="text-xs text-atlas-muted">Status</label>
                     <select className="input text-sm" value={assignDetail.status}
                       onChange={(e) => setAssignDetail({ ...assignDetail, status: e.target.value })}>
-                      {ASSIGNMENT_STATUSES.map((s) => <option key={s} value={s}>{s.replace("_", " ")}</option>)}
+                      {ASSIGNMENT_STATUSES.map((s) => (
+                        <option key={s} value={s} disabled={SYNC_ONLY_STATUSES.has(s) && assignDetail.status !== s}>
+                          {s.replace("_", " ")}
+                        </option>
+                      ))}
                     </select>
                   </div>
                   <div>

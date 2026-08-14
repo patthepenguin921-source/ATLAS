@@ -190,10 +190,17 @@ class PowerSchoolProvider(IntegrationProvider):
         #    filled (see step 2) the first time this row got linked.
         row_id = await self._linked_course_id(user_id, cls.ccid)
         if row_id:
-            await supabase.update(
-                "courses", {"current_grade": cls.grade_percent, "current_letter": cls.grade_letter},
-                filters={"id": eq(row_id)},
-            )
+            # Only overwrite with PowerSchool's own scraped summary when it
+            # actually has one -- writing None here would otherwise clobber
+            # a perfectly good `current_grade` the `grades` rollup trigger
+            # (or a manual grade entry) just computed from real per-
+            # assignment data, every single sync, purely because this
+            # particular class's page didn't expose an overall percentage.
+            if cls.grade_percent is not None:
+                await supabase.update(
+                    "courses", {"current_grade": cls.grade_percent, "current_letter": cls.grade_letter},
+                    filters={"id": eq(row_id)},
+                )
             return row_id
 
         # 2) An existing course (any source) whose name matches -- link,
@@ -208,10 +215,13 @@ class PowerSchoolProvider(IntegrationProvider):
         for c in all_courses or []:
             if course_mapping.names_match(cls.name, c.get("name") or ""):
                 meta = {**(c.get("metadata") or {}), "powerschool_ccid": cls.ccid, "teacher": cls.teacher}
-                patch: dict[str, Any] = {
-                    "metadata": meta, "current_grade": cls.grade_percent,
-                    "current_letter": cls.grade_letter,
-                }
+                patch: dict[str, Any] = {"metadata": meta}
+                # Same rule as the linked-course branch above: don't blank
+                # out an existing (rollup- or manually-computed) grade with
+                # None just because this scrape didn't find a summary.
+                if cls.grade_percent is not None:
+                    patch["current_grade"] = cls.grade_percent
+                    patch["current_letter"] = cls.grade_letter
                 # Fill in scheduling details another provider didn't have, if empty.
                 if cls.room and not c.get("room"):
                     patch["room"] = cls.room
@@ -466,6 +476,20 @@ class PowerSchoolProvider(IntegrationProvider):
                             "percentage": a.percentage,
                         })
                         grades_count += 1
+                        if matched_id:
+                            # A brand-new row already got `map_status(a)`
+                            # (which resolves to "graded" here, since a
+                            # real score/percentage exists) via the
+                            # `upsert_assignment` call above. A *matched*
+                            # existing row -- e.g. one the student marked
+                            # "completed" themselves, or synced in from
+                            # Schoology -- never goes through that, so it
+                            # needs the same real-grade-means-graded rule
+                            # applied explicitly here.
+                            await supabase.update(
+                                "assignments", {"status": "graded"},
+                                filters={"id": eq(assignment_id)},
+                            )
                         if grade["changed"]:
                             # Best-effort -- a mistake-tracking hiccup must
                             # never sink the sync itself.
@@ -478,7 +502,7 @@ class PowerSchoolProvider(IntegrationProvider):
                             except Exception:  # noqa: BLE001
                                 pass
 
-                if assignments:
+                if assignments and cls.grade_percent is not None:
                     # Each `upsert_grade` above fires `trg_grades_rollup`
                     # (see 0023_assignment_weight_grade_rollup.sql), which
                     # recomputes `current_grade`/`current_letter` as a
@@ -490,7 +514,11 @@ class PowerSchoolProvider(IntegrationProvider):
                     # course's own scraped grade is the authoritative one
                     # to show -- it should be pulled, not recomputed --
                     # so write it again here, last, to win over whatever
-                    # the trigger just overwrote it with.
+                    # the trigger just overwrote it with. But only when
+                    # PowerSchool actually scraped a percentage for this
+                    # class: writing None here otherwise would blank out
+                    # the trigger's real, rollup-computed average -- the
+                    # exact "grade box says --" bug this guard prevents.
                     try:
                         await supabase.update(
                             "courses",

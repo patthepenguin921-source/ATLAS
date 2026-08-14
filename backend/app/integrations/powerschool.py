@@ -478,6 +478,28 @@ class PowerSchoolProvider(IntegrationProvider):
                             except Exception:  # noqa: BLE001
                                 pass
 
+                if assignments:
+                    # Each `upsert_grade` above fires `trg_grades_rollup`
+                    # (see 0023_assignment_weight_grade_rollup.sql), which
+                    # recomputes `current_grade`/`current_letter` as a
+                    # simple per-assignment average -- a materially
+                    # different (and less accurate: no category weighting,
+                    # no extra credit/exemptions) number than the one
+                    # PowerSchool itself already computed server-side and
+                    # `_resolve_course_id` wrote before this loop ran. The
+                    # course's own scraped grade is the authoritative one
+                    # to show -- it should be pulled, not recomputed --
+                    # so write it again here, last, to win over whatever
+                    # the trigger just overwrote it with.
+                    try:
+                        await supabase.update(
+                            "courses",
+                            {"current_grade": cls.grade_percent, "current_letter": cls.grade_letter},
+                            filters={"id": eq(course_id)},
+                        )
+                    except Exception:  # noqa: BLE001 — a rollup-override hiccup must never sink the sync
+                        pass
+
             return {
                 "courses": courses, "assignments": assignments_count,
                 "grades": grades_count, "excluded": excluded, "errors": errors,

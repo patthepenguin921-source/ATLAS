@@ -138,6 +138,33 @@ def test_sync_creates_a_new_course_when_nothing_matches(fake_db, monkeypatch):
     assert c["course_level"] == "regular"
 
 
+def test_sync_reasserts_the_scraped_course_grade_after_writing_assignment_grades(fake_db, monkeypatch):
+    """`upsert_grade` fires a DB trigger (trg_grades_rollup) that recomputes
+    `current_grade`/`current_letter` as a simple per-assignment average -- a
+    materially different, less accurate number than the one PowerSchool
+    itself already computed server-side (its own category weighting, extra
+    credit, exemptions) and scraped straight off the course-list page. The
+    course's own scraped grade should be pulled, not recomputed, so it must
+    still be the value on the course row after a sync that wrote grades,
+    not whatever a naive per-assignment average landed on."""
+    provider = PowerSchoolProvider()
+    report = _sync(provider, [
+        _cls("100", "Algebra II", grade_percent=91.0, grade_letter="A-",
+             detail_href="/guardian/scores.html?frn=1"),
+    ], monkeypatch, assignments={
+        "/guardian/scores.html?frn=1": [
+            PSAssignment(name="Quiz 1", category="Quiz", due_date="2026-08-17",
+                         score=50.0, points_possible=100.0, percentage=50.0),
+        ],
+    })
+
+    assert report["courses"] == 1
+    c = fake_db.tables["courses"][0]
+    # Still PowerSchool's own 91.0/"A-" -- not some average pulled down by
+    # the one low assignment grade this sync just wrote.
+    assert c["current_grade"] == 91.0 and c["current_letter"] == "A-"
+
+
 def test_sync_links_onto_an_existing_course_by_name_instead_of_duplicating(fake_db, monkeypatch):
     """The reported bug: a course a Schoology/manual sync already created
     (with its own documents) got a second, empty PowerSchool-owned row

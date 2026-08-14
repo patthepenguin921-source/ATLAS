@@ -400,6 +400,16 @@ export default function CourseDetailPage() {
     .sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
   const otherEvents = events.filter((ev) => ev.kind !== "class");
 
+  // PowerSchool never owns an assignment on its own -- see
+  // app.integrations.powerschool's module docstring: a scraped assignment
+  // either attaches its grade to an existing (Schoology/manual) row, or, if
+  // nothing correlates, gets its own PowerSchool-owned row purely so that
+  // grade has something to attach to. That fallback row isn't a real
+  // assignment the student is tracking, so the Assignments list hides it --
+  // its grade still shows in the Grades section below via `assignmentsById`.
+  const visibleAssignments = assignments.filter((a) => a.external_source !== "powerschool");
+  const assignmentsById = Object.fromEntries(assignments.map((a) => [a.id, a]));
+
   return (
     <AppShell
       title={course.name}
@@ -724,9 +734,9 @@ export default function CourseDetailPage() {
               <button className="btn-primary text-sm">Save assignment</button>
             </form>
           )}
-          {assignments.length ? (
+          {visibleAssignments.length ? (
             <div className="space-y-2">
-              {assignments.map((a) => (
+              {visibleAssignments.map((a) => (
                 <div
                   key={a.id}
                   className="card card-hover cursor-pointer flex items-center justify-between gap-4"
@@ -758,7 +768,10 @@ export default function CourseDetailPage() {
                   onClick={g.assignment_id ? () => router.push(`/assignments?id=${g.assignment_id}`) : undefined}
                 >
                   <div className="min-w-0">
-                    <div className="text-sm font-medium">
+                    <div className="text-sm font-medium truncate">
+                      {assignmentsById[g.assignment_id]?.title ?? "Untitled assignment"}
+                    </div>
+                    <div className="text-xs text-atlas-muted">
                       {g.percentage != null ? `${g.percentage}%` : "—"} {g.letter ? `(${g.letter})` : ""}
                     </div>
                     {g.teacher_comment && (

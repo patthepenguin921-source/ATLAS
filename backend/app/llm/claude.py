@@ -73,6 +73,31 @@ class LLMError(RuntimeError):
         self.retry_after = retry_after
 
 
+def _groq_error_status(response: httpx.Response) -> int:
+    """Groq's real HTTP status, normalized so every rate-limit case looks
+    like the 429 the rest of this module already knows how to handle
+    (`_should_fallback`/`_should_retry_same_provider`). A requests-per-minute
+    limit comes back as an ordinary 429, but a *tokens*-per-minute limit
+    (a single large document -- an "at a glance" schedule extraction with an
+    8000-token completion budget is a real example -- pushing this minute's
+    usage over the organization's shared TPM cap) comes back as a 413
+    ("Payload Too Large") instead, even though its body is the exact same
+    kind of transient, short-lived rate limit (`"type": "tokens", "code":
+    "rate_limit_exceeded"`). Left unnormalized, that 413 skipped the
+    fallback-to-Gemini/retry-after-a-wait machinery entirely and just failed
+    outright -- confirmed against a real account's sync, where a schedule
+    re-extraction failed this way even though a free fallback provider was
+    configured and would very likely have succeeded."""
+    if response.status_code == 413:
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if (body.get("error") or {}).get("code") == "rate_limit_exceeded":
+            return 429
+    return response.status_code
+
+
 def _retry_after_seconds(response: httpx.Response) -> float | None:
     """The provider's own wait hint for a 429, so a short one can be waited
     out and retried automatically (see `_should_retry_same_provider`)
@@ -88,7 +113,18 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
         except ValueError:
             pass
     match = re.search(r"try again in ([\d.]+)\s*s", response.text, re.IGNORECASE)
-    return float(match.group(1)) if match else None
+    if match:
+        return float(match.group(1))
+    # Groq's tokens-per-minute rate limit (see `_groq_error_status`) gives
+    # no explicit wait hint at all -- its body only ever says "please
+    # reduce your message size and try again", never a concrete number of
+    # seconds -- but it's still a short, continuously-refilling bucket, not
+    # a real outage, so a brief fixed wait is still worth trying before
+    # giving up when there's no fallback provider configured to use
+    # instead.
+    if _groq_error_status(response) == 429 and response.status_code == 413:
+        return 3.0
+    return None
 
 
 def _get_anthropic_client() -> AsyncAnthropic:
@@ -235,7 +271,9 @@ async def _complete_groq(
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise LLMError(r.status_code, r.text, retry_after=_retry_after_seconds(r)) from exc
+            raise LLMError(
+                _groq_error_status(r), r.text, retry_after=_retry_after_seconds(r)
+            ) from exc
         return r.json()["choices"][0]["message"]["content"].strip()
 
 

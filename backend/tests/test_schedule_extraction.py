@@ -314,6 +314,91 @@ def test_apply_schedule_from_doc_is_a_noop_without_llm(fake_db, monkeypatch):
     assert fake_db.tables["assignments"] == []
 
 
+def test_extract_schedule_from_text_retries_smaller_after_groq_tpm_429(monkeypatch):
+    """The reported real-world failure: a broad "Semester at a Glance"
+    document's own excerpt plus this call's 8000-token completion budget
+    together exceeded a low-TPM Groq model's entire per-minute allowance
+    ("Limit 12000, Requested 13142"), and `complete()`'s own same-provider-
+    retry/fallback had already been exhausted by the time the error reaches
+    here -- retrying the identical request again would just fail the same
+    way forever. A meaningfully smaller request (shorter excerpt, smaller
+    completion budget) has real headroom to fit under the cap instead."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    calls: list[int] = []
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        calls.append(max_tokens)
+        if len(calls) == 1:
+            raise claude.LLMError(429, "Request too large ... Limit 12000, Requested 13142")
+        return {"days": [{"date": "2026-08-10", "topic": "Cell structure", "assignments": []}]}
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report: dict[str, Any] = {"errors": []}
+    days = asyncio.run(schedule_extraction.extract_schedule_from_text(
+        "AP Semester at a Glance", "some long document text " * 2000, report=report,
+    ))
+
+    assert calls == [8000, 4000]  # second attempt asked for a smaller completion budget
+    assert report["errors"] == []
+    assert days == [{"date": "2026-08-10", "topic": "Cell structure", "assignments": []}]
+
+
+def test_extract_schedule_from_text_reports_error_when_smaller_retry_also_fails(monkeypatch):
+    """If even the smaller retry still hits the same rate limit, this must
+    still report a genuine failure (not silently return the same empty list
+    a document with no real schedule would also produce)."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        raise claude.LLMError(429, "Request too large ... Limit 12000, Requested 13142")
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report: dict[str, Any] = {"errors": []}
+    days = asyncio.run(schedule_extraction.extract_schedule_from_text(
+        "AP Semester at a Glance", "some long document text " * 2000, report=report,
+    ))
+
+    assert days == []
+    assert len(report["errors"]) == 1
+    assert "AP Semester at a Glance" in report["errors"][0]
+
+
+def test_extract_schedule_from_text_does_not_retry_a_non_rate_limit_error(monkeypatch):
+    """A genuine non-rate-limit LLM error (bad request, auth, etc.) would
+    fail identically on a smaller request too -- must report immediately
+    rather than waste a second call."""
+    from app.config import settings
+    from app.llm import claude
+
+    monkeypatch.setattr(settings, "groq_api_key", "fake-key")  # settings.has_llm -> True
+
+    calls: list[int] = []
+
+    async def _fake_complete_json(*, system, prompt, max_tokens, temperature=0.0, fast=False, model=None):
+        calls.append(max_tokens)
+        raise claude.LLMError(400, "bad request")
+
+    monkeypatch.setattr(claude, "complete_json", _fake_complete_json)
+
+    report: dict[str, Any] = {"errors": []}
+    days = asyncio.run(schedule_extraction.extract_schedule_from_text(
+        "Week at a Glance", "some document text", report=report,
+    ))
+
+    assert days == []
+    assert calls == [8000]  # no second attempt
+    assert len(report["errors"]) == 1
+
+
 def test_apply_schedule_from_doc_updates_due_date_in_place_on_resync(fake_db, monkeypatch):
     """A re-parse of the same document that only changed an assignment's due
     date must update that same row in place -- not create a second,

@@ -255,6 +255,113 @@ def test_sync_merges_biology_prep_lab_and_ap_onto_existing_schoology_group_rows(
     assert ap["linked_course_id"] == s1_id  # still linked to the same root
 
 
+def test_sync_attaches_grade_to_an_existing_assignment_instead_of_duplicating(fake_db, monkeypatch):
+    """Assignments are meant to come from Schoology (or manual entry) --
+    when a PowerSchool-scraped assignment looks like the same real
+    assignment as one that already exists in the course, PowerSchool must
+    attach its grade to that existing row instead of creating a redundant
+    second one under its own external_id."""
+    course_id = str(uuid.uuid4())
+    fake_db.tables["courses"].append({
+        "id": course_id, "user_id": USER_ID, "name": "AP Calculus AB",
+        "external_source": "powerschool", "external_id": "8817372", "metadata": {},
+        "room": None, "period": None, "teacher_id": None,
+    })
+    existing_assignment_id = str(uuid.uuid4())
+    fake_db.tables["assignments"].append({
+        "id": existing_assignment_id, "user_id": USER_ID, "course_id": course_id,
+        "title": "U1: CK 27 - 29", "due_date": "2026-08-17", "external_source": "schoology",
+    })
+
+    provider = PowerSchoolProvider()
+    report = _sync(provider, [
+        _cls("8817372", "AP Calculus AB", detail_href="/guardian/scores.html?frn=1"),
+    ], monkeypatch, assignments={
+        "/guardian/scores.html?frn=1": [
+            PSAssignment(name="U1: CK 27 - 29", category="Homework", due_date="2026-08-17",
+                         score=100.0, points_possible=100.0, percentage=100.0),
+        ],
+    })
+
+    assert report["courses"] == 1
+    assert report["assignments"] == 1
+    # No new assignment row -- the grade landed on the existing (Schoology) one.
+    assert len(fake_db.tables["assignments"]) == 1
+    assert fake_db.tables["assignments"][0]["id"] == existing_assignment_id
+    grades = fake_db.tables["grades"]
+    assert len(grades) == 1
+    assert grades[0]["assignment_id"] == existing_assignment_id
+    assert grades[0]["score"] == 100.0
+
+
+def test_sync_creates_a_new_assignment_when_nothing_correlates(fake_db, monkeypatch):
+    """A course with no matching existing assignment (no Schoology
+    connection, nothing entered manually) still gets a real PowerSchool-
+    owned assignment + grade created, same as before this correlation
+    behavior existed."""
+    course_id = str(uuid.uuid4())
+    fake_db.tables["courses"].append({
+        "id": course_id, "user_id": USER_ID, "name": "AP Calculus AB",
+        "external_source": "powerschool", "external_id": "8817372", "metadata": {},
+        "room": None, "period": None, "teacher_id": None,
+    })
+
+    provider = PowerSchoolProvider()
+    report = _sync(provider, [
+        _cls("8817372", "AP Calculus AB", detail_href="/guardian/scores.html?frn=1"),
+    ], monkeypatch, assignments={
+        "/guardian/scores.html?frn=1": [
+            PSAssignment(name="U1: CK 27 - 29", category="Homework", due_date="2026-08-17",
+                         score=100.0, points_possible=100.0, percentage=100.0),
+        ],
+    })
+
+    assert report["courses"] == 1
+    assert report["assignments"] == 1
+    assert len(fake_db.tables["assignments"]) == 1
+    new_row = fake_db.tables["assignments"][0]
+    assert new_row["external_source"] == "powerschool"
+    assert fake_db.tables["grades"][0]["assignment_id"] == new_row["id"]
+
+
+def test_sync_does_not_match_onto_its_own_previously_synced_assignment(fake_db, monkeypatch):
+    """A PowerSchool-owned row from a prior sync must never be treated as a
+    correlation candidate for a later sync of that same item -- it's
+    already found (and its due_date/category/status kept current) via
+    `upsert_assignment`'s own external_id lookup; matching onto it here
+    instead would silently stop that update from ever running again."""
+    course_id = str(uuid.uuid4())
+    fake_db.tables["courses"].append({
+        "id": course_id, "user_id": USER_ID, "name": "AP Calculus AB",
+        "external_source": "powerschool", "external_id": "8817372", "metadata": {},
+        "room": None, "period": None, "teacher_id": None,
+    })
+    prior_powerschool_id = str(uuid.uuid4())
+    fake_db.tables["assignments"].append({
+        "id": prior_powerschool_id, "user_id": USER_ID, "course_id": course_id,
+        "title": "U1: CK 27 - 29", "due_date": "2026-08-17", "external_source": "powerschool",
+        "external_id": "8817372:U1: CK 27 - 29:2026-08-17",
+    })
+
+    provider = PowerSchoolProvider()
+    report = _sync(provider, [
+        _cls("8817372", "AP Calculus AB", detail_href="/guardian/scores.html?frn=1"),
+    ], monkeypatch, assignments={
+        "/guardian/scores.html?frn=1": [
+            PSAssignment(name="U1: CK 27 - 29", category="Homework", due_date="2026-08-17",
+                         score=100.0, points_possible=100.0, percentage=100.0),
+        ],
+    })
+
+    assert report["courses"] == 1
+    assert report["assignments"] == 1
+    # Still just the one (reused, not duplicated) row -- upsert_assignment's
+    # own external_id match found it, not the correlation search.
+    assert len(fake_db.tables["assignments"]) == 1
+    assert fake_db.tables["assignments"][0]["id"] == prior_powerschool_id
+    assert fake_db.tables["grades"][0]["assignment_id"] == prior_powerschool_id
+
+
 def test_sync_prefers_a_manually_set_powerschool_url_over_the_scraped_detail_href(fake_db, monkeypatch):
     """A course's `powerschool_url` (pasted by the student in Settings/the
     course page) always wins over whatever detail_href the sync itself

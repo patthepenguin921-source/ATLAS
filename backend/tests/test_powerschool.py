@@ -734,6 +734,63 @@ def test_fetch_assignments_reads_every_per_category_table():
     asyncio.run(run())
 
 
+def test_fetch_assignments_handles_a_colspan_header_before_the_score_column():
+    """Regression: a real account's Angular-rendered scoreTable (reached via
+    the browser-render fallback -- see RenderedAssignmentsFetcher) groups
+    several flag columns (Missing/Late/Exempt/...) under a single
+    `colspan="7"` "Flags" header cell, while each *data* row still renders
+    one <td> per flag. Counting header <th>/<td> tags one-by-one (ignoring
+    colspan) put every field after that colspan several positions earlier
+    than its real data cell -- Score silently read whatever flag cell
+    happened to land at that position instead, which parses as neither a
+    fraction nor a percentage, so every assignment came back with score and
+    percentage both None even though the real page showed real scores."""
+    html = """
+    <html><body>
+    <table id="scoreTable">
+      <tr>
+        <th>Due Date</th><th>Category</th><th>Assignment</th>
+        <th colspan="7">Flags</th>
+        <th>Score</th><th>Grade</th>
+      </tr>
+      <tr>
+        <td>08/17/2026</td><td>Minor</td><td>U1: CK 27 - 29</td>
+        <td>collected</td><td></td><td></td><td></td><td></td><td></td><td></td>
+        <td>100/100</td><td>100</td>
+      </tr>
+      <tr>
+        <td>08/13/2026</td><td>Minor</td><td>U1: Quiz - Limits and Continuity</td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+        <td>81/100</td><td>81</td>
+      </tr>
+    </table>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        client = PowerSchoolClient(
+            "https://fake.powerschool.com", "student1", "correct-horse", transport=transport
+        )
+        try:
+            assignments = await client.fetch_assignments("/guardian/scores.html?frn=1")
+            by_name = {a.name: a for a in assignments}
+            assert by_name["U1: CK 27 - 29"].score == 100.0
+            assert by_name["U1: CK 27 - 29"].points_possible == 100.0
+            assert by_name["U1: CK 27 - 29"].percentage == 100.0
+            quiz = by_name["U1: Quiz - Limits and Continuity"]
+            assert quiz.score == 81.0
+            assert quiz.points_possible == 100.0
+            assert quiz.percentage == 81.0
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_fetch_assignments_ignores_a_forms_widget_with_no_grade_shaped_data():
     """Regression: a real account's scores.html page (early in a term, no
     assignments posted yet for any course) had no real assignment table at

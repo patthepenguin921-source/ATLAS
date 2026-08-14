@@ -126,6 +126,21 @@ def test_missing_due_date_on_either_side_does_not_block_a_match(monkeypatch):
     assert len(asyncio.run(dedupe.find_possible_duplicates(USER_ID))) == 1
 
 
+def test_matches_a_bare_date_against_a_timezone_aware_timestamp(monkeypatch):
+    """Regression: PowerSchool's scraped due dates are bare, timezone-less
+    dates ("2026-08-17") while Schoology's are timezone-aware timestamps
+    ("...T00:00:00Z") -- comparing one of each used to raise TypeError
+    ("can't subtract offset-naive and offset-aware datetimes") instead of
+    just comparing the two dates, which would have crashed every single
+    PowerSchoolProvider.sync() call that reached find_matching_assignment
+    with any course that had a fetched assignment at all."""
+    a = _assignment(title="Lab Report 3", due_date="2026-03-10")
+    b = _assignment(title="Lab Report 3", due_date="2026-03-10T00:00:00Z", id=str(uuid.uuid4()))
+    _install(monkeypatch, assignments=[a, b])
+
+    assert len(asyncio.run(dedupe.find_possible_duplicates(USER_ID))) == 1
+
+
 def test_excludes_pairs_already_dismissed(monkeypatch):
     a = _assignment(title="Lab Report 3")
     b = _assignment(title="Lab Report #3", id=str(uuid.uuid4()))
@@ -150,6 +165,39 @@ def test_suggests_keeping_the_row_with_more_filled_in_detail(monkeypatch):
 
     assert result[0]["suggested_keep_id"] == detailed["id"]
     assert result[0]["suggested_discard_id"] == sparse["id"]
+
+
+# ---- find_matching_assignment --------------------------------------------------
+
+def test_find_matching_assignment_returns_the_matching_existing_row():
+    candidate = {"course_id": COURSE_A, "title": "U1: CK 27 - 29", "due_date": "2026-08-17"}
+    existing = _assignment(title="U1: CK 27 - 29", due_date="2026-08-17T00:00:00Z")
+
+    assert dedupe.find_matching_assignment(candidate, [existing]) == existing["id"]
+
+
+def test_find_matching_assignment_returns_none_when_nothing_correlates():
+    candidate = {"course_id": COURSE_A, "title": "Some New Thing", "due_date": "2026-08-17"}
+    existing = _assignment(title="Completely Different Assignment", due_date="2026-08-17T00:00:00Z")
+
+    assert dedupe.find_matching_assignment(candidate, [existing]) is None
+
+
+def test_find_matching_assignment_ignores_a_different_course():
+    candidate = {"course_id": COURSE_A, "title": "U1: CK 27 - 29", "due_date": "2026-08-17"}
+    existing = _assignment(course_id=COURSE_B, title="U1: CK 27 - 29", due_date="2026-08-17T00:00:00Z")
+
+    assert dedupe.find_matching_assignment(candidate, [existing]) is None
+
+
+def test_find_matching_assignment_picks_the_best_of_several_candidates():
+    candidate = {"course_id": COURSE_A, "title": "U1: CK 27 - 29", "due_date": "2026-08-17"}
+    close_but_not_exact = _assignment(title="U1: CK 27 - 30", due_date="2026-08-17T00:00:00Z")
+    exact = _assignment(title="U1: CK 27 - 29", due_date="2026-08-17T00:00:00Z")
+
+    result = dedupe.find_matching_assignment(candidate, [close_but_not_exact, exact])
+
+    assert result == exact["id"]
 
 
 # ---- merge_assignments --------------------------------------------------------
